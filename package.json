@@ -1,0 +1,43 @@
+{
+  "name": "vps-ai-operator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26.13.1 <27"
+  },
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --import tsx scripts/dev.ts",
+    "controller": "node --env-file-if-exists=.env --import tsx src/controller.ts",
+    "worker": "node --env-file-if-exists=.env --import tsx src/worker.ts",
+    "init": "node --env-file-if-exists=.env --import tsx src/cli.ts init",
+    "auth": "node --env-file-if-exists=.env --import tsx src/cli.ts auth",
+    "brain:export": "node --env-file-if-exists=.env --import tsx src/cli.ts export",
+    "brain:restore": "node --env-file-if-exists=.env --import tsx src/cli.ts restore",
+    "smoke:live": "node --env-file-if-exists=.env --import tsx scripts/live-smoke.ts",
+    "protocol:generate": "node --import tsx scripts/protocol.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && vite build",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:browser": "playwright test",
+    "check": "npm run test && npm run build && npm run test:browser"
+  },
+  "dependencies": {
+    "@openai/codex": "0.166.0",
+    "fastify": "5.12.8",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "node": "26.13.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}
