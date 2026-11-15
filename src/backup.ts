@@ -1,5 +1,5 @@
 import { backup, DatabaseSync } from 'node:sqlite';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, lstatSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -8,6 +8,11 @@ import { acquireLock } from './lock.ts';
 import { rebaseNativeState } from './runtime/restore.ts';
 
 function inside(root:string,entry:string){const rel=relative(root,entry);return !rel.startsWith('..')&&!isAbsolute(rel);}
+function verifyDirectory(directory:string){
+  let info;
+  try{info=lstatSync(directory);}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw error;}
+  if(!info.isDirectory()||info.isSymbolicLink()||realpathSync(directory)!==resolve(directory))throw new Error('Snapshot state directories must be real directories without symlinks');
+}
 const snapshotManifest=z.object({format:z.literal(1),createdAt:z.string().datetime(),sourceStateDir:z.string().refine(isAbsolute,'Snapshot state directory must be absolute'),credentialsIncluded:z.literal(false)});
 function verifyDatabase(file:string){
   const db=new DatabaseSync(file,{readOnly:true});
@@ -68,6 +73,7 @@ export async function restoreBrain(config:Config,source:string){
       mkdirSync(join(stage,dir),{mode:0o700});
       if(existsSync(join(root,dir)))cpSync(join(root,dir),join(stage,dir),{recursive:true,verbatimSymlinks:true});
     }
+    for(const dir of ['skills','skills/staging','skills/packages','skills/active','runtime','workspaces','artifacts'])verifyDirectory(join(stage,dir));
     if(existsSync(join(root,'worker/journal.sqlite'))){mkdirSync(join(stage,'worker'),{mode:0o700});await sqliteSnapshot(join(root,'worker/journal.sqlite'),join(stage,'worker/journal.sqlite'));verifyDatabase(join(stage,'worker/journal.sqlite'));}
     // Package locations are authoritative files; rewrite only indexed paths, not sourced memories.
     const db=new DatabaseSync(join(stage,'operator.sqlite'));
@@ -77,7 +83,9 @@ export async function restoreBrain(config:Config,source:string){
         if(!inside(manifest.sourceStateDir,row.path))throw new Error('Snapshot contains a skill path outside its state directory');
         const rel=relative(manifest.sourceStateDir,row.path);
         if(!rel.startsWith('skills/'))throw new Error('Snapshot skill package is outside the skill directory');
-        if(!existsSync(join(stage,rel,'SKILL.md'))||lstatSync(join(stage,rel)).isSymbolicLink())throw new Error('Snapshot skill package is missing or is a symlink');
+        const packagePath=join(stage,rel),instructions=join(packagePath,'SKILL.md');
+        if(!existsSync(instructions)||!lstatSync(instructions).isFile()||realpathSync(instructions)!==instructions)throw new Error('Snapshot skill package is missing or is a symlink');
+        verifyDirectory(packagePath);
         db.prepare('UPDATE skill_versions SET path=? WHERE name=? AND version=?').run(join(config.stateDir,rel),row.name,row.version);
       }
       db.exec('DELETE FROM sessions;');

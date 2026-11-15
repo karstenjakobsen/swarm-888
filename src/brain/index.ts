@@ -49,7 +49,7 @@ export class Brain {
   memoryWrite(input:unknown){return this.memory.write(input);}
   skillList(){return this.skills.list();}
   skillGet(name:string){return this.skills.get(name);}
-  skillAction(name:string,action:'activate'|'disable'|'retire'|'rollback',version?:string){
+  skillAction(name:string,action:'activate'|'disable'|'retire'|'rollback',version?:string|number){
     const input=toolSchemas.skill_action.parse({name,action,version});return this.skills.action(input.name,input.action,input.version);
   }
   snapshotSkills(){return this.skills.snapshots();}

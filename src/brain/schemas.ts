@@ -42,7 +42,7 @@ export const toolSchemas = {
   skill_create: candidateInput,
   skill_validate: z.object({ name: skillName, version: z.number().int().positive() }).strict(),
   skill_publish: z.object({ name: skillName, version: z.number().int().positive(), activate: z.boolean().default(true) }).strict(),
-  skill_action: z.object({ name: skillName, action: z.enum(['activate', 'disable', 'retire', 'rollback']), version: z.string().regex(/^\d+$/).optional() }).strict(),
+  skill_action: z.object({ name: skillName, action: z.enum(['activate', 'disable', 'retire', 'rollback']), version: z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER),z.string().regex(/^[1-9]\d*$/).refine(value=>Number.isSafeInteger(Number(value)),'Version must be a positive safe integer')]).optional() }).strict(),
   skill_outcome: z.object({ name: skillName, version: z.number().int().positive(), outcome: z.enum(['success', 'failure', 'correction']), summary: z.string().min(1).max(4000) }).strict(),
 } as const;
 

@@ -80,3 +80,17 @@ test('invalid snapshots leave a fresh restore destination usable and never publi
     await assert.rejects(restoreBrain(target,snapshot),/fresh APP_STATE_DIR/);
   }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('restore rejects symlinked skill directories before touching external files',async()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'operator-backup-symlink-')),source=config(path.join(root,'source')),target=config(path.join(root,'target')),snapshot=path.join(root,'snapshot'),outside=path.join(root,'outside');
+  const store=new Store(source.stateDir);await new Brain(store.db,source.stateDir).initialize();
+  try{
+    await exportBrain(source,snapshot);mkdirSync(outside);writeFileSync(path.join(outside,'keep.txt'),'unrelated content');
+    rmSync(path.join(snapshot,'skills/active'),{recursive:true});symlinkSync(outside,path.join(snapshot,'skills/active'));
+    await assert.rejects(restoreBrain(target,snapshot),/real directories without symlinks/);
+    assert.equal(readFileSync(path.join(outside,'keep.txt'),'utf8'),'unrelated content');
+    assert.equal(existsSync(path.join(target.stateDir,'operator.sqlite')),false);
+    assert.equal(existsSync(path.join(target.stateDir,'controller.lock')),false);
+    assert.equal(existsSync(path.join(target.stateDir,'worker/lock.json')),false);
+  }finally{store.close();rmSync(root,{recursive:true,force:true});}
+});

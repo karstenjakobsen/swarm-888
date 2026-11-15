@@ -197,7 +197,9 @@ export class CodexAdapter extends EventEmitter {
     const id = ++this.serial;
     return new Promise((resolveResult, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex ${method} timed out`)); }, 30_000);
-      this.pending.set(id, { resolve: resolveResult, reject, timer }); this.send({ id, method, params });
+      this.pending.set(id, { resolve: resolveResult, reject, timer });
+      try { this.send({ id, method, params }); }
+      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
   private send(frame: unknown): void { if (!this.process?.stdin.writable) throw new Error('Codex app-server is not connected'); this.process.stdin.write(JSON.stringify(frame) + '\n'); }

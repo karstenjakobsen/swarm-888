@@ -98,6 +98,7 @@ test('private worker authenticates IPC, serializes runs and replays a run comple
     const health = await client.connect(); assert.equal(health.uid, process.getuid!()); assert.equal(health.root, process.getuid!() === 0);
     const run = { runId: 'r1', conversationId: 'c1', prompt: 'durable fixture', cwd: join(directory, 'workspaces/c1'), bootstrap: '', skills: [] };
     assert.equal((await client.request('submit', run)).duplicate, false); assert.equal((await client.request('submit', run)).duplicate, true);
+    await assert.rejects(client.request('submit', { ...run, prompt: 'different request for the same run' }), /already accepted with different input/);
     await assert.rejects(client.request('submit', { ...run, runId: 'r2' }), /occupied/);
     client.close(); await new Promise(resolveWait => setTimeout(resolveWait, 250));
     second = new WorkerClient(config); await second.connect(); const snapshot = await second.request('sync', { after: 0 });
@@ -105,6 +106,50 @@ test('private worker authenticates IPC, serializes runs and replays a run comple
     assert.deepEqual(snapshot.events.map((event: any) => event.cursor), [...snapshot.events.map((event: any) => event.cursor)].sort((a, b) => a - b));
     await second.request('acknowledge', { cursor: snapshot.events.at(-1).cursor }); assert.equal((await second.request('sync', { after: 0 })).events.length, 0);
   } finally { client.close(); second?.close(); await worker.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('concurrent client connections share one authenticated handshake', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'operator-ipc-concurrent-')); const config = workerConfig(directory);
+  const worker = new WorkerServer(config, () => new FixtureAdapter() as any); const client = new WorkerClient(config);
+  try {
+    await worker.listen();
+    const connections = await Promise.all([client.connect(), client.connect(), client.connect()]);
+    assert.deepEqual(connections[1], connections[0]); assert.deepEqual(connections[2], connections[0]);
+    assert.equal((await client.request('health')).connected, true);
+  } finally { client.close(); await worker.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('closing a previous client socket does not disconnect a replacement connection', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'operator-ipc-reconnect-')); const config = workerConfig(directory);
+  const worker = new WorkerServer(config, () => new FixtureAdapter() as any); const client = new WorkerClient(config); let disconnects = 0;
+  client.on('disconnect', () => { disconnects++; });
+  try {
+    await worker.listen(); await client.connect();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      client.close(); assert.equal((await client.connect()).connected, true);
+      assert.equal((await client.request('health')).connected, true);
+    }
+    assert.equal(disconnects, 0, 'Retired sockets must not announce that the current connection disconnected');
+  } finally { client.close(); await worker.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('oversized final output fails explicitly rather than reporting a completed run with missing text', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'operator-final-output-')); const config = workerConfig(directory);
+  class OversizedFinalAdapter extends FixtureAdapter {
+    async run() {
+      this.emit('event', 'delta', { itemId: 'large-final', text: 'x'.repeat(MAX_WORKER_EVENT_BYTES) });
+      this.emit('event', 'completed', { status: 'completed' });
+    }
+  }
+  const worker = new WorkerServer(config, () => new OversizedFinalAdapter() as any); const client = new WorkerClient(config);
+  try {
+    await worker.listen(); await client.connect();
+    const completed = new Promise<any>(resolveDone => client.on('event', event => { if (event.type === 'completed') resolveDone(event.data); }));
+    await client.request('submit', { runId: 'large-final', conversationId: 'c', prompt: 'fixture', cwd: join(directory, 'workspaces/c'), bootstrap: '', skills: [] });
+    const result = await completed;
+    assert.equal(result.status, 'failed'); assert.match(result.error, /exceeded 1 MiB/);
+    assert.equal(worker.journal.get('large-final')?.status, 'failed');
+  } finally { client.close(); await worker.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 test('private-socket sync recovers more than 16 MiB through bounded pages before acknowledging', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'operator-wire-pages-')); const config = workerConfig(directory); const journal = new WorkerJournal(directory);

@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { createServer, type Server as NetServer } from 'node:net';
+import { createServer, type Server as NetServer, type Socket } from 'node:net';
 import { unlinkSync, existsSync, statSync, lstatSync, realpathSync, readdirSync, createReadStream, chmodSync } from 'node:fs';
 import { join, relative, isAbsolute, extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -13,6 +13,7 @@ import { Id, PromptInput, ReplyInput, WireRequest, type AppEvent } from './share
 import { acquireLock } from './lock.ts';
 import type { WorkerClient } from './ipc.ts';
 import { AgentConnectionService } from './agent-connection.ts';
+import { toolSchemas } from './brain/schemas.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -22,11 +23,15 @@ const safeId=(s:unknown)=>Id.parse(s);
 export async function createController(config:Config, options:{client?:WorkerClient;agentClient?:WorkerClient;startQueue?:boolean;startBridge?:boolean}={}) {
   const app=Fastify({logger:false,bodyLimit:8_100_000,trustProxy:false});
   const store=new Store(config.stateDir),brain=new Brain(store.db,config.stateDir);
-  await brain.initialize();
+  try{await brain.initialize();}catch(error){store.close();await app.close();throw error;}
   const queue=new Queue(config,store,brain,options.client);
   const agentConnection=new AgentConnectionService(config,queue,options.agentClient??options.client);
   brain.setExecutor(spec=>queue.client.request('checkSkill',spec));
   let bridge:NetServer|undefined;
+  let bridgeOwned=false;
+  const bridgeSockets=new Set<Socket>();
+  const toolCalls=new Set<Promise<void>>();
+  let closing=false;
   let pendingTools=0;
   const streams=new Set<()=>void>();
   const attempts=new Map<string,{count:number;until:number}>();
@@ -47,10 +52,10 @@ export async function createController(config:Config, options:{client?:WorkerCli
   function session(req:any){
     const raw=String(req.headers.cookie??'').split(';').map((s:string)=>s.trim()).find((s:string)=>s.startsWith('operator_session='))?.slice(17);
     if(!raw||!/^[a-f0-9]{64}$/.test(raw))return null;
-    const entry=store.db.prepare('SELECT * FROM sessions WHERE hash=? AND expiresAt>?').get(hash(raw),Date.now()) as {hash:string;csrf:string;expiresAt:number}|undefined;
-    return entry??null;
+    return store.session(hash(raw))??null;
   }
   app.addHook('onRequest',async(req,reply)=>{
+    if(closing)throw fail('The controller is shutting down',503);
     if(!req.url.startsWith('/api/'))return;
     const origin=req.headers.origin;
     if(origin&&!config.origins.includes(origin))throw fail('Origin is not permitted',403);
@@ -63,7 +68,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   });
   app.setErrorHandler((error:any,_req,reply)=>{
     const status=error instanceof z.ZodError?400:(error.statusCode??400);
-    reply.code(status).send({error:error instanceof z.ZodError?error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; '):String(error.message??'Operation failed')});
+    reply.code(status).send({error:redacted(error instanceof z.ZodError?error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; '):String(error.message??'Operation failed'))});
   });
   const writable=()=>{if(queue.maintenance&&!store.active())throw fail('Maintenance window: writes are paused',503);};
   app.get('/api/session',async req=>{const current=session(req);return {authenticated:Boolean(current),...(current?{csrfToken:current.csrf}:{})};});
@@ -76,12 +81,11 @@ export async function createController(config:Config, options:{client?:WorkerCli
     if(!equal(password,config.adminPassword)||!config.adminPassword)throw fail('Invalid administrator credential',401);
     attempts.delete(req.ip);
     const token=randomBytes(32).toString('hex'),csrf=randomBytes(32).toString('hex');
-    store.db.prepare('DELETE FROM sessions WHERE expiresAt<?').run(now);
-    store.db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(hash(token),csrf,now+12*3600_000);
+    store.createSession(hash(token),csrf,now+12*3600_000,now);
     reply.header('set-cookie',`operator_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${config.secureCookie?'; Secure':''}`);
     return {csrfToken:csrf};
   });
-  app.post('/api/logout',async(req,reply)=>{const current=session(req);if(current)store.db.prepare('DELETE FROM sessions WHERE hash=?').run(current.hash);reply.header('set-cookie','operator_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');return {ok:true};});
+  app.post('/api/logout',async(req,reply)=>{const current=session(req);if(current)store.deleteSession(current.hash);reply.header('set-cookie','operator_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');return {ok:true};});
   app.get('/api/status',async()=>queue.status());
   app.get('/api/agent/connection',async()=>agentConnection.status());
   app.post('/api/agent/connect',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.connect();});
@@ -107,19 +111,24 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.put('/api/instructions',async req=>{writable();const {text}=z.object({text:z.string().max(4000)}).parse(req.body);brain.setInstructions(text);return {text:brain.getInstructions()};});
   app.get('/api/skills',async()=>brain.skillList());
   app.get('/api/skills/:name',async(req:any)=>{const found=brain.skillGet(safeId(req.params.name));if(!found)throw fail('Skill not found',404);return found;});
-  app.post('/api/skills/:name/action',async(req:any)=>{writable();const body=z.object({action:z.enum(['activate','disable','retire','rollback']),version:z.union([z.string(),z.number().int().positive()]).optional()}).parse(req.body);return brain.skillAction(safeId(req.params.name),body.action,body.version===undefined?undefined:String(body.version));});
+  app.post('/api/skills/:name/action',async(req:any)=>{writable();const body=toolSchemas.skill_action.parse({...req.body,name:req.params.name});return brain.skillAction(body.name,body.action,body.version);});
   app.get('/api/events',async(req:any,reply)=>{
     let cursor=z.coerce.number().int().min(0).parse(req.headers['last-event-id']??req.query.after??0);
     reply.hijack();const res=reply.raw;
     res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no','x-content-type-options':'nosniff'});
-    const send=(event:AppEvent)=>{if(event.seq<=cursor)return;if(res.writableLength>1_000_000){res.end();return;}res.write(`id: ${event.seq}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`);cursor=event.seq;};
-    store.on('event',send);
-    while(true){const events=store.events(cursor);events.forEach(send);if(events.length<2000)break;}
-    const sendStatus=()=>res.write(`event: status\ndata: ${JSON.stringify(queue.status())}\n\n`);
-    queue.on('status',sendStatus);sendStatus();
-    const heartbeat=setInterval(()=>{if(!session(req))res.end();else res.write(': heartbeat\n\n');},15_000);heartbeat.unref();
+    const write=(frame:string)=>{
+      if(res.destroyed||res.writableEnded)return false;
+      if(res.writableLength>1_000_000){end();return false;}
+      res.write(frame);return true;
+    };
+    const send=(event:AppEvent)=>{if(event.seq<=cursor)return true;if(!write(`id: ${event.seq}\nevent: event\ndata: ${JSON.stringify(event)}\n\n`))return false;cursor=event.seq;return true;};
+    const sendStatus=()=>write(`event: status\ndata: ${JSON.stringify(queue.status())}\n\n`);
+    const heartbeat=setInterval(()=>{if(!session(req))end();else write(': heartbeat\n\n');},15_000);heartbeat.unref();
     const cleanup=()=>{clearInterval(heartbeat);store.off('event',send);queue.off('status',sendStatus);streams.delete(end);};
-    const end=()=>{cleanup();res.end();};streams.add(end);res.on('close',cleanup);
+    const end=()=>{cleanup();if(!res.writableEnded)res.end();};streams.add(end);res.on('close',cleanup);
+    store.on('event',send);queue.on('status',sendStatus);
+    while(!res.destroyed&&!res.writableEnded){const events=store.events(cursor);if(!events.every(send)||events.length<2000)break;}
+    sendStatus();
   });
   const artifacts=join(config.stateDir,'artifacts');
   function artifactRoot(){if(lstatSync(artifacts).isSymbolicLink()||realpathSync(artifacts)!==artifacts)throw fail('Artifact root has changed or is not a canonical directory',403);return artifacts;}
@@ -147,21 +156,36 @@ export async function createController(config:Config, options:{client?:WorkerCli
     const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'};
     reply.header('content-type',mime[extname(path)]??'application/octet-stream').header('x-content-type-options','nosniff');return reply.send(createReadStream(path));
   });
+  let closePromise:Promise<void>|undefined;
+  const close=()=>closePromise??=(async()=>{
+    closing=true;
+    for(const end of streams)end();
+    agentConnection.close();queue.close();
+    for(const socket of bridgeSockets)socket.destroy();
+    if(bridge?.listening)await new Promise<void>((ok,no)=>bridge!.close(error=>error?no(error):ok()));
+    await Promise.allSettled([...toolCalls]);
+    if(bridgeOwned&&existsSync(config.bridgeSocket))unlinkSync(config.bridgeSocket);
+    await app.close();store.close();
+  })();
+  try{
   if(options.startBridge!==false){
     if(existsSync(config.bridgeSocket)){
       if(!lstatSync(config.bridgeSocket).isSocket())throw new Error('Refusing to replace a non-socket MCP bridge path');
       unlinkSync(config.bridgeSocket);
     }
     bridge=createServer(socket=>{
+      if(closing){socket.destroy();return;}
+      bridgeSockets.add(socket);socket.once('close',()=>bridgeSockets.delete(socket));
       socket.setEncoding('utf8');
       let buffer='';socket.setTimeout(120_000,()=>socket.destroy());socket.on('error',()=>{});
       socket.on('data',chunk=>{buffer+=chunk.toString();if(buffer.length>8_100_000){socket.destroy();return;}
-        let pos;while((pos=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,pos);buffer=buffer.slice(pos+1);void handle(line);}
+        let pos;while((pos=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,pos);buffer=buffer.slice(pos+1);const call=handle(line);toolCalls.add(call);void call.finally(()=>toolCalls.delete(call));}
       });
       async function handle(line:string){let id:unknown=null;try{
+        if(closing)throw new Error('The controller is shutting down');
         const msg=WireRequest.parse(JSON.parse(line));id=msg.id;
         if(!equal(msg.token,config.ipcToken))throw new Error('Unauthorized bridge request');
-        if(msg.method==='tools/list'){socket.write(JSON.stringify({id,result:{tools:brain.listTools()}})+'\n');return;}
+        if(msg.method==='tools/list'){if(!socket.destroyed)socket.write(JSON.stringify({id,result:{tools:brain.listTools()}})+'\n');return;}
         if(msg.method!=='tools/call')throw new Error('Unsupported bridge method');
         const params=z.object({name:z.string().max(100),arguments:z.unknown().optional(),runId:Id}).parse(msg.params);
         const run=store.run(params.runId);if(!run||!['running','waiting'].includes(run.status))throw new Error('Tool caller is not an active run');
@@ -170,27 +194,29 @@ export async function createController(config:Config, options:{client?:WorkerCli
           const arguments_=params.name==='memory_write'?memoryInput(params.arguments??{}):params.arguments??{};
           const result=await brain.callTool(params.name,arguments_,{runId:run.id,conversationId:run.conversationId});
           store.addEvent('tool',redacted({name:params.name,result}),run.id);
-          socket.write(JSON.stringify({id,result:redacted(result)})+'\n');
+          if(!socket.destroyed)socket.write(JSON.stringify({id,result:redacted(result)})+'\n');
         }finally{pendingTools--;}
-      }catch(error){socket.write(JSON.stringify(redacted({id,error:{message:String((error as Error).message)}}))+'\n');}}
+      }catch(error){if(!socket.destroyed)socket.write(JSON.stringify(redacted({id,error:{message:String((error as Error).message)}}))+'\n');}}
     });
     await new Promise<void>((ok,no)=>{bridge!.once('error',no);bridge!.listen(config.bridgeSocket,ok);});
-    chmodSync(config.bridgeSocket,0o600);
+    bridgeOwned=true;chmodSync(config.bridgeSocket,0o600);
   }
   if(options.startQueue!==false)await queue.start();
-  const close=async()=>{for(const end of streams)end();agentConnection.close();queue.close();if(bridge)await new Promise<void>(ok=>bridge!.close(()=>ok()));if(existsSync(config.bridgeSocket))unlinkSync(config.bridgeSocket);await app.close();store.close();};
+
   return {app,store,brain,queue,agentConnection,close,get pendingTools(){return pendingTools;}};
+  }catch(error){await close();throw error;}
 }
 
 async function main(){
   if(process.getuid?.()===0)throw new Error('Run the controller and frontend as a normal user; launch only the worker as root.');
   const config=loadConfig({requireAdmin:true});const release=acquireLock(join(config.stateDir,'controller.lock'));
+  let close:(()=>Promise<void>)|undefined;
   try{
-    const controller=await createController(config);
+    const controller=await createController(config);close=controller.close;
     await controller.app.listen({host:config.host,port:config.port});
     console.log(`Controller listening on http://${config.host}:${config.port}; persistent state ${config.stateDir}`);
     let closing=false;const stop=async()=>{if(closing)return;closing=true;await controller.close();release();};
     process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());
-  }catch(error){release();throw error;}
+  }catch(error){try{await close?.();}finally{release();}throw error;}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(error=>{console.error(error.message);process.exitCode=1;});

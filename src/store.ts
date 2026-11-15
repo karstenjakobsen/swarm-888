@@ -21,6 +21,20 @@ export class Store extends EventEmitter {
   transaction<T>(fn:()=>T):T { this.db.exec('BEGIN IMMEDIATE');try {const value=fn();this.db.exec('COMMIT');return value;} catch(e){this.db.exec('ROLLBACK');throw e;} }
   setting(key:string):string|undefined {return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as {value:string}|undefined)?.value;}
   setSetting(key:string,value:string) {this.db.prepare('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,value);}
+  session(hash:string,now=Date.now()):{hash:string;csrf:string;expiresAt:number}|undefined {
+    return this.db.prepare('SELECT * FROM sessions WHERE hash=? AND expiresAt>?').get(hash,now) as {hash:string;csrf:string;expiresAt:number}|undefined;
+  }
+  createSession(hash:string,csrf:string,expiresAt:number,now=Date.now()):void {
+    this.transaction(()=>{
+      this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
+      this.db.prepare('INSERT INTO sessions(hash,csrf,expiresAt) VALUES (?,?,?)').run(hash,csrf,expiresAt);
+    });
+  }
+  deleteSession(hash:string):void {this.db.prepare('DELETE FROM sessions WHERE hash=?').run(hash);}
+  latestRuntimeUsage(runId:string):unknown|undefined {
+    const row=this.db.prepare("SELECT data FROM events WHERE runId=? AND type='activity' AND json_extract(data,'$.method')='thread/tokenUsage/updated' ORDER BY seq DESC LIMIT 1").get(runId) as {data:string}|undefined;
+    return row?JSON.parse(row.data).tokenUsage:undefined;
+  }
   conversations():Conversation[] {return this.db.prepare('SELECT * FROM conversations ORDER BY updatedAt DESC').all() as unknown as Conversation[];}
   conversation(id:string):Conversation|undefined {return this.db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as unknown as Conversation|undefined;}
   newConversation(title='New conversation'):Conversation {
@@ -33,17 +47,18 @@ export class Store extends EventEmitter {
   queued():Run|undefined {return this.db.prepare("SELECT * FROM runs WHERE status='queued' ORDER BY CASE kind WHEN 'user' THEN 0 ELSE 1 END,createdAt LIMIT 1").get() as unknown as Run|undefined;}
   enqueue(conversationId:string,prompt:string,requestId:string,kind:Run['kind']='user',parentRunId:string|null=null):Run {
     const prior=this.db.prepare('SELECT * FROM runs WHERE requestId=?').get(requestId) as unknown as Run|undefined;
-    if(prior){if(prior.conversationId!==conversationId||prior.prompt!==prompt)throw new Error('Request ID already used with different input');return prior;}
+    if(prior){if(prior.conversationId!==conversationId||prior.prompt!==prompt||prior.kind!==kind||prior.parentRunId!==parentRunId)throw new Error('Request ID already used with different input');return prior;}
     if(!this.conversation(conversationId))throw new Error('Conversation not found');
     const id=randomUUID(),now=new Date().toISOString();
-    this.transaction(()=>{
+    const event=this.transaction(()=>{
       this.db.prepare("INSERT INTO runs(id,conversationId,prompt,status,kind,requestId,parentRunId,createdAt) VALUES (?,?,?,'queued',?,?,?,?)").run(id,conversationId,prompt,kind,requestId,parentRunId,now);
       if(kind==='user'){
         this.db.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?)').run(randomUUID(),conversationId,id,'user',prompt,now);
         this.db.prepare("UPDATE conversations SET updatedAt=?,title=CASE WHEN title='New conversation' THEN ? ELSE title END WHERE id=?").run(now,prompt.slice(0,65),conversationId);
       }
+      return this.eventRow('run',{run:this.run(id)!},id);
     });
-    const run=this.run(id)!;this.addEvent('run',{run},id);return run;
+    this.emit('event',event);return this.run(id)!;
   }
   transition(id:string,status:RunStatus,error:string|null=null) {
     const run=this.run(id);if(!run)throw new Error('Run not found');
@@ -51,8 +66,11 @@ export class Store extends EventEmitter {
     if(run.status===status)return;
     if(!allowed[run.status].includes(status))throw new Error(`Invalid run transition ${run.status} -> ${status}`);
     const now=new Date().toISOString();
-    this.db.prepare('UPDATE runs SET status=?,error=?,startedAt=COALESCE(startedAt,?),finishedAt=? WHERE id=?').run(status,error,status==='running'?now:null,terminal.has(status)?now:null,id);
-    this.addEvent('run',{run:this.run(id)},id);
+    const event=this.transaction(()=>{
+      this.db.prepare('UPDATE runs SET status=?,error=?,startedAt=COALESCE(startedAt,?),finishedAt=? WHERE id=?').run(status,error,status==='running'?now:null,terminal.has(status)?now:null,id);
+      return this.eventRow('run',{run:this.run(id)},id);
+    });
+    this.emit('event',event);
   }
   messages(id:string):Message[] {return this.db.prepare('SELECT * FROM messages WHERE conversationId=? ORDER BY createdAt,rowid').all(id) as unknown as Message[];}
   private eventRow(type:string,data:unknown,runId:string|null=null,workerCursor:number|null=null,createdAt=new Date().toISOString()):AppEvent {

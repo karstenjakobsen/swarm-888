@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, statSync, lstatSync, realpathSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve, join, isAbsolute, relative } from 'node:path';
+import { resolve, join, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -26,10 +26,11 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
   if (!isAbsolute(stateDir)) throw new Error('APP_STATE_DIR must be absolute');
   const normalized = resolve(stateDir);
   const allowTempState = process.env.APP_ALLOW_TEMP_STATE === 'true';
-  if (!allowTempState && (normalized === '/tmp' || normalized.startsWith('/tmp/') || normalized.startsWith('/var/tmp/'))) {
+  if (!allowTempState && (normalized === '/tmp' || normalized.startsWith('/tmp/') || normalized === '/var/tmp' || normalized.startsWith('/var/tmp/'))) {
     throw new Error('APP_STATE_DIR must be persistent, outside /tmp. Tests may explicitly set APP_ALLOW_TEMP_STATE=true.');
   }
-  if (normalized === resolve(projectRoot) || !relative(projectRoot, normalized).startsWith('..')) {
+  const fromProject = relative(projectRoot, normalized);
+  if (fromProject === '' || (!isAbsolute(fromProject) && fromProject !== '..' && !fromProject.startsWith(`..${sep}`))) {
     throw new Error('APP_STATE_DIR must be outside the source checkout and build output');
   }
   const controllerUid = integer(process.env.APP_CONTROLLER_UID, process.getuid?.() ?? 0, 0, 2 ** 31 - 1);
@@ -58,7 +59,12 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
 
 export function initState(config: Config): void {
   process.umask(0o077);
-  mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
+  try { mkdirSync(config.stateDir, { recursive: true, mode: 0o700 }); }
+  catch (error) {
+    const code=(error as NodeJS.ErrnoException).code;
+    if(code!=='EACCES'&&code!=='EPERM')throw error;
+    throw Object.assign(new Error(`Cannot create APP_STATE_DIR ${config.stateDir}: permission denied. Initialize a writable persistent directory as the normal controller user with npm run init. Launch the worker with the exact command from Connect agent, which includes APP_STATE_DIR and APP_CONTROLLER_UID; plain sudo npm run worker can select /root instead.`,{cause:error}),{code});
+  }
   const info = statSync(config.stateDir);
   if (realpathSync(config.stateDir) !== config.stateDir) throw new Error('APP_STATE_DIR must be a canonical path without symlinks');
   if (info.uid !== config.controllerUid) throw new Error(`State directory belongs to UID ${info.uid}; expected controller UID ${config.controllerUid}. Initialize it as the controller user first.`);

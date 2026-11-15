@@ -49,13 +49,13 @@ export function readFrames(socket: Socket, receive: (frame: z.infer<typeof rpcEn
 export class WorkerClient extends EventEmitter {
   private socket?: Socket;
   private serial = 0;
-  private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private pending = new Map<number, { socket: Socket; resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private connecting?: Promise<WorkerHealth>;
   constructor(private config: Config) { super(); }
 
   async connect(): Promise<WorkerHealth> {
-    if (this.socket && !this.socket.destroyed) return workerHealthSchema.parse(await this.request('health', {}));
     if (this.connecting) return this.connecting;
+    if (this.socket && !this.socket.destroyed) return workerHealthSchema.parse(await this.request('health', {}));
     this.connecting = this.open();
     try { return await this.connecting; } finally { this.connecting = undefined; }
   }
@@ -65,9 +65,13 @@ export class WorkerClient extends EventEmitter {
     const socket = connectSocket(this.config.socketPath); this.socket = socket;
     socket.on('error', () => {});
     socket.on('close', () => {
-      if (this.socket === socket) this.socket = undefined;
-      for (const { reject, timer } of this.pending.values()) { clearTimeout(timer); reject(new Error('Worker disconnected; execution may continue')); }
-      this.pending.clear(); this.emit('disconnect');
+      const current = this.socket === socket;
+      if (current) this.socket = undefined;
+      for (const [id, request] of this.pending) {
+        if (request.socket !== socket) continue;
+        clearTimeout(request.timer); this.pending.delete(id); request.reject(new Error('Worker disconnected; execution may continue'));
+      }
+      if (current) this.emit('disconnect');
     });
     readFrames(socket, frame => {
       if (frame.method === 'event') { const parsed = workerEventSchema.safeParse(frame.params); if (parsed.success) this.emit('event', parsed.data); else socket.destroy(); return; }
@@ -76,16 +80,27 @@ export class WorkerClient extends EventEmitter {
       clearTimeout(pending.timer); this.pending.delete(frame.id);
       if (frame.error) pending.reject(new Error(frame.error.message)); else pending.resolve(frame.result);
     });
-    await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
-    return workerHealthSchema.parse(await this.request('hello', { token: this.config.ipcToken }));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { socket.off('connect', connected); socket.off('error', failed); socket.off('close', closed); };
+        const connected = () => { cleanup(); resolve(); };
+        const failed = (error: Error) => { cleanup(); reject(error); };
+        const closed = () => { cleanup(); reject(new Error('Worker disconnected before connecting')); };
+        socket.once('connect', connected); socket.once('error', failed); socket.once('close', closed);
+      });
+      return workerHealthSchema.parse(await this.request('hello', { token: this.config.ipcToken }));
+    } catch (error) { socket.destroy(); throw error; }
   }
   request(method: string, params: unknown = {}): Promise<any> {
-    if (!this.socket || this.socket.destroyed) return Promise.reject(new Error('Worker is disconnected'));
+    const socket = this.socket;
+    if (!socket || socket.destroyed) return Promise.reject(new Error('Worker is disconnected'));
     const id = ++this.serial;
     return new Promise((resolve, reject) => {
+      const frame = JSON.stringify({ id, method, params }) + '\n';
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Worker ${method} timed out; outcome may be uncertain`)); }, method === 'checkSkill' ? 600_000 : 30_000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket!.write(JSON.stringify({ id, method, params }) + '\n');
+      this.pending.set(id, { socket, resolve, reject, timer });
+      try { socket.write(frame); }
+      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
   close(): void { this.socket?.destroy(); }

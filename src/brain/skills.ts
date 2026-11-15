@@ -184,7 +184,7 @@ export class SkillStore {
     if(activate)this.action(name,'activate',String(version));
     return this.get(name);
   }
-  action(name:string,action:'activate'|'disable'|'retire'|'rollback',selected?:string) {
+  action(name:string,action:'activate'|'disable'|'retire'|'rollback',selected?:string|number) {
     const skill=this.get(name),now=new Date().toISOString();
     let version:number|null=null;
     if(action==='activate'||action==='rollback'){

@@ -7,8 +7,8 @@ import type { Conversation, ConversationDetail, ExecutionEvent, Message, Run, St
 
 type View = 'chat' | 'memory' | 'skills' | 'artifacts';
 const viewNames: Record<View, string> = { chat: 'Workspace', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
-const activeStates = new Set(['queued', 'running', 'waiting', 'waiting_for_input', 'waiting_for_user_input', 'uncertain']);
-export const friendlyStatus = (status: string) => ({ waiting: 'Needs your input', waiting_for_input: 'Needs your input', waiting_for_user_input: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status] || status);
+const activeStates = new Set<Run['status']>(['queued', 'running', 'waiting', 'uncertain']);
+export const friendlyStatus = (status: Run['status']) => ({ waiting: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status]);
 export function formatTime(date: string) { const value = new Date(date); return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 const appendUnique = <T extends { id: string }>(list: T[], value: T) => list.some(item => item.id === value.id) ? list.map(item => item.id === value.id ? value : item) : [...list, value];
 
@@ -134,7 +134,8 @@ export default function App() {
         setConversations(previous => [value, ...previous]);
       }
       await post(`/conversations/${encodeURIComponent(id)}/runs`, request);
-      setPrompt(''); setPendingRequest(null);
+      if (currentId.current === id) setPrompt(previous => previous.trim() === request.prompt ? '' : previous);
+      setPendingRequest(previous => previous?.requestId === request.requestId ? null : previous);
       await Promise.all([loadConversation(id), refreshConversations(), refreshStatus()]);
     } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
   };
@@ -258,8 +259,8 @@ function MessageView({ message, streaming }: { message: Message; streaming?: boo
 function RunView({ run, events, onAction }: { run: Run; events: ExecutionEvent[]; onAction: (id: string, action: string, body?: any) => Promise<void> }) {
   const activity = events.filter(event => ['activity', 'checkpoint', 'status', 'thread', 'error', 'skills', 'tool', 'skill_discovery'].includes(event.type));
   const clarification = [...events].reverse().find(event => event.type === 'clarification');
-  const waiting = ['waiting', 'waiting_for_input', 'waiting_for_user_input'].includes(run.status);
-  const running = ['running', 'waiting', 'waiting_for_input', 'waiting_for_user_input'].includes(run.status);
+  const waiting = run.status === 'waiting';
+  const running = run.status === 'running' || waiting;
   return <div className="run-block"><div className="run-status-row"><span className={`task-badge ${run.status}`}><span className={`status-dot ${run.status === 'completed' ? 'ok' : ''}`} />{friendlyStatus(run.status)}</span><span className="run-kind">{run.kind === 'improvement' ? 'Improvement pass' : 'Task'} <code>{run.id.slice(0, 8)}</code></span>{running && <button className="subtle-button danger" onClick={() => void onAction(run.id, 'interrupt')}><Icon name="stop" size={12} />Interrupt</button>}{run.status === 'queued' && <button className="subtle-button" onClick={() => void onAction(run.id, 'interrupt')}>Cancel queued task</button>}</div>{run.error && <p className="inline-error">{run.error}</p>}{run.status === 'uncertain' && <div className="uncertain-notice"><p>Inspect the host before resolving this run. The worker will terminate or confirm the absence of its owned orphan execution and release the queue. This task will not be retried.</p><button className="secondary-button danger" onClick={() => void onAction(run.id, 'resolve')}>Host inspected · resolve run</button></div>}{run.summary && <p className="checkpoint"><Icon name="check" size={14} />{run.summary}</p>}{activity.length > 0 && <details className="activity"><summary><Icon name="terminal" size={14} />Execution activity <span>{activity.length}</span><Icon name="chevron" size={13} /></summary><div className="activity-list">{activity.map(event => <ActivityEvent key={event.seq} event={event} />)}</div></details>}{waiting && clarification && <Clarification event={clarification} onReply={answers => onAction(run.id, 'reply', { requestId: clarification.data.requestId, answers })} />}{run.status === 'interrupted' && <p className="small-note">The task was interrupted. Deployed or deliberately detached services may continue independently.</p>}</div>;
 }
 function ActivityEvent({ event }: { event: ExecutionEvent }) {

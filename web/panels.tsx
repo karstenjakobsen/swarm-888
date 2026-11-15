@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, asList, post } from './api';
 import { Icon } from './icons';
 import type { JsonObject } from './types';
@@ -19,17 +19,29 @@ export function MemoryPanel({ onError }: PanelProps) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState({ content: '', kind: 'user_fact', source: 'owner', category: '', tags: '', project: '', checkedAt: '' });
+  const searchGeneration = useRef(0);
+  const currentQuery = useRef(query);
+  currentQuery.current = query;
 
   const load = async () => {
+    const generation = ++searchGeneration.current;
     setLoading(true);
-    try { setEntries(asList(await api(`/memory?q=${encodeURIComponent(query)}`))); } catch (cause: any) { onError(cause.message); } finally { setLoading(false); }
+    try {
+      const value = await api(`/memory?q=${encodeURIComponent(currentQuery.current)}`);
+      if (generation === searchGeneration.current) setEntries(asList(value));
+    } catch (cause: any) { if (generation === searchGeneration.current) onError(cause.message); }
+    finally { if (generation === searchGeneration.current) setLoading(false); }
   };
-  useEffect(() => { const timeout = window.setTimeout(() => { void load(); }, 200); return () => window.clearTimeout(timeout); }, [query]);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => { void load(); }, 200);
+    return () => { window.clearTimeout(timeout); searchGeneration.current++; };
+  }, [query]);
   useEffect(() => { api<{ text: string }>('/instructions').then(value => setInstructions(value.text)).catch(cause => onError(cause.message)); }, []);
   useEffect(() => {
-    if (!selectedId) { setEntry(null); return; }
+    setEntry(null);
+    if (!selectedId) return;
     let alive = true;
-    api<JsonObject>(`/memory/${encodeURIComponent(selectedId)}`).then(value => { if (alive) setEntry(value); }).catch(cause => onError(cause.message));
+    api<JsonObject>(`/memory/${encodeURIComponent(selectedId)}`).then(value => { if (alive) setEntry(value); }).catch(cause => { if (alive) onError(cause.message); });
     return () => { alive = false; };
   }, [selectedId]);
   const openEditor = (existing?: JsonObject) => {
@@ -65,14 +77,27 @@ export function SkillsPanel({ onError }: PanelProps) {
   const [detail, setDetail] = useState<JsonObject | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const currentSelection = useRef(selected);
+  currentSelection.current = selected;
+  const detailGeneration = useRef(0);
   const load = async () => { try { setSkills(asList(await api('/skills'))); } catch (cause: any) { onError(cause.message); } };
   useEffect(() => { void load(); }, []);
   const loadDetail = async (name: string) => {
-    try { const result = await api<JsonObject>(`/skills/${encodeURIComponent(name)}`); setDetail(result); setVersion(result.activeVersion ?? result.versions?.[0]?.version ?? null); } catch (cause: any) { onError(cause.message); }
+    if (currentSelection.current !== name) return;
+    const generation = ++detailGeneration.current;
+    try {
+      const result = await api<JsonObject>(`/skills/${encodeURIComponent(name)}`);
+      if (generation !== detailGeneration.current || currentSelection.current !== name) return;
+      setDetail(result); setVersion(result.activeVersion ?? result.versions?.[0]?.version ?? null);
+    } catch (cause: any) { if (generation === detailGeneration.current && currentSelection.current === name) onError(cause.message); }
   };
-  useEffect(() => { setDetail(null); if (selected) void loadDetail(selected); }, [selected]);
+  useEffect(() => {
+    setDetail(null); setVersion(null);
+    if (selected) void loadDetail(selected);
+    return () => { detailGeneration.current++; };
+  }, [selected]);
   const action = async (type: string, targetVersion?: number | null) => {
-    if (!selected) return;
+    if (!selected || detail?.name !== selected || busy) return;
     setBusy(true);
     try { await post(`/skills/${encodeURIComponent(selected)}/action`, { action: type, ...(targetVersion !== null && targetVersion !== undefined ? { version: String(targetVersion) } : {}) }); await Promise.all([load(), loadDetail(selected)]); } catch (cause: any) { onError(cause.message); } finally { setBusy(false); }
   };

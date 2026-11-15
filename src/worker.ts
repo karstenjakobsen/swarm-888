@@ -46,7 +46,7 @@ export class WorkerServer {
     });
   }
   async listen(): Promise<void> {
-    if (this.config.requireRootWorker === true && process.getuid?.() !== 0) throw new Error('Root worker required. Launch sudo env APP_CONTROLLER_UID=<controller UID> npm run worker from the project directory.');
+    if (this.config.requireRootWorker === true && process.getuid?.() !== 0) throw new Error('Root worker required. Use the root-worker command shown by Connect agent; it includes the controller state directory and UID.');
     this.acquireLock();
     this.journal = new WorkerJournal(this.config.stateDir);
     // A different stdio client cannot reattach after a worker crash. Keep uncertain runs
@@ -139,7 +139,10 @@ export class WorkerServer {
     if (method === 'submit') {
       const submission = submitSchema.parse(raw);
       const known = this.journal.get(submission.runId);
-      if (known) return { accepted: true, duplicate: true, status: known.status };
+      if (known) {
+        if (known.submission !== JSON.stringify(submission)) throw new Error('Run ID already accepted with different input');
+        return { accepted: true, duplicate: true, status: known.status };
+      }
       if (this.authenticator.busy) throw new Error('ChatGPT sign-in is in progress. Finish or cancel the agent connection before running tasks');
       if (this.active || this.journal.active().length || this.journal.checks().some(check => check.status === 'uncertain')) throw new Error('Worker is occupied or has an unresolved orphan run/check');
       if (this.probing) await this.probing;
@@ -269,7 +272,11 @@ export class WorkerServer {
   }
   private async finish(active: Active, result: { status: string; error?: unknown }): Promise<void> {
     if (active.completed) return;
-    try { this.flush(active, true); } catch { active.delta = undefined; }
+    try { this.flush(active, true); }
+    catch (error) {
+      active.delta = undefined;
+      result = { status: 'failed', error: this.redact(error instanceof Error ? error.message : String(error)) };
+    }
     active.completed = true; clearTimeout(active.timer); clearTimeout(active.deltaTimer);
     try {
       await active.adapter.close();

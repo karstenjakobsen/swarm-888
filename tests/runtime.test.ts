@@ -10,6 +10,19 @@ import { createController } from '../src/controller.ts';
 import { WorkerServer } from '../src/worker.ts';
 import { spawn } from 'node:child_process';
 
+test('a request without a connected adapter rejects without leaving a timeout alive', { timeout: 5000 }, async () => {
+  const source = `import { CodexAdapter } from ${JSON.stringify(new URL('../src/runtime/codex.ts', import.meta.url).href)};
+    const adapter = new CodexAdapter({});
+    try { await adapter.request('health', {}); process.exitCode = 1; }
+    catch (error) { console.log(error.message); }`;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stdout.on('data', data => { output += data.toString(); });
+  try {
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 0); assert.match(output, /not connected/);
+  } finally { if (child.exitCode === null) child.kill('SIGKILL'); }
+});
+
 const fixture = `#!/usr/bin/env node
 import readline from 'node:readline';
 if(process.argv.includes('--version')) { console.log('codex-cli 0.166.0'); process.exit(0); }

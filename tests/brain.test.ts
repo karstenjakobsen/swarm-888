@@ -81,7 +81,9 @@ test('skills require representative evidence, retain immutable versions, rollbac
     f.brain.skillAction(v1.name,'rollback');assert.equal(f.brain.skillGet(v1.name).activeVersion,1);
     rmSync(path.join(f.state,'skills/active',v1.name));await f.brain.initialize();assert.equal(f.brain.snapshotSkills()[0]?.version,1);
     f.brain.skillAction(v1.name,'disable');await f.brain.initialize();assert.equal(f.brain.snapshotSkills().length,0);
-    f.brain.skillAction(v1.name,'activate','2');assert.equal(f.brain.snapshotSkills()[0]?.version,2);
+    await f.brain.callTool('skill_action',{name:v1.name,action:'activate',version:2});assert.equal(f.brain.snapshotSkills()[0]?.version,2);
+    await assert.rejects(f.brain.callTool('skill_action',{name:v1.name,action:'activate',version:0}));
+    await assert.rejects(f.brain.callTool('skill_action',{name:v1.name,action:'activate',version:'9007199254740993'}));
   }finally{f.close();}
 });
 
