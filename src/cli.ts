@@ -5,6 +5,7 @@ import { Store } from './store.ts';
 import { Brain } from './brain/index.ts';
 import { exportBrain, restoreBrain } from './backup.ts';
 import { acquireLock } from './lock.ts';
+import { executionCommand, executionEnvironment, prepareExecutionProfile, verifyExecutionProtection } from './runtime/protection.ts';
 
 async function main(){
   const [command,argument]=process.argv.slice(2),config=loadConfig();
@@ -16,6 +17,7 @@ async function main(){
     case'auth':{
       const mode=argument??'--with-api-key';
       if(!['--with-api-key','--device-auth','status'].includes(mode)||process.argv.length>4)throw new Error('Usage: npm run auth [-- --device-auth | -- status]. The default reads an API key from stdin.');
+      if(config.protectOperator){verifyExecutionProtection(config);prepareExecutionProfile(config);}
       // The key is read by Codex from stdin. No key in argv, browser, or application logs.
       if(mode==='--with-api-key'&&process.stdin.isTTY)console.error('Pipe an OpenAI API key into this command, or use npm run auth -- --device-auth to sign in with ChatGPT. Only the application’s dedicated Codex profile is changed.');
       let release=()=>{};
@@ -24,7 +26,8 @@ async function main(){
         catch{throw new Error('Stop the worker with Ctrl+C before authenticating, then run this command again. Start npm run worker after login succeeds; queued tasks will resume.');}
       }
       try{
-        const child=spawn(config.codexBin,['login',mode],{env:{...process.env,CODEX_HOME:config.runtimeHome},stdio:'inherit'});
+        const command=executionCommand(config,config.codexBin,['login',mode]);
+        const child=spawn(command.command,command.args,{env:{...executionEnvironment(config),CODEX_HOME:config.runtimeHome},stdio:'inherit'});
         const code=await new Promise<number>((ok,no)=>{child.on('error',no);child.on('exit',code=>ok(code??1));});
         if(code){if(mode==='status')process.exitCode=code;else throw new Error(`Codex authentication failed (exit ${code})`);}
       }finally{release();}break;

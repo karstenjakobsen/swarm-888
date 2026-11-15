@@ -1,6 +1,7 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
-import { chownSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chownSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { resolve, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -11,6 +12,10 @@ import { AgentAuthenticator } from './runtime/auth.js';
 import { checkSkill } from './runtime/fixtures.js';
 import { WorkerJournal, type JournalRun, type JournalCheck } from './runtime/journal.js';
 import { processStamp, bootId, groupMembers, terminateGroup } from './runtime/processes.js';
+import { executionCommand, executionEnvironment, prepareExecutionDirectory, trustedExecutionDirectory, verifyExecutionProtection } from './runtime/protection.ts';
+import { projectInspectInput, projectLogsInput, projectReferenceSchema } from './projects/schemas.ts';
+import { inspectProject, projectLogs, validateProjectReference } from './runtime/projects.ts';
+import { publishArtifact } from './runtime/artifacts.ts';
 
 const runIdInput = z.object({ runId: z.string().min(1) });
 const emptyInput = z.object({}).strict();
@@ -31,6 +36,7 @@ export class WorkerServer {
   private replacementReserved = false;
   private closing = false;
   private lockOwned = false;
+  private protectionVerified = false;
   constructor(private config: Config, private adapterFactory: (config: Config, runId?: string) => CodexAdapter = (config, runId) => new CodexAdapter(config, runId), options: { authTimeoutMs?: number } = {}) {
     this.lockPath = resolve(config.stateDir, 'worker/lock.json');
     this.authenticator = new AgentAuthenticator(() => this.adapterFactory(this.config), {
@@ -47,6 +53,7 @@ export class WorkerServer {
   }
   async listen(): Promise<void> {
     if (this.config.requireRootWorker === true && process.getuid?.() !== 0) throw new Error('Root worker required. Use the root-worker command shown by Connect agent; it includes the controller state directory and UID.');
+    this.verifyProtection();
     this.acquireLock();
     this.journal = new WorkerJournal(this.config.stateDir);
     // A different stdio client cannot reattach after a worker crash. Keep uncertain runs
@@ -64,6 +71,10 @@ export class WorkerServer {
     await this.probe();
     this.repairOwnership();
   }
+  private verifyProtection():void {
+    try{verifyExecutionProtection(this.config);this.protectionVerified=this.config.protectOperator===true;}
+    catch(error){this.protectionVerified=false;throw error;}
+  }
   private acquireLock(): void {
     if (existsSync(this.lockPath)) {
       const previous = z.object({ pid: z.number(), start: z.string().nullable() }).parse(JSON.parse(readFileSync(this.lockPath, 'utf8')));
@@ -79,14 +90,14 @@ export class WorkerServer {
     this.probing = (async () => {
       const adapter = this.adapterFactory(this.config);
       adapter.on('fault', () => {}); adapter.on('exit', () => {});
-      try { await adapter.start(); const health = await adapter.health(); this.runtime = { available: true, version: adapter.version, ...health, authenticating: this.authenticator.busy, ...(this.config.model ? { model: this.config.model } : {}) }; }
+      try { this.verifyProtection();await adapter.start(); const health = await adapter.health(); this.runtime = { available: true, version: adapter.version, ...health, authenticating: this.authenticator.busy, ...(this.config.model ? { model: this.config.model } : {}) }; }
       catch (error) { this.runtime = { available: false, version: CODEX_VERSION, authenticated: false, authenticating: this.authenticator.busy, detail: this.redact(error instanceof Error ? error.message : String(error)) }; }
       finally { await adapter.close(); this.healthCheckedAt = Date.now(); }
     })();
     try { await this.probing; } finally { this.probing = undefined; }
   }
   health(): WorkerHealth {
-    return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0, runtime: this.runtime, replacementReserved: this.replacementReserved,
+    return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0, executionUid:this.config.protectOperator===true?this.config.executionUid:process.getuid?.(),sourceProtected:this.protectionVerified,runtime: this.runtime, replacementReserved: this.replacementReserved,
       activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id)])] };
   }
   private connection(socket: Socket): void {
@@ -108,6 +119,13 @@ export class WorkerServer {
   }
   private async dispatch(method: string, raw: unknown): Promise<unknown> {
     if (this.closing) throw new Error('Worker is stopping');
+    if(this.config.protectOperator===true&&['submit','checkSkill','agent/connect','projects/prepare','artifacts/publish'].includes(method)){
+      this.verifyProtection();
+    }
+    if(method==='projects/prepare'){const input=z.object({project:projectReferenceSchema}).strict().parse(raw);validateProjectReference(this.config,input.project);prepareExecutionDirectory(this.config,input.project.directory);return {directory:input.project.directory,ready:true};}
+    if(method==='projects/inspect'){const input=projectInspectInput.parse(raw);return this.clean(await inspectProject(this.config,input.project,input.components));}
+    if(method==='projects/logs'){const input=projectLogsInput.parse(raw);return this.clean(await projectLogs(this.config,input.project,input.component));}
+    if(method==='artifacts/publish')return publishArtifact(this.config,raw);
     if (method === 'worker/reserve-root-replacement') {
       emptyInput.parse(raw);
       if (this.active || this.pendingChecks || this.journal.active().length || this.journal.checks().length || this.authenticator.busy) throw new Error('The worker has active or uncertain execution, pending skill checks, or ChatGPT sign-in. Finish or reconcile it before replacing the worker.');
@@ -194,7 +212,7 @@ export class WorkerServer {
         const id = `fixture_${randomUUID()}`;
         this.journal.beginCheck(id, this.active?.submission.runId ?? null, path);
         try {
-          const result = await checkSkill(this.config.stateDir, { ...input, candidatePath: path }, { spawned: pid => this.journal.checkChild(id, pid, processStamp(pid) ?? '', bootId()) });
+          const result = await checkSkill(this.config.stateDir, { ...input, candidatePath: path }, { spawned: pid => this.journal.checkChild(id, pid, processStamp(pid) ?? '', bootId()),config:this.config });
           this.journal.finishCheck(id); this.repairOwnership(); return result;
         } catch (error) { this.journal.checkStatus(id, 'uncertain'); throw error; }
       }).finally(() => { this.pendingChecks--; });
@@ -203,7 +221,25 @@ export class WorkerServer {
     throw new Error(`Unsupported worker method: ${method}`);
   }
   private requireActive(runId: string): Active { if (!this.active || this.active.submission.runId !== runId || this.active.completed) throw new Error('Run is not active in this worker'); return this.active; }
-  private prepareSkills(submission: Submission): void {
+  private prepareSkills(submission: Submission): Submission {
+    if(this.config.protectOperator===true){
+      prepareExecutionDirectory(this.config,submission.cwd);
+      const parent=trustedExecutionDirectory(this.config,'skills');
+      const snapshot=resolve(parent,submission.runId);mkdirSync(snapshot,{mode:0o755});chmodSync(snapshot,0o755);
+      const skillRoot=realpathSync(resolve(this.config.stateDir,'skills'));
+      const skills=submission.skills.map(skill=>{
+        const path=realpathSync(skill.path),rel=relative(skillRoot,path);
+        if(rel==='..'||rel.startsWith(`..${sep}`))throw new Error('Skill path is outside application packages');
+        const target=resolve(snapshot,skill.name);cpSync(path,target,{recursive:true,dereference:false,errorOnExist:true});
+        const protect=(entry:string)=>{const info=lstatSync(entry);if(info.isSymbolicLink())throw new Error('Protected skill snapshots cannot contain symlinks');chmodSync(entry,info.isDirectory()||(info.mode&0o111)?0o555:0o444);if(info.isDirectory())for(const name of readdirSync(entry))protect(resolve(entry,name));};
+        protect(target);return {...skill,path:target};
+      });
+      const script=`const fs=require('node:fs'),path=require('node:path');const input=JSON.parse(process.argv[1]);const root=path.join(input.cwd,'.agents');if(fs.existsSync(root)&&fs.lstatSync(root).isSymbolicLink())throw new Error('Workspace .agents cannot be a symlink');fs.mkdirSync(root,{recursive:true,mode:448});const discovery=path.join(root,'skills');fs.rmSync(discovery,{recursive:true,force:true});fs.mkdirSync(discovery,{mode:448});for(const skill of input.skills)fs.symlinkSync(skill.path,path.join(discovery,skill.name),'dir');`;
+      const invocation=executionCommand(this.config,process.execPath,['-e',script,JSON.stringify({cwd:submission.cwd,skills})]);
+      const result=spawnSync(invocation.command,invocation.args,{env:executionEnvironment(this.config),encoding:'utf8',timeout:5000});
+      if(result.error||result.status!==0)throw new Error('Unable to prepare skills as the protected execution account.');
+      return {...submission,skills};
+    }
     mkdirSync(submission.cwd, { recursive: true, mode: 0o700 });
     const agents = resolve(submission.cwd, '.agents');
     if (existsSync(agents) && lstatSync(agents).isSymbolicLink()) throw new Error('Workspace .agents may not be a symlink');
@@ -217,6 +253,7 @@ export class WorkerServer {
       if (rel === '..' || rel.startsWith(`..${sep}`)) throw new Error('Skill path is outside application skill packages');
       symlinkSync(path, resolve(discovery, skill.name), 'dir');
     }
+    return submission;
   }
   private async execute(active: Active): Promise<void> {
     const adapter = active.adapter;
@@ -232,10 +269,10 @@ export class WorkerServer {
     adapter.on('fault', (error: Error) => void this.abort(active, error.message));
     adapter.on('exit', () => { if (!active.completed) void this.finish(active, { status: 'failed', error: 'Codex app-server exited before completion; side effects may have occurred' }); });
     try {
-      this.prepareSkills(active.submission); this.journal.status(active.submission.runId, 'running');
+      const prepared=this.prepareSkills(active.submission); this.journal.status(active.submission.runId, 'running');
       await adapter.start();
       const health = await adapter.health(); if (!health.authenticated) throw new Error(health.detail);
-      await adapter.run(active.submission);
+      await adapter.run(prepared);
       if (active.interruptRequested && !active.completed) await adapter.interrupt();
       if (active.submission.timeoutMs && !active.completed) active.timer = setTimeout(() => void this.abort(active, 'Configured run timeout exceeded'), active.submission.timeoutMs);
     } catch (error) { await this.abort(active, error instanceof Error ? error.message : String(error)); }
@@ -345,7 +382,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const config = loadConfig(); const worker = new WorkerServer(config);
   try {
     await worker.listen();
-    console.log(`Worker listening on private Unix socket; UID ${process.getuid?.()} (${process.getuid?.() === 0 ? 'host root' : 'non-root development mode'}), Codex ${CODEX_VERSION}`);
+    const health=worker.health();
+    console.log(`Worker listening on private Unix socket; broker UID ${health.uid}, execution UID ${health.executionUid}${health.sourceProtected?' (operator source protected)':' (unprotected test mode)'}, Codex ${CODEX_VERSION}`);
     let stopping = false;
     for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => { if (!stopping) { stopping = true; void worker.close().then(() => process.exit(0)); } });
   } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }

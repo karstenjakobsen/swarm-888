@@ -11,3 +11,7 @@ export interface Run {id:string; conversationId:string; prompt:string; status:Ru
 export interface Message {id:string;conversationId:string;runId:string;role:'user'|'assistant';content:string;createdAt:string}
 export interface AppEvent {seq:number;runId:string|null;conversationId:string|null;type:string;data:unknown;createdAt:string}
 export const terminal = new Set<RunStatus>(['completed','failed','interrupted']);
+
+export function protectedExecution(health:{uid:number;root:boolean;executionUid?:number;sourceProtected?:boolean}|null|undefined,expected:{executionUid?:number;controllerUid?:number}={}):boolean {
+  return health?.uid===0&&health.root===true&&health.sourceProtected===true&&typeof health.executionUid==='number'&&health.executionUid>0&&health.executionUid!==expected.controllerUid&&(expected.executionUid===undefined||health.executionUid===expected.executionUid);
+}

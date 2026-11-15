@@ -8,12 +8,13 @@ export const workerEventSchema = z.object({ cursor: z.number().int().positive(),
 export type WorkerEvent = z.infer<typeof workerEventSchema>;
 export const workerHealthSchema = z.object({
   connected: z.literal(true), uid: z.number().int(), pid: z.number().int(), root: z.boolean(),
+  executionUid:z.number().int().nonnegative().optional(),sourceProtected:z.boolean().optional(),
   runtime: z.object({ available: z.boolean(), version: z.string(), authenticated: z.boolean(), authenticating: z.boolean().optional(), detail: z.string(), model: z.string().optional() }),
   activeRunId: z.string().nullable(), uncertainRuns: z.array(z.string()), replacementReserved: z.boolean().optional(),
 });
 export type WorkerHealth = z.infer<typeof workerHealthSchema>;
 export const submitSchema = z.object({
-  runId: z.string().min(1).max(150), conversationId: z.string().min(1).max(150), threadId: z.string().nullable().optional(),
+  runId: z.string().min(1).max(150).regex(/^[a-zA-Z0-9_-]+$/), conversationId: z.string().min(1).max(150).regex(/^[a-zA-Z0-9_-]+$/), threadId: z.string().nullable().optional(),
   prompt: z.string().min(1).max(200_000), cwd: z.string().startsWith('/'), bootstrap: z.string().max(40_000),
   skills: z.array(z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), path: z.string().startsWith('/'), version: z.union([z.string(), z.number()]) })).max(100),
   kind: z.enum(['user', 'improvement']).optional(), timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),

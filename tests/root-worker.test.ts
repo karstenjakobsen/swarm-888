@@ -34,7 +34,7 @@ test('privileged launcher refuses to start as a normal user before touching stat
 test('root launcher reserves and shuts down only the verified idle application child', {timeout:30_000,skip:process.getuid?.()===0},async()=>{
   const f=fixture();
   const child=spawn(process.execPath,['--import','tsx','src/worker.ts'],{
-    cwd:process.cwd(),env:{...process.env,APP_STATE_DIR:f.config.stateDir,APP_ALLOW_TEMP_STATE:'true',APP_CONTROLLER_UID:String(process.getuid!()),APP_REQUIRE_ROOT_WORKER:'false',CODEX_BIN:f.config.codexBin},stdio:'ignore',
+    cwd:process.cwd(),env:{...process.env,APP_STATE_DIR:f.config.stateDir,APP_ALLOW_TEMP_STATE:'true',APP_PROTECT_OPERATOR:'false',APP_CONTROLLER_UID:String(process.getuid!()),APP_REQUIRE_ROOT_WORKER:'false',CODEX_BIN:f.config.codexBin},stdio:'ignore',
   });
   const client=new WorkerClient(f.config);
   try{

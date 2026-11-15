@@ -21,6 +21,18 @@ function verifyDatabase(file:string){
     if(db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Snapshot contains invalid foreign-key references');
   }finally{db.close();}
 }
+function legacySnapshotLayout(config:Config,operation:'export'|'restore'){
+  const runtime=resolve(config.runtimeHome),expected=join(resolve(config.stateDir),'runtime');
+  const projects=config.projectsDir&&resolve(config.projectsDir);
+  if(runtime!==expected||(projects&&!inside(config.stateDir,projects)))throw new Error(`Legacy brain ${operation} does not include the protected execution profile or external project directories. Use an owner-controlled backup of operator state, APP_EXECUTION_HOME and APP_PROJECTS_DIR together; automatic external-data restore is not supported.`);
+}
+function rejectProjectSnapshot(database:string){
+  if(!existsSync(database))return;
+  const db=new DatabaseSync(database,{readOnly:true});
+  try{
+    if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'").get()&&db.prepare('SELECT id FROM projects LIMIT 1').get())throw new Error('Legacy brain snapshots do not include project workspace data or rebase project directories. Use an owner-controlled backup of operator state and projects together.');
+  }finally{db.close();}
+}
 function maintenance(config:Config):()=>void {
   const release=acquireLock(join(config.stateDir,'controller.lock'));
   try {const workerRelease=acquireLock(join(config.stateDir,'worker/lock.json'));return ()=>{workerRelease();release();};}
@@ -30,6 +42,8 @@ async function sqliteSnapshot(source:string,destination:string){
   const db=new DatabaseSync(source,{readOnly:true});try {await backup(db,destination);}finally{db.close();}
 }
 export async function exportBrain(config:Config,destination:string){
+  legacySnapshotLayout(config,'export');
+  rejectProjectSnapshot(join(config.stateDir,'operator.sqlite'));
   const target=resolve(destination);
   if(inside(config.stateDir,target))throw new Error('Snapshot destination must be outside APP_STATE_DIR');
   if(existsSync(target))throw new Error('Snapshot destination already exists; choose a new directory');
@@ -57,6 +71,8 @@ export async function exportBrain(config:Config,destination:string){
   }catch(error){rmSync(temp,{recursive:true,force:true});throw error;}finally{release();}
 }
 export async function restoreBrain(config:Config,source:string){
+  legacySnapshotLayout(config,'restore');
+  rejectProjectSnapshot(join(resolve(source),'operator.sqlite'));
   const root=resolve(source),manifest=snapshotManifest.parse(JSON.parse(readFileSync(join(root,'snapshot.json'),'utf8')));
   if(existsSync(join(config.stateDir,'operator.sqlite')))throw new Error('Restore requires a fresh APP_STATE_DIR without an existing database');
   const release=maintenance(config),stage=join(config.stateDir,`.restore-${randomUUID()}`);

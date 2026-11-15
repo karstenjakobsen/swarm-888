@@ -5,6 +5,8 @@ export const AgentConnectionSchema = z.object({
   state:z.enum(['disconnected','connecting','connected','error']),
   workerConnected:z.boolean(),
   workerUid:z.number().int().nullable(),
+  executionUid:z.number().int().nullable().optional(),
+  sourceProtected:z.boolean().optional(),
   verificationUrl:z.string().url().refine(value=>{
     const url=new URL(value);
     return url.origin==='https://auth.openai.com'&&url.pathname==='/codex/device'&&!url.search&&!url.hash&&!url.username&&!url.password;

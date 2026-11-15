@@ -3,10 +3,11 @@ import { api, asList, post, setCsrf } from './api';
 import { Icon, type IconName } from './icons';
 import { MemoryPanel, SkillsPanel, ArtifactsPanel } from './panels';
 import { AgentConnection } from './AgentConnection';
+import { ProjectsPanel } from './ProjectsPanel';
 import type { Conversation, ConversationDetail, ExecutionEvent, Message, Run, Status } from './types';
 
-type View = 'chat' | 'memory' | 'skills' | 'artifacts';
-const viewNames: Record<View, string> = { chat: 'Workspace', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
+type View = 'chat' | 'projects' | 'memory' | 'skills' | 'artifacts';
+const viewNames: Record<View, string> = { chat: 'Workspace', projects: 'Projects', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
 const activeStates = new Set<Run['status']>(['queued', 'running', 'waiting', 'uncertain']);
 export const friendlyStatus = (status: Run['status']) => ({ waiting: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status]);
 export function formatTime(date: string) { const value = new Date(date); return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -155,8 +156,8 @@ export default function App() {
 
   const worker = status?.worker;
   const connected = Boolean(worker);
-  const rootWorker = Boolean(worker?.uid === 0 && worker.root);
-  const agentConnected = rootWorker && Boolean(worker?.runtime.authenticated);
+  const protectedWorker = Boolean(worker?.uid === 0 && worker.root && worker.sourceProtected === true && worker.executionUid && worker.executionUid > 0);
+  const agentConnected = protectedWorker && Boolean(worker?.runtime.authenticated);
   const selected = conversations.find(item => item.id === conversationId);
   const relevantEvents = events.filter(event => event.conversationId === conversationId);
   const runs = detail?.runs || [];
@@ -169,10 +170,10 @@ export default function App() {
     detail: 'Your tasks are saved. Execution will resume when maintenance finishes.',
   } : !worker ? {
     title: 'Queue paused: worker disconnected',
-    detail: 'Connect your agent to start the root worker. Your queued tasks are saved.',
-  } : !rootWorker ? {
-    title: 'Queue paused: root worker required',
-    detail: 'The connected worker does not have root access. Connect a root worker to resume your saved tasks.',
+    detail: 'Connect your agent to start the protected worker. Your queued tasks are saved.',
+  } : !protectedWorker ? {
+    title: 'Queue paused: operator protection required',
+    detail: 'Set up the protected worker account before running tasks. The agent must have no write access to the operator.',
   } : !worker.runtime.available ? {
     title: 'Queue paused: Codex runtime unavailable',
     detail: worker.runtime.detail,
@@ -191,7 +192,7 @@ export default function App() {
       <button className="new-conversation" onClick={() => void newConversation()} disabled={busy}><Icon name="plus" /><span>New conversation</span><kbd>+</kbd></button>
       <div className="nav-label">YOUR WORKSPACE</div>
       <nav className="primary-nav" aria-label="Workspace">
-        {(['chat', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
+        {(['chat', 'projects', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
       </nav>
       <div className="conversation-heading"><span className="nav-label">RECENT CONVERSATIONS</span><Icon name="clock" size={13} /></div>
       <div className="conversation-list">
@@ -199,19 +200,19 @@ export default function App() {
         {conversations.length === 0 && <p className="sidebar-empty">Your conversations will appear here.</p>}
       </div>
       <div className="sidebar-footer">
-        <div className="host-card"><div className={`status-dot ${connected ? 'ok' : ''}`} /><div><strong>{connected ? 'Worker connected' : 'Worker disconnected'}</strong><span>{worker ? `${worker.root && worker.uid === 0 ? 'Root mode' : 'Non-root mode'} · UID ${worker.uid}` : 'Waiting for local worker'}</span></div><Icon name="terminal" size={17} /></div>
+        <div className="host-card"><div className={`status-dot ${connected ? 'ok' : ''}`} /><div><strong>{connected ? 'Worker connected' : 'Worker disconnected'}</strong><span>{worker ? `${protectedWorker ? 'Operator protected' : 'Protection unverified'} · Agent UID ${worker.executionUid ?? 'unknown'}` : 'Waiting for local worker'}</span></div><Icon name="terminal" size={17} /></div>
         <button className="logout" onClick={() => void logout()}><span className="avatar">A</span><span>Administrator<small>Private workspace</small></span><Icon name="logout" size={17} /></button>
       </div>
     </aside>
     <main className="main-shell">
-      <header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><span>Operator</span><span className="slash">/</span><strong>{viewNames[view]}</strong></div><div className="topbar-right"><span className={`connection-label ${streamConnected ? 'connected' : ''}`}><span className="status-dot" />{streamConnected ? 'Live' : 'Reconnecting'}</span><span className={`privilege-pill ${rootWorker ? 'root-mode' : ''}`} title={worker ? `Worker process ${worker.pid}; real execution UID ${worker.uid}` : 'No worker identity available'}><Icon name="terminal" size={13} />{worker ? `UID ${worker.uid} · ${rootWorker ? 'root' : 'non-root'}` : 'No worker'}</span><button className={`agent-connect-button ${agentConnected ? 'is-connected' : ''}`} aria-haspopup="dialog" aria-expanded={agentOpen} onClick={() => setAgentOpen(true)}><Icon name={agentConnected ? 'check' : 'link'} size={14} />{agentConnected ? 'Agent connected' : worker?.runtime.authenticating ? 'Connecting agent…' : 'Connect agent'}</button></div></header>
+      <header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><span>Operator</span><span className="slash">/</span><strong>{viewNames[view]}</strong></div><div className="topbar-right"><span className={`connection-label ${streamConnected ? 'connected' : ''}`}><span className="status-dot" />{streamConnected ? 'Live' : 'Reconnecting'}</span><span className={`privilege-pill ${protectedWorker ? 'protected-mode' : ''}`} title={worker ? `Worker process ${worker.pid}; broker UID ${worker.uid}; agent UID ${worker.executionUid ?? 'unknown'}. ${protectedWorker ? 'Operator files protected.' : 'Source protection has not been verified.'}` : 'No worker identity available'}><Icon name="terminal" size={13} />{worker ? `Agent UID ${worker.executionUid ?? '?'} · ${protectedWorker ? 'protected' : 'unverified'}` : 'No worker'}</span><button className={`agent-connect-button ${agentConnected ? 'is-connected' : ''}`} aria-haspopup="dialog" aria-expanded={agentOpen} onClick={() => setAgentOpen(true)}><Icon name={agentConnected ? 'check' : 'link'} size={14} />{agentConnected ? 'Agent connected' : worker?.runtime.authenticating ? 'Connecting agent…' : 'Connect agent'}</button></div></header>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
       {queueBlock && <div className="runtime-notice" role="status" style={{ marginTop: 14 }}><Icon name="clock" size={17} /><span><strong>{queueBlock.title}</strong>{queueBlock.detail}{!agentConnected && !status?.maintenance && <button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button>}</span></div>}
       {status?.maintenance && !queueBlock && <div className="notice-banner">Maintenance is active. Work and durable brain writes are paused for a consistent snapshot.</div>}
       {orphanExecutions.length > 0 && <div className="orphan-warning" role="status"><strong>Orphan execution needs reconciliation</strong><p>Inspect the host before resolving. A worker restart left a skill check or other owned execution uncertain. The queue stays paused until the worker terminates or confirms the absence of each owned process. Its actions will not be retried.</p>{orphanExecutions.map(id => <div className="orphan-execution" key={id}><code>{id}</code><button className="secondary-button danger" aria-label={`Host inspected, resolve orphan ${id}`} onClick={() => void runAction(id, 'resolve')}>Host inspected · resolve orphan</button></div>)}</div>}
       {view === 'chat' ? <>
         <div className="conversation-top"><div><div className="eyebrow">CONVERSATION</div><h1>{selected?.title || 'A fresh start'}</h1></div><div className="model-tag"><span className={`status-dot ${worker?.runtime.authenticated ? 'ok' : ''}`} />{worker?.runtime.model || 'Codex'}<span className="muted">{worker?.runtime.version ? `v${worker.runtime.version.replace(/^.*?([\d.]+)$/, '$1')}` : 'app-server'}</span></div></div>
-        {!agentConnected && !queueBlock && <div className="runtime-notice"><Icon name="terminal" size={17} /><span><strong>{worker?.runtime.authenticating ? 'Finish connecting your agent' : 'Connect your agent to get started'}</strong>{rootWorker ? 'Sign in with ChatGPT to let your agent start working.' : 'Start a root worker and sign in with ChatGPT. Conversations and memory are ready.'}<button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button></span></div>}
+        {!agentConnected && !queueBlock && <div className="runtime-notice"><Icon name="terminal" size={17} /><span><strong>{worker?.runtime.authenticating ? 'Finish connecting your agent' : 'Connect your agent to get started'}</strong>{protectedWorker ? 'Sign in with ChatGPT to let your agent start working.' : 'Start a protected worker and sign in with ChatGPT. Conversations and memory are ready.'}<button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button></span></div>}
         <div className="chat-scroll" data-testid="chat-history">
           <div className="chat-content">
             {!detail?.messages.length && !runs.length ? <div className="empty-conversation"><div className="agent-emblem"><Icon name="skill" size={30} /></div><span className="eyebrow">YOUR MACHINE. YOUR OPERATOR.</span><h2>What should we build?</h2><p>Give your operator a goal. It can inspect your VPS, build applications, and remember what it learns.</p><div className="suggestion-grid">{[
@@ -234,7 +235,7 @@ export default function App() {
           <form className="composer" onSubmit={submitPrompt}><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
           <p className="composer-caption">Commands run as the worker’s actual user. <span>Enter to send · Shift + Enter for a new line</span></p>
         </div>
-      </> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
+      </> : view === 'projects' ? <ProjectsPanel workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id); }} onSelectConversation={selectConversation} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
     </main>
     <AgentConnection open={agentOpen} onClose={() => setAgentOpen(false)} worker={worker} onStatusChanged={refreshStatus} />
   </div>;

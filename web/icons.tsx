@@ -1,6 +1,9 @@
 import type { CSSProperties } from 'react';
-export type IconName = 'chat' | 'brain' | 'skill' | 'folder' | 'plus' | 'arrow' | 'stop' | 'chevron' | 'logout' | 'menu' | 'close' | 'search' | 'terminal' | 'clock' | 'check' | 'settings' | 'refresh' | 'link';
+export type IconName = 'chat' | 'brain' | 'skill' | 'folder' | 'plus' | 'arrow' | 'stop' | 'chevron' | 'logout' | 'menu' | 'close' | 'search' | 'terminal' | 'clock' | 'check' | 'settings' | 'refresh' | 'link' | 'layers' | 'globe' | 'code';
 const paths: Record<IconName, React.ReactNode> = {
+  layers: <><path d="m12 3 10 5-10 5L2 8l10-5Z" /><path d="m2 12 10 5 10-5M2 16l10 5 10-5" /></>,
+  globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z" /></>,
+  code: <><path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 16" /></>,
   chat: <path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H5l-3 2v-9.5a8.5 8.5 0 0 1 19-1Z" />,
   brain: <><path d="M12 4a3 3 0 0 0-5-2 3 3 0 0 0-3 4 4 4 0 0 0-1 7 4 4 0 0 0 4 6 3 3 0 0 0 5 2V4Zm0 0a3 3 0 0 1 5-2 3 3 0 0 1 3 4 4 4 0 0 1 1 7 4 4 0 0 1-4 6 3 3 0 0 1-5 2" /><path d="M7 6c0 2 1 3 3 3M4 13c2-1 4 0 4 2m9-9c0 2-1 3-3 3m6 4c-2-1-4 0-4 2" /></>,
   skill: <path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z" />,

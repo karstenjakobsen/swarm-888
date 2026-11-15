@@ -41,6 +41,7 @@ process.stdin.on('end', () => {
     LANG: 'C.UTF-8',
     APP_STATE_DIR: stateDir,
     APP_ALLOW_TEMP_STATE: 'true',
+    APP_PROTECT_OPERATOR: 'false',
     APP_CONTROLLER_UID: String(process.getuid!()),
     APP_ORIGINS: 'http://localhost:5173',
     CODEX_BIN: executable,

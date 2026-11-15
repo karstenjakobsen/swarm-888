@@ -24,12 +24,16 @@ class ConnectionWorker extends EventEmitter {
   calls: Array<{ method: string; params: any }> = [];
   submissions: any[] = [];
   online = true;
+  executionUid?:number;
+  sourceProtected?:boolean;
 
   health() {
     return {
       connected: true, uid: this.uid, pid: 4321, root: this.uid === 0,
       runtime: { available: this.available, version: 'connection-fixture', authenticated: this.authenticated, authenticating: this.authenticating, detail: 'Isolated connection fixture' },
       activeRunId: this.activeRunId, uncertainRuns: this.uncertainRuns,
+      ...(this.executionUid===undefined?{}:{executionUid:this.executionUid}),
+      ...(this.sourceProtected===undefined?{}:{sourceProtected:this.sourceProtected}),
     };
   }
   async connect() {
@@ -252,7 +256,7 @@ test('root-only mode refuses a normal-user worker and supplies a launch command 
     const status = await f.app.inject({ method: 'GET', url: '/api/agent/connection', headers: f.headers });
     assert.equal(status.statusCode, 200, status.body);
     assert.equal(status.json().state, 'error');
-    assert.match(status.json().error, /root.*worker|worker.*root/i);
+    assert.match(status.json().error, /privileged broker|protected worker/i);
     assert.equal(status.json().workerConnected, true);
     assert.equal(status.json().workerUid, f.worker.uid, 'Report the actual normal-user identity');
     const command = status.json().rootWorkerCommand;
@@ -338,4 +342,40 @@ test('a missing worker reports a disconnected agent and preserves queued tasks',
     assert.equal(f.store.run(run.id)?.status, 'queued');
     assert.equal(f.worker.submissions.length, 0);
   } finally { await f.dispose(); }
+});
+
+test('protected mode rejects unrestricted root and mismatched agent identities before login or dispatch',async()=>{
+  const f=await fixture();
+  try{
+    f.config.protectOperator=true;f.config.requireRootWorker=true;f.config.executionUid=2001;f.config.executionGid=2001;f.config.projectsDir=join(f.config.stateDir,'fixture-projects');
+    f.worker.uid=0;f.worker.complete();
+    const conversation=f.store.newConversation(),run=f.store.enqueue(conversation.id,'Never execute with operator release privileges','protected-identity');
+    const status=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});
+    assert.equal(status.json().state,'error');assert.equal(status.json().sourceProtected,false);
+    const denied=await f.app.inject({method:'POST',url:'/api/agent/connect',headers:f.headers,payload:{}});
+    assert.equal(denied.statusCode,409);assert(!f.worker.calls.some(call=>call.method==='agent/connect'));
+    for(const executionUid of [undefined,0,f.config.controllerUid,2002]){
+      f.worker.executionUid=executionUid;f.worker.sourceProtected=true;
+      await f.queue.tick();assert.equal(f.store.run(run.id)?.status,'queued');assert.equal(f.worker.submissions.length,0);
+    }
+    f.worker.executionUid=2001;
+    const verified=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});
+    assert.equal(verified.json().sourceProtected,true);assert.equal(verified.json().executionUid,2001);
+    assert.equal(f.worker.submissions.length,1);
+  }finally{await f.dispose();}
+});
+
+test('missing dedicated account is explained before sudo and launch commands retain its name',async()=>{
+  const f=await fixture();
+  try{
+    f.config.protectOperator=true;f.config.executionUser='vps-ai-missing-fixture-account';f.worker.online=false;
+    const response=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});
+    assert.equal(response.statusCode,200);
+    assert.match(response.json().error,/setup is incomplete.*vps-ai-missing-fixture-account/);
+    assert.match(response.json().rootWorkerCommand,/APP_EXECUTION_USER=vps-ai-missing-fixture-account/);
+    assert(!response.json().rootWorkerCommand.includes(f.config.adminPassword));
+    assert(!response.json().rootWorkerCommand.includes(f.config.ipcToken));
+    const start=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});
+    assert.equal(start.statusCode,503);assert.match(start.json().error,/setup is incomplete/);
+  }finally{await f.dispose();}
 });

@@ -14,6 +14,7 @@ import { acquireLock } from './lock.ts';
 import type { WorkerClient } from './ipc.ts';
 import { AgentConnectionService } from './agent-connection.ts';
 import { toolSchemas } from './brain/schemas.ts';
+import { ProjectService } from './projects/service.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -26,7 +27,10 @@ export async function createController(config:Config, options:{client?:WorkerCli
   try{await brain.initialize();}catch(error){store.close();await app.close();throw error;}
   const queue=new Queue(config,store,brain,options.client);
   const agentConnection=new AgentConnectionService(config,queue,options.agentClient??options.client);
+  const projects=new ProjectService(config,store,queue.client,()=>Boolean(queue.health));
+  brain.setProjects(projects);
   brain.setExecutor(spec=>queue.client.request('checkSkill',spec));
+  brain.setArtifactPublisher(input=>queue.client.request('artifacts/publish',input));
   let bridge:NetServer|undefined;
   let bridgeOwned=false;
   const bridgeSockets=new Set<Socket>();
@@ -91,6 +95,15 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.post('/api/agent/connect',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.connect();});
   app.post('/api/agent/cancel',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.cancel();});
   app.post('/api/agent/worker',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.startWorker();});
+  app.get('/api/projects',async()=>projects.list());
+  app.post('/api/projects',async req=>{writable();return projects.create(req.body);});
+  app.get('/api/projects/:id',async(req:any)=>projects.get(req.params.id));
+  app.patch('/api/projects/:id',async(req:any)=>{writable();return projects.update(req.params.id,req.body);});
+  app.post('/api/projects/:id/components',async(req:any)=>{writable();return projects.addComponent(req.params.id,req.body);});
+  app.patch('/api/projects/:id/components/:componentId',async(req:any)=>{writable();return projects.updateComponent(req.params.id,req.params.componentId,req.body);});
+  app.post('/api/projects/:id/refresh',async(req:any)=>{z.object({}).strict().parse(req.body??{});return projects.refresh(req.params.id);});
+  app.get('/api/projects/:id/components/:componentId/logs',async(req:any)=>redacted(await projects.logs(req.params.id,req.params.componentId)));
+  app.post('/api/projects/:id/conversations',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return projects.newConversation(req.params.id);});
   app.get('/api/conversations',async()=>store.conversations());
   app.post('/api/conversations',async req=>{writable();const body=z.object({title:z.string().trim().min(1).max(150).optional()}).parse(req.body??{});return store.newConversation(body.title);});
   app.get('/api/conversations/:id',async(req:any)=>{
@@ -160,7 +173,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const close=()=>closePromise??=(async()=>{
     closing=true;
     for(const end of streams)end();
-    agentConnection.close();queue.close();
+    projects.close();agentConnection.close();queue.close();
     for(const socket of bridgeSockets)socket.destroy();
     if(bridge?.listening)await new Promise<void>((ok,no)=>bridge!.close(error=>error?no(error):ok()));
     await Promise.allSettled([...toolCalls]);
@@ -203,7 +216,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   }
   if(options.startQueue!==false)await queue.start();
 
-  return {app,store,brain,queue,agentConnection,close,get pendingTools(){return pendingTools;}};
+  return {app,store,brain,queue,agentConnection,projects,close,get pendingTools(){return pendingTools;}};
   }catch(error){await close();throw error;}
 }
 

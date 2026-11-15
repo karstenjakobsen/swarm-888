@@ -94,3 +94,19 @@ test('restore rejects symlinked skill directories before touching external files
     assert.equal(existsSync(path.join(target.stateDir,'worker/lock.json')),false);
   }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('legacy snapshots fail closed for external execution roots and registered projects',async()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'operator-backup-project-layout-')),source=config(path.join(root,'source')),target=config(path.join(root,'target')),snapshot=path.join(root,'snapshot');
+  const store=new Store(source.stateDir);await new Brain(store.db,source.stateDir).initialize();
+  try{
+    const external={...source,runtimeHome:path.join(root,'executor/codex'),projectsDir:path.join(root,'projects')};
+    await assert.rejects(exportBrain(external,snapshot),/owner-controlled backup/);
+    assert.equal(existsSync(snapshot),false);assert.equal(existsSync(path.join(source.stateDir,'controller.lock')),false);
+    await exportBrain(source,snapshot);
+    await assert.rejects(restoreBrain({...target,runtimeHome:path.join(root,'restored-executor/codex')},snapshot),/automatic external-data restore is not supported/);
+    assert.equal(existsSync(path.join(target.stateDir,'operator.sqlite')),false);
+    const now=new Date().toISOString();store.projects.create({id:'d9cde03b-ce43-48c7-a568-cd88ef41f738',name:'Registered project',description:'Metadata only',directory:path.join(source.stateDir,'projects/site'),origin:'created',createdAt:now,updatedAt:now});
+    await assert.rejects(exportBrain(source,path.join(root,'project-snapshot')),/do not include project workspace data/);
+    assert.equal(existsSync(path.join(root,'project-snapshot')),false);
+  }finally{store.close();rmSync(root,{recursive:true,force:true});}
+});

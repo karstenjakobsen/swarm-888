@@ -14,7 +14,7 @@ export async function replaceIdleNonRootWorker(config:Config):Promise<boolean>{
   try{
     let health;
     try{health=await client.connect();}catch(error){if((error as NodeJS.ErrnoException).code==='ECONNREFUSED')return true;throw error;}
-    if(health.uid===0&&health.root)return false;
+    if(health.uid===0&&health.root){if(config.protectOperator===true&&!health.sourceProtected)throw new Error('The existing worker has unrestricted root execution. Stop it in its terminal before starting the protected worker.');return false;}
     if(health.activeRunId||health.uncertainRuns.length||health.runtime.authenticating)throw new Error('The existing worker is busy or uncertain. Finish, interrupt, or reconcile its work before replacing it with the root worker.');
     try{
       const reservation=await client.request('worker/reserve-root-replacement',{});
@@ -46,7 +46,7 @@ async function main(){
   const config=loadConfig();config.requireRootWorker=true;
   if(!await replaceIdleNonRootWorker(config)){console.log('The root worker is already running.');return;}
   const worker=new WorkerServer(config);await worker.listen();
-  console.log(`Root worker connected on the private Unix socket; UID ${process.getuid?.()}.`);
+  console.log(`Worker broker connected on the private Unix socket; broker UID ${process.getuid?.()}, execution UID ${worker.health().executionUid}, source protected: ${worker.health().sourceProtected}.`);
   let stopping=false;for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{if(!stopping){stopping=true;void worker.close().then(()=>process.exit(0));}});
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{console.error(error.message);process.exitCode=1;});

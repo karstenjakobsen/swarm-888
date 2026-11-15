@@ -5,9 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { AppEvent, Conversation, Message, Run, RunStatus } from './shared.ts';
 import { terminal } from './shared.ts';
+import { ProjectStore } from './projects/store.ts';
 
 export class Store extends EventEmitter {
   db: DatabaseSync;
+  projects: ProjectStore;
   constructor(stateDir:string) {
     super();
     this.db = new DatabaseSync(join(stateDir,'operator.sqlite'));
@@ -16,7 +18,10 @@ export class Store extends EventEmitter {
     this.transaction(()=>{
       this.db.exec(readFileSync(new URL('../migrations/001-core.sql',import.meta.url),'utf8'));
       this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (1,?)').run(new Date().toISOString());
+      this.db.exec(readFileSync(new URL('../migrations/002-projects.sql',import.meta.url),'utf8'));
+      this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (2,?)').run(new Date().toISOString());
     });
+    this.projects = new ProjectStore(this.db);
   }
   transaction<T>(fn:()=>T):T { this.db.exec('BEGIN IMMEDIATE');try {const value=fn();this.db.exec('COMMIT');return value;} catch(e){this.db.exec('ROLLBACK');throw e;} }
   setting(key:string):string|undefined {return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as {value:string}|undefined)?.value;}

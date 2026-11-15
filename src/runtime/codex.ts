@@ -1,7 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import type { Config } from '../config.js';
@@ -16,6 +15,8 @@ import type { CancelLoginAccountParams } from './generated/v2/CancelLoginAccount
 import type { CancelLoginAccountResponse } from './generated/v2/CancelLoginAccountResponse.js';
 import type { AccountLoginCompletedNotification } from './generated/v2/AccountLoginCompletedNotification.js';
 import { terminateGroup } from './processes.js';
+import { executionCommand, executionEnvironment, prepareExecutionProfile, verifyExecutionProtection } from './protection.ts';
+import { createToolProxy } from './tool-proxy.ts';
 
 export const CODEX_VERSION = '0.166.0';
 const envelope = z.object({ id: z.union([z.number(), z.string()]).optional(), method: z.string().optional(), params: z.unknown().optional(), result: z.unknown().optional(), error: z.object({ code: z.number(), message: z.string() }).passthrough().optional() });
@@ -27,6 +28,7 @@ export type DeviceLogin = Extract<LoginAccountResponse, { type: 'chatgptDeviceCo
 const clarificationSchema = z.object({ threadId: z.string(), turnId: z.string(), itemId: z.string(), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string(), isSecret: z.boolean().optional(), options: z.array(z.object({ label: z.string(), description: z.string() })).nullable().optional() }).passthrough()) }).passthrough();
 
 export function runtimeEnvironment(config: Config, runId?: string): NodeJS.ProcessEnv {
+  if(config.protectOperator===true)return {...executionEnvironment(config),CODEX_HOME:config.runtimeHome,CODEX_DISABLE_UPDATE_CHECK:'1',OPERATOR_RUN_ID:runId??''};
   return { ...process.env, CODEX_HOME: resolve(config.stateDir, 'runtime'), APP_STATE_DIR: config.stateDir,
     APP_BRIDGE_SOCKET: resolve(config.stateDir, 'bridge.sock'), APP_BRIDGE_TOKEN: config.ipcToken,
     OPERATOR_RUN_ID: runId ?? '', CODEX_DISABLE_UPDATE_CHECK: '1' };
@@ -40,6 +42,7 @@ export class CodexAdapter extends EventEmitter {
   private requests = new Map<string, { id: number | string; method: string }>();
   private buffer = '';
   private shuttingDown = false;
+  private toolProxy?:Awaited<ReturnType<typeof createToolProxy>>;
   private improvement?: { limit: number; observed: Set<string>; interrupted: boolean; interruptSent: boolean };
   threadId?: string;
   turnId?: string;
@@ -47,8 +50,10 @@ export class CodexAdapter extends EventEmitter {
   constructor(private config: Config, private runId?: string) { super(); }
 
   async start(): Promise<void> {
-    mkdirSync(resolve(this.config.stateDir, 'runtime'), { recursive: true, mode: 0o700 });
-    const version = spawnSync(this.config.codexBin, ['--version'], { env: runtimeEnvironment(this.config), encoding: 'utf8', timeout: 10_000 });
+    verifyExecutionProtection(this.config);
+    prepareExecutionProfile(this.config);
+    const versionCommand=executionCommand(this.config,this.config.codexBin,['--version']);
+    const version = spawnSync(versionCommand.command, versionCommand.args, { env: runtimeEnvironment(this.config), cwd:this.config.protectOperator?this.config.runtimeHome:undefined, encoding: 'utf8', timeout: 10_000 });
     if (version.error) throw new Error(`Codex executable unavailable: ${version.error.message}. Run npm ci.`);
     this.version = version.stdout.trim().replace(/^codex-cli\s+/, '');
     if (version.status !== 0 || this.version !== CODEX_VERSION) throw new Error(`Codex ${CODEX_VERSION} required; executable reports ${this.version || 'unknown'}`);
@@ -62,7 +67,11 @@ export class CodexAdapter extends EventEmitter {
       '-c', `mcp_servers.operator.env_vars=${JSON.stringify(['APP_STATE_DIR', 'APP_BRIDGE_SOCKET', 'APP_BRIDGE_TOKEN', 'OPERATOR_RUN_ID', ...(process.env.LD_LIBRARY_PATH ? ['LD_LIBRARY_PATH'] : [])])}`,
       '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',
     ];
-    const child = spawn(this.config.codexBin, args, { env: runtimeEnvironment(this.config, this.runId), stdio: 'pipe', detached: true });
+    if(this.config.protectOperator===true)this.toolProxy=await createToolProxy(this.config,this.runId);
+    const invocation=executionCommand(this.config,this.config.codexBin,args);
+    const environment=runtimeEnvironment(this.config,this.runId);
+    if(this.toolProxy){environment.APP_BRIDGE_SOCKET=this.toolProxy.socketPath;environment.APP_BRIDGE_TOKEN=this.toolProxy.token;}
+    const child = spawn(invocation.command, invocation.args, { env:environment, cwd:this.config.protectOperator?this.config.runtimeHome:undefined, stdio: 'pipe', detached: true });
     this.process = child;
     child.once('spawn', () => this.emit('spawn', { pid: child.pid! }));
     child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => this.consume(chunk));
@@ -207,11 +216,12 @@ export class CodexAdapter extends EventEmitter {
   private fail(error: Error): void { this.rejectPending(error); this.emit('fault', error); }
   async close(): Promise<void> {
     this.shuttingDown = true; this.requests.clear(); this.rejectPending(new Error('Codex adapter closed'));
-    const child = this.process; if (!child?.pid) return;
+    const child = this.process; if (!child?.pid){await this.toolProxy?.close();return;}
     const pid = child.pid;
     // Wait for every member of the owned session, even if the app-server leader
     // already exited. A deliberately detached deployment has a different group.
     await terminateGroup(pid);
     if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolveExit => { const timer = setTimeout(resolveExit, 1000); child.once('exit', () => { clearTimeout(timer); resolveExit(); }); });
+    await this.toolProxy?.close();
   }
 }
