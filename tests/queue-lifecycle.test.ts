@@ -9,6 +9,8 @@ import { Store } from '../src/store.ts';
 import type { Brain } from '../src/brain/index.ts';
 import type { Config } from '../src/config.ts';
 import type { WorkerClient } from '../src/ipc.ts';
+import type { ManagedService } from '../src/managed/service.ts';
+import type { ConnectorService } from '../src/connectors/service.ts';
 
 class FixtureWorker extends EventEmitter {
   calls:string[]=[];
@@ -47,4 +49,17 @@ test('maintenance enabled during queue preparation leaves work queued',async()=>
     const tick=queue.tick();await preparing;store.setSetting('maintenance','true');release();await tick;
     assert.equal(store.run(run.id)?.status,'queued');assert(!client.calls.includes('submit'));
   }finally{release();queue.close();store.close();rmSync(stateDir,{recursive:true,force:true});}
+});
+
+test('shutdown drains source recovery before its caller can close persistent state',async()=>{
+  const stateDir=mkdtempSync(join(tmpdir(),'operator-source-drain-')),store=new Store(stateDir),client=new FixtureWorker();
+  let release!:()=>void,ready!:()=>void,accessed=false;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),entered=new Promise<void>(resolve=>{ready=resolve;});
+  const queue=new Queue({stateDir,improvementEnabled:false} as Config,store,{ensureFoundation:async()=>{}} as Brain,client as unknown as WorkerClient);
+  queue.setManaged({recoverSource:async()=>{ready();await gate;store.setting('maintenance');accessed=true;}} as ManagedService,{} as ConnectorService);
+  try{
+    const ticking=queue.tick();await entered;queue.close();let drained=false;
+    const draining=queue.drainSource().then(()=>{drained=true;});await Promise.resolve();assert.equal(drained,false);
+    release();await Promise.all([ticking,draining]);assert.equal(accessed,true);assert(!client.calls.includes('submit'));
+  }finally{release();queue.close();await queue.drainSource();store.close();rmSync(stateDir,{recursive:true,force:true});}
 });

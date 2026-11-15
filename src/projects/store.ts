@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { Run } from '../shared.ts';
-import { componentObservation, type ComponentInput, type ComponentObservation, type Project, type ProjectComponent, type ProjectStatus } from './schemas.ts';
+import { componentObservation, type ComponentInput, type ComponentObservation, type Project, type ProjectComponent, type ProjectStatus, type ProjectDeployment } from './schemas.ts';
 
 type ProjectRow = Pick<Project,'id'|'name'|'description'|'directory'|'origin'|'createdAt'|'updatedAt'>;
 type ComponentRow = Omit<ProjectComponent,'observation'|'status'|'stale'> & {observation:string|null};
@@ -79,7 +79,13 @@ export class ProjectStore {
     const status:ProjectStatus=statuses.includes('failed')?'failed':!statuses.length||statuses.includes('unknown')?'unknown':statuses.includes('stopped')?'stopped':statuses.includes('healthy')?'healthy':statuses.includes('running')?'running':statuses.includes('scheduled')?'scheduled':'ready';
     const conversationIds=(this.db.prepare('SELECT conversationId FROM project_conversations WHERE projectId=? ORDER BY rowid DESC').all(row.id) as {conversationId:string}[]).map(item=>item.conversationId);
     const runs=this.db.prepare('SELECT r.* FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? ORDER BY r.createdAt DESC,r.rowid DESC LIMIT 20').all(row.id) as unknown as Run[];
-    return {...row,components,status,lastCheckedAt:checked.at(-1)??null,conversationIds,runs};
+    const source=this.db.prepare('SELECT source FROM project_sources WHERE projectId=?').get(row.id) as {source:string}|undefined;
+    const deployed=this.db.prepare('SELECT commitSha,releaseDirectory,unitName,status,detail,checkedAt FROM project_deployments WHERE projectId=?').get(row.id) as ({commitSha:string}&Omit<ProjectDeployment,'commit'>)|undefined;
+    const connectorIds=(this.db.prepare('SELECT connectorId FROM project_connectors WHERE projectId=? ORDER BY connectorId').all(row.id) as {connectorId:string}[]).map(item=>item.connectorId);
+    return {...row,components,status,lastCheckedAt:checked.at(-1)??null,conversationIds,runs,
+      ...(source?{source:JSON.parse(source.source)}:{}),...(deployed?{deployment:{commit:deployed.commitSha,releaseDirectory:deployed.releaseDirectory,unitName:deployed.unitName,status:deployed.status,detail:deployed.detail,checkedAt:deployed.checkedAt}}:{}),
+      ...(connectorIds.length?{connectorIds}:{}),
+    };
   }
   private transaction<T>(action:()=>T):T {
     this.db.exec('BEGIN IMMEDIATE');try{const value=action();this.db.exec('COMMIT');return value;}catch(error){this.db.exec('ROLLBACK');throw error;}

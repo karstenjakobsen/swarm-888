@@ -13,6 +13,8 @@ export interface Config {
   improvementMaxTurns: number; allowTempState: boolean;
   requireRootWorker?: boolean;
   projectsDir?: string;
+  /** Git repository used for generated packages; runtime state remains outside it. */
+  repositoryPath?: string;
 }
 
 function integer(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -63,6 +65,7 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
     improvementTimeoutMs: integer(process.env.APP_IMPROVEMENT_TIMEOUT_MS, 90_000, 1000, 600_000),
     improvementMaxTurns: integer(process.env.APP_IMPROVEMENT_MAX_TURNS, 3, 1, 10), allowTempState,
     requireRootWorker:process.env.APP_REQUIRE_ROOT_WORKER!=='false',projectsDir,
+    repositoryPath:resolve(process.env.APP_REPOSITORY_PATH??projectRoot),
   };
   initState(config);
   return config;

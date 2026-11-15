@@ -3,6 +3,7 @@ import type { ComponentInput, ComponentKind, Project, ProjectComponent, ProjectS
 import type { Conversation } from './types';
 import { api, post } from './api';
 import { Icon, type IconName } from './icons';
+import { ProjectConnections, ProjectWorkspace } from './ProjectWorkspace';
 
 const kindNames: Record<ComponentKind, string> = { website: 'Website', service: 'Background service', scheduled_job: 'Scheduled job', script: 'Manual script' };
 const kindIcons: Record<ComponentKind, IconName> = { website: 'globe', service: 'terminal', scheduled_job: 'clock', script: 'code' };
@@ -14,14 +15,18 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
   return <span className={`project-status ${status}`}><span className="status-dot" />{statusNames[status]}</span>;
 }
 
-export function ProjectsPanel({ workerConnected, onError, onConversation, onSelectConversation }: {
+export function ProjectsPanel({ workerConnected, onError, onConversation, onSelectConversation, initialProjectId, onBeforeNavigate, onUnsavedSourceChange, navigationPending }: {
   workerConnected: boolean;
   onError: (message: string) => void;
   onConversation: (conversation: Conversation) => void;
   onSelectConversation: (id: string) => void;
+  initialProjectId?: string | null;
+  onBeforeNavigate: () => boolean;
+  onUnsavedSourceChange: (dirty: boolean) => void;
+  navigationPending: boolean;
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialProjectId ?? null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [editor, setEditor] = useState<'create' | 'edit' | null>(null);
@@ -53,7 +58,7 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
   useEffect(() => { logsGeneration.current++; setLogs(null); setLogsBusy(null); setComponentEditor(null); }, [selectedId]);
   useEffect(() => () => { logsGeneration.current++; }, []);
 
-  const choose = (id: string) => { selection.current = id; setSelectedId(id); setEditor(null); };
+  const choose = (id: string) => { if ((id !== selectedId || editor) && !onBeforeNavigate()) return; selection.current = id; setSelectedId(id); setEditor(null); };
   const saveProject = (value: Project) => {
     generation.current++;
     setProjects(previous => previous.some(project => project.id === value.id) ? previous.map(project => project.id === value.id ? value : project) : [value, ...previous]);
@@ -70,7 +75,7 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
     finally { setBusy(false); }
   };
   const ask = async () => {
-    if (!selected || busy) return;
+    if (!selected || busy || !onBeforeNavigate()) return;
     setBusy(true);
     try { onConversation(await post<Conversation>(`/projects/${encodeURIComponent(selected.id)}/conversations`)); }
     catch (error) { onError(errorMessage(error)); }
@@ -90,7 +95,7 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
   const filtered = projects.filter(project => `${project.name} ${project.description}`.toLowerCase().includes(query.toLowerCase()));
 
   return <section className="resource-panel projects-panel">
-    <div className="page-heading"><div><div className="eyebrow">WHAT YOU'RE BUILDING</div><h1>Projects</h1><p>Your websites, services, and automations. Beyond the conversation.</p></div><button className="primary-button" onClick={() => { setEditor('create'); setComponentEditor(null); }}><Icon name="plus" size={15} />Create project</button></div>
+    <div className="page-heading"><div><div className="eyebrow">WHAT YOU'RE BUILDING</div><h1>Projects</h1><p>Your websites, services, and automations. Beyond the conversation.</p></div><button className="primary-button" onClick={() => { if (onBeforeNavigate()) { setEditor('create'); setComponentEditor(null); } }}><Icon name="plus" size={15} />Create project</button></div>
     {!workerConnected && <div className="project-connection-note" role="status"><Icon name="clock" size={16} /><span><strong>Live status is unknown</strong>The worker is unavailable. Saved projects and previous observations remain here.</span></div>}
     <div className="projects-layout">
       <aside className="projects-list" aria-label="Project list">
@@ -101,9 +106,11 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
       </aside>
       <div className="project-content">
         {editor ? <ProjectEditor key={editor === 'edit' ? selected?.id : 'new'} project={editor === 'edit' ? selected : undefined} onCancel={() => setEditor(null)} onSave={saveProject} onError={onError} /> : selected ? <>
-          <div className="project-detail-heading"><div><div className="eyebrow">{selected.origin === 'adopted' ? 'REGISTERED PROJECT' : 'PROJECT'}</div><h2>{selected.name}</h2><p>{selected.description || 'Give your operator a goal to start building this project.'}</p></div><button className="subtle-button" onClick={() => setEditor('edit')} aria-label="Edit project"><Icon name="settings" size={14} />Edit</button></div>
+          <div className="project-detail-heading"><div><div className="eyebrow">{selected.origin === 'adopted' ? 'REGISTERED PROJECT' : 'PROJECT'}</div><h2>{selected.name}</h2><p>{selected.description || 'Give your operator a goal to start building this project.'}</p></div><button className="subtle-button" onClick={() => { if (onBeforeNavigate()) setEditor('edit'); }} aria-label="Edit project"><Icon name="settings" size={14} />Edit</button></div>
           <div className="project-overview"><StatusBadge status={workerConnected ? selected.status : 'unknown'} /><span>Last checked: {timestamp(selected.lastCheckedAt)}</span><button className="subtle-button" onClick={() => void refresh()} disabled={busy || !workerConnected}><Icon name="refresh" size={14} />{busy ? 'Working…' : 'Refresh status'}</button></div>
           <div className="project-actions"><button className="primary-button" onClick={() => void ask()} disabled={busy}><Icon name="chat" size={15} />Ask operator</button><span className="small-note">Start a conversation with this project's context.</span></div>
+          <ProjectWorkspace readOnly={busy || navigationPending} key={`source-${selected.id}`} project={selected} workerConnected={workerConnected} onUpdated={load} onError={onError} onDirtyChange={onUnsavedSourceChange} />
+          <ProjectConnections key={`connections-${selected.id}`} project={selected} onUpdated={load} onError={onError} />
           <div className="project-section-heading"><h3>Components <span>{selected.components.length}</span></h3><button className="secondary-button" onClick={() => setComponentEditor('new')}><Icon name="plus" size={13} />Add component</button></div>
           {componentEditor && <ComponentEditor key={typeof componentEditor === 'string' ? 'new' : componentEditor.id} projectId={selected.id} component={typeof componentEditor === 'string' ? undefined : componentEditor} onCancel={() => setComponentEditor(null)} onSave={async () => { logsGeneration.current++; setLogs(null); setLogsBusy(null); setComponentEditor(null); await load(); }} onError={onError} />}
           <div className="project-components">
@@ -135,18 +142,20 @@ function ProjectEditor({ project, onSave, onCancel, onError }: { project?: Proje
   const [description, setDescription] = useState(project?.description || '');
   const [origin, setOrigin] = useState<'created' | 'adopted'>('created');
   const [directory, setDirectory] = useState('');
+  const [managed, setManaged] = useState(true);
+  const [template, setTemplate] = useState('service');
   const [saving, setSaving] = useState(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const save = async (event: React.FormEvent) => {
     event.preventDefault();setSaving(true);
     try {
-      const value = project ? await api<Project>(`/projects/${encodeURIComponent(project.id)}`, { method: 'PATCH', body: JSON.stringify({ name, description }) }) : await post<Project>('/projects', { name, description, origin, ...(origin === 'adopted' ? { directory } : {}) });
+      const value = project ? await api<Project>(`/projects/${encodeURIComponent(project.id)}`, { method: 'PATCH', body: JSON.stringify({ name, description }) }) : await post<Project>('/projects', { name, description, origin, ...(origin === 'adopted' ? { directory } : { managed, ...(managed ? { template } : {}) }) });
       if (mounted.current) onSave(value);
     } catch (error) { if (mounted.current) onError(errorMessage(error)); }
     finally { if (mounted.current) setSaving(false); }
   };
-  return <form className="project-editor" onSubmit={save}><div className="project-detail-heading"><div><div className="eyebrow">{project ? 'PROJECT DETAILS' : 'SOMETHING NEW'}</div><h2>{project ? 'Edit project' : 'Create a project'}</h2></div><button className="icon-button" type="button" aria-label="Close project editor" onClick={onCancel}><Icon name="close" size={17} /></button></div><label htmlFor="project-name">Project name</label><input id="project-name" value={name} onChange={event => setName(event.target.value)} required maxLength={120} placeholder="My website" autoFocus /><label htmlFor="project-description">Description</label><textarea id="project-description" value={description} onChange={event => setDescription(event.target.value)} maxLength={4000} rows={3} placeholder="What are you building?" />{!project && <><label htmlFor="project-origin">Start with</label><select id="project-origin" value={origin} onChange={event => setOrigin(event.target.value as 'created' | 'adopted')}><option value="created">A new project directory</option><option value="adopted">An existing project directory</option></select>{origin === 'adopted' ? <><label htmlFor="project-directory">Existing directory</label><input id="project-directory" value={directory} onChange={event => setDirectory(event.target.value)} placeholder="Absolute path inside the projects directory" required /><p className="small-note">Register a directory within the configured projects area.</p></> : <p className="small-note">A persistent directory is assigned to the project when you create it.</p>}</>}<div className="editor-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving || !name.trim()}>{saving ? 'Saving…' : project ? 'Save project' : 'Create project'}</button></div></form>;
+  return <form className="project-editor" onSubmit={save}><div className="project-detail-heading"><div><div className="eyebrow">{project ? 'PROJECT DETAILS' : 'SOMETHING NEW'}</div><h2>{project ? 'Edit project' : 'Create a project'}</h2></div><button className="icon-button" type="button" aria-label="Close project editor" onClick={onCancel}><Icon name="close" size={17} /></button></div><label htmlFor="project-name">Project name</label><input id="project-name" value={name} onChange={event => setName(event.target.value)} required maxLength={120} placeholder="My website" autoFocus /><label htmlFor="project-description">Description</label><textarea id="project-description" value={description} onChange={event => setDescription(event.target.value)} maxLength={4000} rows={3} placeholder="What are you building?" />{!project && <><label htmlFor="project-origin">Start with</label><select id="project-origin" value={origin} onChange={event => setOrigin(event.target.value as 'created' | 'adopted')}><option value="created">A new project directory</option><option value="adopted">An existing project directory</option></select>{origin === 'adopted' ? <><label htmlFor="project-directory">Existing directory</label><input id="project-directory" value={directory} onChange={event => setDirectory(event.target.value)} placeholder="Absolute path inside the projects directory" required /><p className="small-note">Register a directory within the configured projects area.</p></> : <div className="managed-project-options"><label className="checkbox-label"><input type="checkbox" checked={managed} onChange={event => setManaged(event.target.checked)} /><span>Manage source and deployments</span></label><p className="small-note">Keep source history, edit files, and deploy committed releases from this workspace.</p>{managed && <><label htmlFor="project-template">Project template</label><select id="project-template" value={template} onChange={event => setTemplate(event.target.value)}><option value="service">Node service</option><option value="empty">Empty package</option></select></>}<p className="small-note">A persistent project directory is assigned automatically.</p></div>}</>}<div className="editor-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving || !name.trim()}>{saving ? 'Saving…' : project ? 'Save project' : 'Create project'}</button></div></form>;
 }
 
 function ComponentEditor({ projectId, component, onSave, onCancel, onError }: { projectId: string; component?: ProjectComponent; onSave: () => Promise<void>; onCancel: () => void; onError: (message: string) => void }) {

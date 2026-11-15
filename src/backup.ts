@@ -56,6 +56,7 @@ export async function exportBrain(config:Config,destination:string){
     if(existsSync(journal)){const db=new DatabaseSync(journal,{readOnly:true});try{
       if(db.prepare("SELECT id FROM worker_runs WHERE status IN ('accepted','running','waiting','uncertain') LIMIT 1").get())throw new Error('Resolve owned worker execution before exporting');
       if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_checks'").get()&&db.prepare('SELECT id FROM worker_checks LIMIT 1').get())throw new Error('Resolve owned representative skill-check execution before exporting');
+      if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_runtime_operations'").get()&&db.prepare('SELECT id FROM worker_runtime_operations LIMIT 1').get())throw new Error('Resolve or acknowledge runtime operations before exporting');
     }finally{db.close();}}
     mkdirSync(temp,{recursive:true,mode:0o700});
     await sqliteSnapshot(source,join(temp,'operator.sqlite'));

@@ -11,6 +11,7 @@ export interface Run {id:string; conversationId:string; prompt:string; status:Ru
 export interface Message {id:string;conversationId:string;runId:string;role:'user'|'assistant';content:string;createdAt:string}
 export interface AppEvent {seq:number;runId:string|null;conversationId:string|null;type:string;data:unknown;createdAt:string}
 export const terminal = new Set<RunStatus>(['completed','failed','interrupted']);
+export const ResolveInput=z.object({acknowledgeExternalEffects:z.boolean().optional()}).strict();
 
 /** Older brokers may be root while their agent runs as a different user. */
 export function rootExecution(health:{uid:number;root:boolean;executionUid?:number}|null|undefined):boolean {

@@ -65,7 +65,9 @@ test('snapshot refuses live controller or worker locks and unresolved controller
     const journal=new WorkerJournal(source.stateDir);journal.accept({runId:'worker-uncertain',conversationId:conversation.id,prompt:'fixture',cwd:path.join(source.stateDir,'workspaces'),bootstrap:'',skills:[],kind:'user',threadId:null});journal.status('worker-uncertain','uncertain');
     await assert.rejects(exportBrain(source,path.join(root,'snapshot4')),/Resolve owned worker execution/);
     journal.status('worker-uncertain','interrupted');journal.beginCheck('fixture_owned_orphan',null,path.join(source.stateDir,'skills/staging/fixture'));
-    await assert.rejects(exportBrain(source,path.join(root,'snapshot5')),/representative skill-check execution/);journal.close();
+    await assert.rejects(exportBrain(source,path.join(root,'snapshot5')),/representative skill-check execution/);journal.finishCheck('fixture_owned_orphan');
+    journal.beginRuntimeOperation('runtime_11111111-1111-4111-8111-111111111111','connectors/call');
+    await assert.rejects(exportBrain(source,path.join(root,'snapshot6')),/runtime operations before exporting/);journal.close();
     await assert.rejects(exportBrain(source,path.join(source.stateDir,'nested-snapshot')),/outside APP_STATE_DIR/);
   }finally{store.close();rmSync(root,{recursive:true,force:true});}
 });

@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Config } from '../src/config.js';
+import { initState, type Config } from '../src/config.js';
 import { CodexAdapter } from '../src/runtime/codex.js';
 import { createController } from '../src/controller.ts';
 import { WorkerServer } from '../src/worker.ts';
@@ -62,6 +62,20 @@ test('adapter handles generated-protocol lifecycle, deltas, and observed interru
     const interrupted = new Promise<void>(resolve => adapter.on('event', (type, data) => { if (type === 'completed' && data.status === 'interrupted') resolve(); }));
     await adapter.run({ runId: 'run-1', conversationId: 'c1', threadId: 'thread-1', prompt: 'wait', cwd: directory, bootstrap: '', skills: [] }); await adapter.interrupt(); await interrupted;
   } finally { await adapter.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('Codex startup cannot execute before its run process identity is durably captured',async()=>{
+  const {config,directory}=setup(),marker=join(directory,'unrecorded-app-server-start');
+  const source=fixture.replace("import readline from 'node:readline';",`import readline from 'node:readline';import {writeFileSync} from 'node:fs';`).replace("const send=x=>",`if(process.env.OPERATOR_RUN_ID==='capture_failure')writeFileSync(${JSON.stringify(marker)},'executed');\nconst send=x=>`);
+  writeFileSync(config.codexBin,source,{mode:0o700});initState(config);
+  const worker=new WorkerServer(config);
+  try{
+    await worker.listen();worker.journal.child=()=>{throw new Error('Fixture durable run identity capture failed');};
+    await (worker as any).dispatch('submit',{runId:'capture_failure',conversationId:'fixture',prompt:'hello',cwd:join(directory,'workspaces','fixture'),bootstrap:'',skills:[]});
+    const deadline=Date.now()+5000;
+    while(worker.journal.get('capture_failure')?.status!=='failed'&&Date.now()<deadline)await new Promise(ok=>setTimeout(ok,10));
+    assert.equal(worker.journal.get('capture_failure')?.status,'failed');assert.equal(existsSync(marker),false);
+  }finally{await worker.close();rmSync(directory,{recursive:true,force:true});}
 });
 test('adapter forwards clarification request and replies to the same JSON-RPC request', async () => {
   const { config, directory } = setup(); const adapter = new CodexAdapter(config, 'run-2');

@@ -160,3 +160,107 @@
 .project-task-history>button>small{font-size:9px;flex-shrink:0}
 @media(max-width:1100px){.projects-layout{grid-template-columns:minmax(205px,32%) minmax(0,1fr)}.project-content{padding:23px}.project-list-item{padding:12px 8px;gap:7px}.project-list-icon{width:22px}.project-list-item .project-status{font-size:8px;padding:4px 5px;gap:4px}.project-actions{align-items:flex-start;gap:12px}.project-actions>.small-note{font-size:9px}.project-detail-heading h2{font-size:23px}.project-component{padding:15px}}
 @media(max-width:680px){.projects-layout{display:flex;flex-direction:column}.projects-list{border-right:0;border-bottom:1px solid var(--line);max-height:280px;overflow:auto;padding-bottom:12px}.project-list-item{padding:12px}.project-list-copy strong{font-size:12px}.project-list-copy small{font-size:10px}.project-list-item .project-status{font-size:9px}.project-content{padding:22px 17px}.project-welcome{min-height:350px;padding:30px 15px}.project-welcome h2{font-size:26px}.project-welcome p{font-size:11px}.project-detail-heading{gap:12px}.project-detail-heading h2{font-size:24px}.project-actions{align-items:center;margin-bottom:26px}.project-overview{gap:9px}.project-overview>.subtle-button{margin-left:0}.project-component{padding:15px}.project-component-heading{gap:9px}.project-component-heading h4{font-size:12px}.project-component-icon{width:31px;height:34px}.project-component-heading .eyebrow{font-size:7px}.project-component-facts{grid-template-columns:74px minmax(0,1fr);gap:8px;font-size:9px}.project-component-editor{padding:15px}.project-component-editor .form-row{flex-direction:column;gap:0}.project-connection-note{font-size:9px;margin-bottom:20px}.project-editor input,.project-editor textarea,.project-editor select{font-size:12px}}
+
+/* Source packages and MCP connections share the project workspace's neutral layers. */
+.project-workspace,.project-connections{margin:0 0 28px;padding:20px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.project-workspace>.project-section-heading,.project-connections>.project-section-heading{margin-top:0}
+.project-section-heading h3{display:flex;align-items:center;gap:8px}
+.project-workspace .project-section-heading h3>svg{color:var(--accent)}
+.project-connections .project-section-heading h3>svg{color:var(--info)}
+.source-branch{font:10px ui-monospace,SFMono-Regular,monospace;color:var(--accent);overflow-wrap:anywhere}
+.source-empty>p{font-size:11px;line-height:1.8;color:var(--muted);margin:0 0 15px}
+.source-actions,.source-editor-toolbar,.source-new-file,.connection-actions,.management-heading-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.source-actions>button,.source-actions>select,.source-new-file>button,.connection-actions>button{font-size:10px}
+.source-actions>select{width:auto;max-width:100%;margin:0;padding:8px 12px}
+.source-actions>.small-note{flex:1;min-width:150px;font-size:9px}
+.commit-comparison{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:0 0 18px}
+.commit-comparison>div{display:flex;flex-direction:column;gap:8px;padding:14px;background:var(--field);border:1px solid var(--line);border-radius:7px;min-width:0}
+.commit-comparison span{font-size:9px;color:var(--muted)}
+.commit-comparison code{font-size:13px;color:var(--accent);overflow-wrap:anywhere}
+.commit-comparison>div+div code{color:var(--success)}
+.commit-comparison small{font-size:9px;color:var(--subtle);line-height:1.5}
+.source-details{border:1px solid var(--line-strong);border-radius:7px;padding:12px;background:var(--field)}
+.source-details>summary{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:10px;color:var(--text-secondary)}
+.source-details>summary>span{margin-left:auto;color:var(--subtle);font-size:9px}
+.source-details>summary>svg:first-child{color:var(--accent)}
+.source-details[open]>summary{margin-bottom:16px}
+.source-editor-toolbar{margin-bottom:10px}
+.source-editor-toolbar>select{flex:1;min-width:120px;width:auto;margin:0;font:10px ui-monospace,SFMono-Regular,monospace}
+.source-editor-toolbar>button{font-size:9px}
+.source-code{display:block;width:100%;min-height:250px;resize:vertical;tab-size:2;font:11px/1.8 ui-monospace,SFMono-Regular,monospace;white-space:pre;overflow:auto;margin:0 0 12px;color:var(--text-secondary)}
+.source-new-file{margin-bottom:17px;flex-wrap:nowrap}
+.source-new-file>input{min-width:0;flex:1;margin:0;font-size:10px}
+.source-new-file>button{flex-shrink:0}
+.source-details>label{font-size:9px}
+.source-details>input{width:100%;font-size:10px;margin-bottom:14px}
+.deployment-card{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.deployment-card strong{font-size:11px;font-weight:550;text-transform:none}
+.deployment-card p{font-size:10px;color:var(--muted);line-height:1.8;margin:7px 0;overflow-wrap:anywhere}
+.deployment-card code{display:block;color:var(--subtle);font-size:9px;overflow-wrap:anywhere;margin:8px 0 14px}
+.deployment-card .source-actions{margin-top:13px}
+.source-paths{margin-top:17px;font-size:9px;color:var(--muted)}
+.source-paths>summary{cursor:pointer}
+.source-paths>dl{margin-top:14px;font-size:9px;grid-template-columns:75px minmax(0,1fr)}
+.management-notice{display:flex;align-items:center;gap:7px;color:var(--success);font-size:10px;line-height:1.7;margin:16px 0 0}
+.connection-assignments{display:flex;flex-direction:column;gap:12px;margin:16px 0 18px}
+.connection-assignments>label{display:flex;align-items:flex-start;gap:10px;margin:0;cursor:pointer}
+.connection-assignments input[type=checkbox],.checkbox-label input[type=checkbox]{width:14px;height:14px;margin:2px 0 0;accent-color:var(--accent);flex-shrink:0}
+.connection-assignments strong{display:block;font-size:11px;font-weight:500;color:var(--text-secondary)}
+.connection-assignments small{display:block;font-size:9px;font-weight:400;line-height:1.7;color:var(--muted);margin-top:3px}
+.project-connections>.secondary-button{font-size:10px}
+.managed-project-options{padding:14px;background:var(--field);border:1px solid var(--line);border-radius:7px;margin-bottom:18px}
+.managed-project-options .checkbox-label{display:flex;align-items:flex-start;gap:10px;color:var(--text-secondary);line-height:1.6;cursor:pointer}
+.managed-project-options .small-note{margin:8px 0 14px}
+.managed-project-options .small-note:last-child{margin-bottom:0}
+.managed-project-options>select{margin-bottom:0}
+.connections-panel .page-heading{gap:18px}
+.management-heading-actions{justify-content:flex-end;flex-shrink:0}
+.management-heading-actions>button{font-size:10px}
+.connection-status{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;color:var(--muted);font-size:8px}
+.connection-status .status-dot{height:5px;width:5px;background:currentColor}
+.connection-status.connected{color:var(--success)}
+.connection-status.error{color:var(--danger)}
+.connection-detail{font-size:11px;line-height:1.8;color:var(--muted);margin:15px 0 20px;overflow-wrap:anywhere}
+.connection-facts{margin-bottom:24px}
+.connection-tools{border-top:1px solid var(--line);padding-top:20px}
+.connection-tools>.project-section-heading{margin-top:0}
+.connection-tools>label{font-size:10px}
+.connection-tools>select,.connection-tools>textarea{width:100%;font-size:11px;margin-bottom:15px}
+.connection-tools>textarea{font:11px/1.8 ui-monospace,SFMono-Regular,monospace;resize:vertical}
+.connection-tools>.primary-button{font-size:10px}
+.tool-schema{font-size:9px;color:var(--muted);margin:0 0 20px}
+.tool-schema>summary{cursor:pointer}
+.tool-schema pre,.tool-output pre{max-width:100%;overflow:auto;font:10px/1.8 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-secondary)}
+.tool-schema pre{padding:12px;background:var(--field);border:1px solid var(--line);border-radius:6px}
+.tool-output{margin-top:20px;padding:15px;background:var(--field);border:1px solid var(--success-line);border-radius:7px}
+.tool-output h4{font-size:10px;font-weight:500;color:var(--success);margin:0 0 12px}
+.tool-output pre{margin:0}
+.connection-tools-empty{padding:25px 0;display:flex;align-items:center;gap:15px;color:var(--subtle)}
+.connection-tools-empty>p{font-size:11px;line-height:1.8;color:var(--muted)}
+.connection-assignment-hint{border-top:1px solid var(--line);padding-top:20px;margin-top:25px}
+@media(max-width:1100px){.connections-panel .page-heading{align-items:flex-start;flex-direction:column}.management-heading-actions{justify-content:flex-start}.connections-layout .project-list-item{flex-wrap:wrap}.connections-layout .connection-status{margin-left:29px}.connections-layout .project-list-copy{flex-basis:calc(100% - 40px)}}
+@media(max-width:680px){.project-workspace,.project-connections{padding:14px}.commit-comparison{gap:8px}.commit-comparison>div{padding:11px}.commit-comparison code{font-size:11px}.source-details{padding:10px}.source-editor-toolbar{align-items:flex-start}.source-editor-toolbar>select{flex-basis:100%}.source-code{font-size:11px}.source-new-file>button{font-size:0;padding:10px}.source-new-file>button>svg{width:15px;height:15px}.source-actions>button{font-size:9px;padding:9px 10px}.connections-panel .page-heading{gap:20px}.management-heading-actions{width:100%}.management-heading-actions>button{font-size:10px}.connections-layout .project-list-item{flex-wrap:nowrap}.connections-layout .connection-status{margin:0}.connections-layout .project-list-copy{flex-basis:auto}.connection-status{font-size:8px}.source-details>summary>span{font-size:8px}.project-editor .managed-project-options>select{font-size:12px}}
+.connection-source-link{font-size:10px;margin-top:14px;color:var(--accent)}
+.management-warning{padding:11px 13px;margin:0 0 14px;border:1px solid var(--warning-line);border-radius:7px;background:var(--warning-bg);color:var(--warning);font-size:10px;line-height:1.8}
+
+.management-warning .text-button{font-size:10px;margin-top:7px;text-decoration:underline}
+.tool-output.is-error{border-color:var(--danger-line)}
+.tool-output.is-error h4{color:var(--danger)}
+.runtime-recovery-item{display:block}
+.orphan-identity{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.orphan-identity>strong{font-size:10px;font-weight:550;color:var(--warning)}
+.orphan-identity>span{font-size:9px;color:var(--text-secondary)}
+.orphan-identity>code{flex-basis:100%;font-size:9px;overflow-wrap:anywhere;min-width:0}
+.runtime-recovery-item>p{font-size:10px;line-height:1.8;margin:9px 0 12px;max-width:850px}
+.runtime-recovery-item>.secondary-button{margin-top:10px}
+.external-inspection{display:flex;align-items:flex-start;gap:9px;color:var(--warning);font-size:10px;line-height:1.7;margin:0}
+.external-inspection>input{width:14px;height:14px;flex-shrink:0;margin:2px 0 0;accent-color:var(--warning)}
+.runtime-operations-notice{display:flex;flex-shrink:0;gap:11px;margin:12px 30px 0;padding:12px 15px;border:1px solid var(--info-line);border-radius:7px;background:var(--info-bg);color:var(--info);font-size:10px;line-height:1.8;max-height:180px;overflow:auto}
+.runtime-operations-notice>svg{flex-shrink:0;margin-top:2px}
+.runtime-operations-notice>div{min-width:0}
+.runtime-operations-notice strong{display:block;font-size:11px;font-weight:550}
+.runtime-operations-notice p{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:4px;overflow-wrap:anywhere}
+.runtime-operations-notice p>span{font-size:9px;color:var(--text-secondary)}
+.runtime-operations-notice small{display:block;font-size:9px;margin-top:5px;color:var(--text-secondary)}
+@media(max-width:570px){.runtime-operations-notice{margin-left:15px;margin-right:15px;padding:10px 12px}.orphan-identity>strong,.runtime-recovery-item>p,.external-inspection{font-size:9px}.orphan-identity>code{font-size:8px}}
+@media(max-width:570px){.execution-recovery{max-height:min(350px,45dvh)}}

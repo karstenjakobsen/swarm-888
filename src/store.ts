@@ -6,10 +6,14 @@ import { EventEmitter } from 'node:events';
 import type { AppEvent, Conversation, Message, Run, RunStatus } from './shared.ts';
 import { terminal } from './shared.ts';
 import { ProjectStore } from './projects/store.ts';
+import { ManagedStore } from './managed/store.ts';
+import { ConnectorStore } from './connectors/store.ts';
 
 export class Store extends EventEmitter {
   db: DatabaseSync;
   projects: ProjectStore;
+  managed: ManagedStore;
+  connectors: ConnectorStore;
   constructor(stateDir:string) {
     super();
     this.db = new DatabaseSync(join(stateDir,'operator.sqlite'));
@@ -20,8 +24,16 @@ export class Store extends EventEmitter {
       this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (1,?)').run(new Date().toISOString());
       this.db.exec(readFileSync(new URL('../migrations/002-projects.sql',import.meta.url),'utf8'));
       this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (2,?)').run(new Date().toISOString());
+      this.db.exec(readFileSync(new URL('../migrations/003-managed-source.sql',import.meta.url),'utf8'));
+      this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (3,?)').run(new Date().toISOString());
+      this.db.exec(readFileSync(new URL('../migrations/004-connector-checks.sql',import.meta.url),'utf8'));
+      this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (4,?)').run(new Date().toISOString());
+      this.db.exec(readFileSync(new URL('../migrations/005-runtime-receipts.sql',import.meta.url),'utf8'));
+      this.db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (5,?)').run(new Date().toISOString());
     });
     this.projects = new ProjectStore(this.db);
+    this.managed = new ManagedStore(this.db);
+    this.connectors = new ConnectorStore(this.db);
   }
   transaction<T>(fn:()=>T):T { this.db.exec('BEGIN IMMEDIATE');try {const value=fn();this.db.exec('COMMIT');return value;} catch(e){this.db.exec('ROLLBACK');throw e;} }
   setting(key:string):string|undefined {return (this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as {value:string}|undefined)?.value;}
@@ -73,6 +85,7 @@ export class Store extends EventEmitter {
     const now=new Date().toISOString();
     const event=this.transaction(()=>{
       this.db.prepare('UPDATE runs SET status=?,error=?,startedAt=COALESCE(startedAt,?),finishedAt=? WHERE id=?').run(status,error,status==='running'?now:null,terminal.has(status)?now:null,id);
+      if(terminal.has(status)&&run.startedAt)this.markSourceFinalization(run.id,run.conversationId,now);
       return this.eventRow('run',{run:this.run(id)},id);
     });
     this.emit('event',event);
@@ -103,6 +116,7 @@ export class Store extends EventEmitter {
         const status=event.data.uncertain?'uncertain':terminal.has(event.data.status)?event.data.status:'failed';
         const error=event.data.error==null?null:typeof event.data.error==='string'?event.data.error:JSON.stringify(event.data.error);
         this.db.prepare('UPDATE runs SET status=?,error=?,finishedAt=? WHERE id=?').run(status,error,status==='uncertain'?null:event.createdAt,run.id);
+        if(status!=='uncertain')this.markSourceFinalization(run.id,run.conversationId,event.createdAt);
         const deltas=this.db.prepare("SELECT data FROM events WHERE runId=? AND type='delta' ORDER BY seq").all(run.id);
         const text=deltas.map(row=>JSON.parse(String(row.data)).text??'').join('');
         if(text){const message={id:randomUUID(),conversationId:run.conversationId,runId:run.id,role:'assistant',content:text,createdAt:event.createdAt};
@@ -118,4 +132,14 @@ export class Store extends EventEmitter {
     return true;
   }
   close(){this.db.close();}
+  private markSourceFinalization(runId:string,conversationId:string,createdAt:string){
+    this.db.prepare("INSERT OR IGNORE INTO source_finalizations(runId,projectId,state,updatedAt) SELECT ?,pc.projectId,'pending',? FROM project_conversations pc JOIN project_sources ps ON ps.projectId=pc.projectId WHERE pc.conversationId=?").run(runId,createdAt,conversationId);
+  }
+  sourceFinalized(runId:string,commit:string,source:unknown){
+    const event=this.transaction(()=>{
+      if(!this.managed.finalized(runId,commit))return;
+      return this.eventRow('checkpoint',{summary:`Generated source committed at ${commit.slice(0,12)}.`,source},runId);
+    });
+    if(event)this.emit('event',event);
+  }
 }

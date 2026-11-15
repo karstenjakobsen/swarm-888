@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { z } from 'zod';
@@ -14,9 +14,11 @@ import type { LoginAccountResponse } from './generated/v2/LoginAccountResponse.j
 import type { CancelLoginAccountParams } from './generated/v2/CancelLoginAccountParams.js';
 import type { CancelLoginAccountResponse } from './generated/v2/CancelLoginAccountResponse.js';
 import type { AccountLoginCompletedNotification } from './generated/v2/AccountLoginCompletedNotification.js';
-import { terminateGroup } from './processes.js';
 import { executionCommand, executionEnvironment, prepareExecutionProfile } from './execution.ts';
 import { createToolProxy } from './tool-proxy.ts';
+import { connectorEnvironment } from '../connectors/client.ts';
+import { connectorServerName, connectorSnapshotSchema, type ConnectorSnapshot } from '../connectors/schemas.ts';
+import { spawnOwned, terminateOwned } from './operations.ts';
 
 export const CODEX_VERSION = '0.166.0';
 const envelope = z.object({ id: z.union([z.number(), z.string()]).optional(), method: z.string().optional(), params: z.unknown().optional(), result: z.unknown().optional(), error: z.object({ code: z.number(), message: z.string() }).passthrough().optional() });
@@ -32,6 +34,20 @@ export function runtimeEnvironment(config: Config, runId?: string): NodeJS.Proce
     OPERATOR_RUN_ID: runId ?? '', CODEX_DISABLE_UPDATE_CHECK: '1' };
 }
 
+export function connectorConfiguration(raw:ConnectorSnapshot[]):string[] {
+  const connectors=z.array(connectorSnapshotSchema).max(20).parse(raw),seen=new Set<string>();const args:string[]=[];
+  const option=(name:string,key:string,value:unknown)=>args.push('-c',`mcp_servers.${name}.${key}=${JSON.stringify(value)}`);
+  for(const connector of connectors){
+    const name=connectorServerName(connector);if(seen.has(name))throw new Error('A connector may appear only once in a task snapshot.');seen.add(name);
+    if(connector.transport==='stdio'){
+      option(name,'command',connector.command);option(name,'args',connector.args);if(connector.cwd)option(name,'cwd',connector.cwd);
+      for(const [key,value] of Object.entries(connectorEnvironment()))option(name,`env.${key}`,value);option(name,'env_vars',[]);
+    }else option(name,'url',connector.url);
+    option(name,'startup_timeout_sec',15);option(name,'tool_timeout_sec',15);
+  }
+  return args;
+}
+
 /** All runtime-specific protocol and experimental clarification handling stays here. */
 export class CodexAdapter extends EventEmitter {
   process?: ChildProcessWithoutNullStreams;
@@ -40,12 +56,13 @@ export class CodexAdapter extends EventEmitter {
   private requests = new Map<string, { id: number | string; method: string }>();
   private buffer = '';
   private shuttingDown = false;
+  private closing?:Promise<void>;
   private toolProxy?:Awaited<ReturnType<typeof createToolProxy>>;
   private improvement?: { limit: number; observed: Set<string>; interrupted: boolean; interruptSent: boolean };
   threadId?: string;
   turnId?: string;
   version = '';
-  constructor(private config: Config, private runId?: string) { super(); }
+  constructor(private config: Config, private runId?: string,private connectors:ConnectorSnapshot[]=[]) { super(); }
 
   async start(): Promise<void> {
     prepareExecutionProfile(this.config);
@@ -62,15 +79,14 @@ export class CodexAdapter extends EventEmitter {
       '-c', `mcp_servers.operator.command=${JSON.stringify(process.execPath)}`,
       '-c', `mcp_servers.operator.args=${JSON.stringify(['--import', loader, mcpScript])}`,
       '-c', `mcp_servers.operator.env_vars=${JSON.stringify(['APP_BRIDGE_SOCKET', 'APP_BRIDGE_TOKEN', 'OPERATOR_RUN_ID', ...(process.env.LD_LIBRARY_PATH ? ['LD_LIBRARY_PATH'] : [])])}`,
-      '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',
+      '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',...connectorConfiguration(this.connectors),
     ];
     this.toolProxy=await createToolProxy(this.config,this.runId);
     const invocation=executionCommand(this.config,this.config.codexBin,args);
     const environment=runtimeEnvironment(this.config,this.runId);
     if(this.toolProxy){environment.APP_BRIDGE_SOCKET=this.toolProxy.socketPath;environment.APP_BRIDGE_TOKEN=this.toolProxy.token;}
-    const child = spawn(invocation.command, invocation.args, { env:environment, cwd:this.config.runtimeHome, stdio: 'pipe', detached: true });
+    const child = spawnOwned(invocation.command, invocation.args, { env:environment, cwd:this.config.runtimeHome,beforeRelease:(pid,start,boot)=>this.emit('spawn',{pid,start,boot}) });
     this.process = child;
-    child.once('spawn', () => this.emit('spawn', { pid: child.pid! }));
     child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => this.consume(chunk));
     // stderr can include credentials/configuration from an upstream provider. Never persist it.
     child.stderr.resume();
@@ -211,14 +227,16 @@ export class CodexAdapter extends EventEmitter {
   private send(frame: unknown): void { if (!this.process?.stdin.writable) throw new Error('Codex app-server is not connected'); this.process.stdin.write(JSON.stringify(frame) + '\n'); }
   private rejectPending(error: Error): void { for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(error); } this.pending.clear(); }
   private fail(error: Error): void { this.rejectPending(error); this.emit('fault', error); }
-  async close(): Promise<void> {
-    this.shuttingDown = true; this.requests.clear(); this.rejectPending(new Error('Codex adapter closed'));
-    const child = this.process; if (!child?.pid){await this.toolProxy?.close();return;}
-    const pid = child.pid;
-    // Wait for every member of the owned session, even if the app-server leader
-    // already exited. A deliberately detached deployment has a different group.
-    await terminateGroup(pid);
-    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolveExit => { const timer = setTimeout(resolveExit, 1000); child.once('exit', () => { clearTimeout(timer); resolveExit(); }); });
-    await this.toolProxy?.close();
+  close(): Promise<void> {
+    return this.closing??=(async()=>{
+      this.shuttingDown = true; this.requests.clear(); this.rejectPending(new Error('Codex adapter closed'));
+      try{
+        const child = this.process; if (!child?.pid)return;
+        // Wait for every member of the owned session, even if the app-server leader
+        // already exited. A deliberately detached deployment has a different group.
+        await terminateOwned(child);
+        if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolveExit => { const timer = setTimeout(resolveExit, 1000); child.once('exit', () => { clearTimeout(timer); resolveExit(); }); });
+      }finally{await this.toolProxy?.close();}
+    })();
   }
 }

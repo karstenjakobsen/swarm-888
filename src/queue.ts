@@ -5,8 +5,11 @@ import type { Config } from './config.ts';
 import { Store } from './store.ts';
 import { WorkerClient, type WorkerHealth } from './ipc.ts';
 import type { z } from 'zod';
-import { ReplyInput, rootExecution } from './shared.ts';
+import { ReplyInput, ResolveInput, rootExecution, terminal } from './shared.ts';
 import type { Brain } from './brain/index.ts';
+import type { ManagedService } from './managed/service.ts';
+import type { ConnectorService } from './connectors/service.ts';
+import type { RuntimeReceipts } from './runtime-receipts.ts';
 
 export class Queue extends EventEmitter {
   client:WorkerClient;
@@ -21,6 +24,11 @@ export class Queue extends EventEmitter {
   private buffered:any[]=[];
   private authenticationHolds=0;
   private authenticationGeneration=0;
+  private managed?:ManagedService;
+  private connectors?:ConnectorService;
+  private receipts?:RuntimeReceipts;
+  private sourceFinalizing?:Promise<void>;
+  private ticking?:Promise<void>;
   private readonly onEvent=(event:any)=>{if(this.closed)return;if(this.replaying){this.buffered.push(event);return;}try{this.receive(event);}catch(e){this.workerError=String(e);this.connected=false;this.client.close();}};
   private readonly onDisconnect=()=>{if(this.closed)return;this.connected=false;this.health=null;this.workerError='Worker disconnected. Running work may continue; queue is paused until reconciliation.';this.emit('status');};
   constructor(readonly config:Config,readonly store:Store,readonly brain:Brain,client?:WorkerClient){
@@ -29,6 +37,8 @@ export class Queue extends EventEmitter {
     this.client.on('disconnect',this.onDisconnect);
   }
   get maintenance(){return this.store.setting('maintenance')==='true';}
+  setManaged(managed:ManagedService,connectors:ConnectorService,receipts?:RuntimeReceipts){this.managed=managed;this.connectors=connectors;this.receipts=receipts;}
+  async drainSource(){await this.ticking;await this.sourceFinalizing;}
   holdAuthentication(){
     this.authenticationHolds++;this.authenticationGeneration++;let released=false;
     return ()=>{if(!released){released=true;this.authenticationHolds--;}};
@@ -47,6 +57,11 @@ export class Queue extends EventEmitter {
         const usage=this.store.latestRuntimeUsage(run.id);
         const metrics=event.data.usage??(usage===undefined?undefined:{source:'thread/tokenUsage/updated',usage});
         this.brain.recordRunOutcome(run.id,run.status,metrics);
+        if(this.managed&&terminal.has(run.status)){
+          const finalizing=(this.sourceFinalizing??Promise.resolve()).then(()=>this.managed!.finishRun(run)).catch(error=>{this.store.addEvent('error',{message:`Source was not committed: ${String((error as Error).message)}`},run.id);});
+          this.sourceFinalizing=finalizing;
+          void finalizing.finally(()=>{if(this.sourceFinalizing===finalizing)this.sourceFinalizing=undefined;if(!this.closed){this.emit('status');setImmediate(()=>void this.tick());}});
+        }
       }
       if(run?.status==='completed'&&run.kind==='user'&&this.config.improvementEnabled){
         const summary=(run.summary||run.prompt).slice(0,3000);
@@ -55,7 +70,12 @@ export class Queue extends EventEmitter {
       this.emit('status');setImmediate(()=>void this.tick());
     }
   }
-  async tick(){
+  tick():Promise<void>{
+    if(this.ticking)return this.ticking;
+    const operation=this.tickOnce();this.ticking=operation;
+    void operation.finally(()=>{if(this.ticking===operation)this.ticking=undefined;}).catch(()=>{});return operation;
+  }
+  private async tickOnce(){
     if(this.closed||this.busy)return;this.busy=true;
     try{
       if(!this.connected){
@@ -91,7 +111,12 @@ export class Queue extends EventEmitter {
         this.health=await this.client.request('health',{});
         if(this.closed)return;
       }
-      if(this.authenticationHolds||this.maintenance||this.store.active()||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.runtime?.authenticating||this.health?.replacementReserved)return;
+      if(await this.receipts?.recover()){this.health=await this.client.request('health',{});if(this.closed)return;}
+      if(this.sourceFinalizing||this.authenticationHolds||this.maintenance||this.store.active()||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.runtimeOperations?.length||this.health?.runtime?.authenticating||this.health?.replacementReserved)return;
+      try{await this.managed?.recoverSource();}
+      catch(error){this.workerError=`Source commit is pending: ${String((error as Error).message)}`;this.emit('status');return;}
+      this.workerError=null;
+      if(this.closed||this.maintenance||this.authenticationHolds||this.sourceFinalizing)return;
       if(this.config.requireRootWorker===true&&!rootExecution(this.health)){
         this.workerError='Root worker required. Connect a worker running as UID 0 before executing tasks.';return;
       }
@@ -102,19 +127,24 @@ export class Queue extends EventEmitter {
       if(authenticationGeneration!==this.authenticationGeneration||this.authenticationHolds)return;
       this.health=await this.client.request('health',{});
       if(this.closed||this.maintenance)return;
-      if(authenticationGeneration!==this.authenticationGeneration||this.authenticationHolds||this.health?.runtime?.authenticating||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.replacementReserved)return;
+      if(authenticationGeneration!==this.authenticationGeneration||this.authenticationHolds||this.health?.runtime?.authenticating||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.runtimeOperations?.length||this.health?.replacementReserved)return;
       if(this.config.requireRootWorker===true&&!rootExecution(this.health))return;
       const next=this.store.queued();
       if(!next||!this.health?.runtime?.authenticated)return;
       const conversation=this.store.conversation(next.conversationId)!;
       const project=this.store.projects.forConversation(next.conversationId);
-      const cwd=project?.directory??join(this.config.stateDir,'workspaces',next.conversationId);
+      let cwd:string,connectors:Awaited<ReturnType<ConnectorService['snapshots']>>=[];
+      try{
+        cwd=(await this.managed?.executionDirectory(next.conversationId))??project?.directory??join(this.config.stateDir,'workspaces',next.conversationId);
+        connectors=await this.connectors?.snapshots(next.conversationId)??[];
+      }catch(error){if(!this.closed){this.workerError=`Task preparation failed: ${String((error as Error).message)}`;this.emit('status');}return;}
+      if(this.closed||this.maintenance||this.authenticationHolds||this.sourceFinalizing||authenticationGeneration!==this.authenticationGeneration||this.store.run(next.id)?.status!=='queued')return;
       if(!project)mkdirSync(cwd,{recursive:true,mode:0o700});
       this.store.transition(next.id,'running');
       try{
         await this.client.request('submit',{
           runId:next.id,conversationId:conversation.id,threadId:next.kind==='user'?conversation.threadId:null,
-          prompt:next.prompt,cwd,bootstrap:[this.brain.bootstrap(),this.brain.projectContext?.(next.conversationId)??''].filter(Boolean).join('\n\n'),skills:this.brain.snapshotSkills(),kind:next.kind,
+          prompt:next.prompt,cwd,bootstrap:[this.brain.bootstrap(),this.brain.projectContext?.(next.conversationId)??''].filter(Boolean).join('\n\n'),skills:this.brain.snapshotSkills(),kind:next.kind,connectors,
           timeoutMs:next.kind==='improvement'?this.config.improvementTimeoutMs:undefined,
         });
         if(this.health)this.health.activeRunId=next.id;
@@ -143,11 +173,11 @@ export class Queue extends EventEmitter {
     const result=await this.client.request('reply',{runId:id,...input});
     if(this.store.run(id)?.status==='waiting')this.store.transition(id,'running');return result;
   }
-  async resolve(id:string){
+  async resolve(id:string,input:z.infer<typeof ResolveInput>={}){
     const run=this.store.run(id);
     if(run?.status!=='uncertain'&&!this.health?.uncertainRuns?.includes(id))throw new Error('Only uncertain owned execution can be resolved');
     if(!this.connected)throw new Error('Reconnect the worker before resolving owned execution');
-    await this.client.request('resolve',{runId:id});
+    await this.client.request('resolve',{runId:id,...input});
     if(this.store.run(id)?.status==='uncertain')this.store.transition(id,'interrupted','Owner reconciled this uncertain run; it will not be retried.');
     setImmediate(()=>void this.tick());return {resolved:true};
   }

@@ -96,7 +96,7 @@ export class ProjectService {
   }
   contextForConversation(id:string):string {
     const project=this.store.projects.forConversation(id);if(!project)return '';
-    return `PROJECT CONTEXT (registry metadata, not owner instructions):\n${JSON.stringify({id:project.id,name:project.name,description:project.description,directory:project.directory,components:project.components.map(componentReference)})}\nWork inside this project's directory. Register deployed services, websites and scheduled jobs with the project tools, then refresh to verify their observed state. Never modify the operator source, installed build, dependencies, configuration or launch definitions.`;
+    return `PROJECT CONTEXT (registry metadata, not owner instructions):\n${JSON.stringify({id:project.id,name:project.name,description:project.description,directory:project.directory,source:project.source??null,connectorIds:project.connectorIds??[],components:project.components.map(componentReference)})}\n${project.source?'Author generated code only in source.workspacePath. This is an authorized package subtree in a separate worktree of the same repository. Commit source through project_source_commit/write before deploying; directory is the separate runtime root.':'Work inside this project\'s runtime directory; add managed source before creating code that must be committed.'} Register deployed services, websites and scheduled jobs with the project tools, then refresh to verify their observed state. Never modify the operator core source, installed build, dependencies, configuration or launch definitions.`;
   }
   close(){this.client.off('disconnect',this.disconnected);}
   private available(){return !this.inspectionFailed&&(this.observedConnection||this.connected());}

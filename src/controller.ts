@@ -9,12 +9,15 @@ import { loadConfig, projectRoot, type Config } from './config.ts';
 import { Store } from './store.ts';
 import { Queue } from './queue.ts';
 import { Brain } from './brain/index.ts';
-import { Id, PromptInput, ReplyInput, WireRequest, type AppEvent } from './shared.ts';
+import { Id, PromptInput, ReplyInput, ResolveInput, WireRequest, type AppEvent } from './shared.ts';
 import { acquireLock } from './lock.ts';
 import type { WorkerClient } from './ipc.ts';
 import { AgentConnectionService } from './agent-connection.ts';
 import { toolSchemas } from './brain/schemas.ts';
 import { ProjectService } from './projects/service.ts';
+import { ManagedService } from './managed/service.ts';
+import { ConnectorService } from './connectors/service.ts';
+import { RuntimeReceipts } from './runtime-receipts.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -28,6 +31,11 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const queue=new Queue(config,store,brain,options.client);
   const agentConnection=new AgentConnectionService(config,queue,options.agentClient??options.client);
   const projects=new ProjectService(config,store,queue.client,()=>Boolean(queue.health));
+  const receipts=new RuntimeReceipts(store.db,queue.client);
+  const managed=new ManagedService(config,store,projects,queue.client,receipts);
+  const connectors=new ConnectorService(store,queue.client,projects,managed,receipts);
+  queue.setManaged(managed,connectors,receipts);
+  brain.setManaged(managed,connectors);
   brain.setProjects(projects);
   brain.setExecutor(spec=>queue.client.request('checkSkill',spec));
   brain.setArtifactPublisher(input=>queue.client.request('artifacts/publish',input));
@@ -91,19 +99,38 @@ export async function createController(config:Config, options:{client?:WorkerCli
   });
   app.post('/api/logout',async(req,reply)=>{const current=session(req);if(current)store.deleteSession(current.hash);reply.header('set-cookie','operator_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');return {ok:true};});
   app.get('/api/status',async()=>queue.status());
+  app.get('/api/runtime-receipts',async()=>redacted(receipts.list()));
+  app.get('/api/runtime-receipts/:id',async(req:any)=>redacted(receipts.get(safeId(req.params.id))));
   app.get('/api/agent/connection',async()=>agentConnection.status());
   app.post('/api/agent/connect',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.connect();});
   app.post('/api/agent/cancel',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.cancel();});
   app.post('/api/agent/worker',async req=>{z.object({}).strict().parse(req.body??{});return agentConnection.startWorker();});
   app.get('/api/projects',async()=>projects.list());
-  app.post('/api/projects',async req=>{writable();return projects.create(req.body);});
+  app.post('/api/projects',async req=>{writable();return managed.createProject(req.body);});
   app.get('/api/projects/:id',async(req:any)=>projects.get(req.params.id));
   app.patch('/api/projects/:id',async(req:any)=>{writable();return projects.update(req.params.id,req.body);});
   app.post('/api/projects/:id/components',async(req:any)=>{writable();return projects.addComponent(req.params.id,req.body);});
   app.patch('/api/projects/:id/components/:componentId',async(req:any)=>{writable();return projects.updateComponent(req.params.id,req.params.componentId,req.body);});
-  app.post('/api/projects/:id/refresh',async(req:any)=>{z.object({}).strict().parse(req.body??{});return projects.refresh(req.params.id);});
+  app.post('/api/projects/:id/refresh',async(req:any)=>{z.object({}).strict().parse(req.body??{});return managed.refreshProject(req.params.id);});
   app.get('/api/projects/:id/components/:componentId/logs',async(req:any)=>redacted(await projects.logs(req.params.id,req.params.componentId)));
   app.post('/api/projects/:id/conversations',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return projects.newConversation(req.params.id);});
+  const sourceWritable=(id:string)=>{writable();projects.get(id);const active=store.active();if(active&&store.projects.forConversation(active.conversationId)?.id===id)throw fail('Finish or reconcile the active project task before changing source from the UI.',409);};
+  app.post('/api/projects/:id/source',async(req:any)=>{sourceWritable(req.params.id);return managed.createSource(req.params.id,req.body??{});});
+  app.get('/api/projects/:id/source',async(req:any)=>managed.readSource(req.params.id));
+  app.put('/api/projects/:id/source',async(req:any)=>{sourceWritable(req.params.id);return managed.writeSource(req.params.id,req.body);});
+  app.post('/api/projects/:id/source/commit',async(req:any)=>{sourceWritable(req.params.id);return managed.commitSource(req.params.id,req.body??{});});
+  app.post('/api/projects/:id/deploy',async(req:any)=>{sourceWritable(req.params.id);z.object({}).strict().parse(req.body??{});return managed.deploy(req.params.id);});
+  app.get('/api/projects/:id/deployment',async(req:any)=>managed.deploymentAction(req.params.id,'status'));
+  app.post('/api/projects/:id/deployment/stop',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return managed.deploymentAction(req.params.id,'stop');});
+  app.get('/api/projects/:id/deployment/logs',async(req:any)=>redacted(await managed.deploymentAction(req.params.id,'logs')));
+  app.put('/api/projects/:id/connectors',async(req:any)=>{writable();return connectors.assign(req.params.id,req.body);});
+  app.get('/api/connectors',async()=>connectors.list());
+  app.post('/api/connectors',async req=>{writable();return connectors.create(req.body);});
+  app.post('/api/connectors/examples',async req=>{writable();z.object({}).strict().parse(req.body??{});return connectors.createExample();});
+  app.get('/api/connectors/:id',async(req:any)=>connectors.get(req.params.id));
+  app.patch('/api/connectors/:id',async(req:any)=>{writable();return connectors.update(req.params.id,req.body);});
+  app.post('/api/connectors/:id/test',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return connectors.test(req.params.id);});
+  app.post('/api/connectors/:id/call',async(req:any)=>{writable();return redacted(await connectors.call(req.params.id,req.body));});
   app.get('/api/conversations',async()=>store.conversations());
   app.post('/api/conversations',async req=>{writable();const body=z.object({title:z.string().trim().min(1).max(150).optional()}).parse(req.body??{});return store.newConversation(body.title);});
   app.get('/api/conversations/:id',async(req:any)=>{
@@ -116,7 +143,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.post('/api/conversations/:id/runs',async(req:any)=>{writable();const body=PromptInput.parse(req.body);const run=store.enqueue(safeId(req.params.id),body.prompt,body.requestId);setImmediate(()=>void queue.tick());return run;});
   app.post('/api/runs/:id/interrupt',async(req:any)=>queue.interrupt(safeId(req.params.id)));
   app.post('/api/runs/:id/reply',async(req:any)=>queue.reply(safeId(req.params.id),ReplyInput.parse(req.body)));
-  app.post('/api/runs/:id/resolve',async(req:any)=>queue.resolve(safeId(req.params.id)));
+  app.post('/api/runs/:id/resolve',async(req:any)=>queue.resolve(safeId(req.params.id),ResolveInput.parse(req.body??{})));
   app.get('/api/memory',async(req:any)=>{const q=z.string().max(1000).parse(req.query.q??'');return brain.memorySearch(q,{project:req.query.project,category:req.query.category,tag:req.query.tag});});
   app.get('/api/memory/:id',async(req:any)=>{const found=brain.memoryGet(safeId(req.params.id));if(!found)throw fail('Memory entry not found',404);return found;});
   app.post('/api/memory',async req=>{writable();return brain.memoryWrite(memoryInput(req.body));});
@@ -174,6 +201,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
     closing=true;
     for(const end of streams)end();
     projects.close();agentConnection.close();queue.close();
+    await queue.drainSource();
     for(const socket of bridgeSockets)socket.destroy();
     if(bridge?.listening)await new Promise<void>((ok,no)=>bridge!.close(error=>error?no(error):ok()));
     await Promise.allSettled([...toolCalls]);
@@ -206,7 +234,8 @@ export async function createController(config:Config, options:{client?:WorkerCli
         try{
           const arguments_=params.name==='memory_write'?memoryInput(params.arguments??{}):params.arguments??{};
           const result=await brain.callTool(params.name,arguments_,{runId:run.id,conversationId:run.conversationId});
-          store.addEvent('tool',redacted({name:params.name,result}),run.id);
+          const historyResult=params.name.startsWith('project_source_')&&result&&typeof result==='object'&&'files' in result?{...result,files:undefined}:result;
+          store.addEvent('tool',redacted({name:params.name,result:historyResult}),run.id);
           if(!socket.destroyed)socket.write(JSON.stringify({id,result:redacted(result)})+'\n');
         }finally{pendingTools--;}
       }catch(error){if(!socket.destroyed)socket.write(JSON.stringify(redacted({id,error:{message:String((error as Error).message)}}))+'\n');}}
@@ -216,7 +245,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   }
   if(options.startQueue!==false)await queue.start();
 
-  return {app,store,brain,queue,agentConnection,projects,close,get pendingTools(){return pendingTools;}};
+  return {app,store,brain,queue,agentConnection,projects,managed,connectors,close,get pendingTools(){return pendingTools;}};
   }catch(error){await close();throw error;}
 }
 

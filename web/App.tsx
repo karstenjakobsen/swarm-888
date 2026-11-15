@@ -3,11 +3,13 @@ import { api, asList, post, setCsrf } from './api';
 import { Icon, type IconName } from './icons';
 import { MemoryPanel, SkillsPanel, ArtifactsPanel } from './panels';
 import { AgentConnection } from './AgentConnection';
+import { ExecutionRecovery } from './ExecutionRecovery';
 import { ProjectsPanel } from './ProjectsPanel';
+import { ConnectionsPanel } from './ConnectionsPanel';
 import type { Conversation, ConversationDetail, ExecutionEvent, Message, Run, Status } from './types';
 
-type View = 'chat' | 'projects' | 'memory' | 'skills' | 'artifacts';
-const viewNames: Record<View, string> = { chat: 'Workspace', projects: 'Projects', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
+type View = 'chat' | 'projects' | 'connections' | 'memory' | 'skills' | 'artifacts';
+const viewNames: Record<View, string> = { chat: 'Workspace', projects: 'Projects', connections: 'Connections', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
 const activeStates = new Set<Run['status']>(['queued', 'running', 'waiting', 'uncertain']);
 export const friendlyStatus = (status: Run['status']) => ({ waiting: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status]);
 export function formatTime(date: string) { const value = new Date(date); return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -17,6 +19,7 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [error, setError] = useState('');
   const [view, setView] = useState<View>('chat');
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -31,6 +34,12 @@ export default function App() {
   const [events, setEvents] = useState<ExecutionEvent[]>([]);
   const cursor = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
+  const unsavedSource = useRef(false);
+  const reportUnsavedSource = useCallback((dirty: boolean) => { unsavedSource.current = dirty; }, []);
+  const canNavigate = () => {
+    if (!unsavedSource.current) return true;
+    return window.confirm('Discard unsaved source edits and leave this editor?');
+  };
 
   useEffect(() => {
     let alive = true;
@@ -111,13 +120,14 @@ export default function App() {
   }, [conversationId, authenticated, loadConversation]);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [detail?.messages.length, events.length]);
 
-  const selectConversation = (id: string) => { setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); };
+  const selectConversation = (id: string, discardConfirmed = false) => { if (!discardConfirmed && !canNavigate()) return; setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); };
   const newConversation = async () => {
+    if (!canNavigate()) return;
     setBusy(true);
     try {
       const value = await post<Conversation>('/conversations', {});
       setConversations(previous => [value, ...previous]);
-      selectConversation(value.id);
+      selectConversation(value.id, true);
     } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
   };
   const submitPrompt = async (event: React.FormEvent) => {
@@ -148,7 +158,9 @@ export default function App() {
     } catch (cause: any) { setError(cause.message); }
   };
   const logout = async () => {
-    try { await post('/logout'); setAuthenticated(false); setCsrf(''); setDetail(null); setConversations([]); setConversationId(null); currentId.current = null; setEvents([]); cursor.current = 0; } catch (cause: any) { setError(cause.message); }
+    if (!canNavigate()) return;
+    setBusy(true);
+    try { await post('/logout'); setAuthenticated(false); setCsrf(''); setDetail(null); setConversations([]); setConversationId(null); currentId.current = null; setEvents([]); cursor.current = 0; } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
   };
 
   if (authenticated === null) return <div className="loading-page"><Brand /><span className="muted">Connecting to your workspace…</span></div>;
@@ -166,6 +178,7 @@ export default function App() {
   const queue = status?.queue || [];
   const queuedCount = queue.filter(run => run.status === 'queued').length;
   const orphanExecutions = (worker?.uncertainRuns || []).filter(id => !queue.some(run => run.id === id));
+  const runtimeOperations = worker?.runtimeOperations ?? [];
   const queueBlock = queuedCount === 0 ? null : status?.maintenance ? {
     title: 'Queue paused for maintenance',
     detail: 'Your tasks are saved. Execution will resume when maintenance finishes.',
@@ -184,6 +197,9 @@ export default function App() {
   } : worker.uncertainRuns?.length || queue.some(run => run.status === 'uncertain') ? {
     title: 'Queue paused: execution needs reconciliation',
     detail: 'Resolve the uncertain execution shown in the workspace before new tasks can start. Your queued tasks remain saved while execution is paused.',
+  } : runtimeOperations.some(operation => operation.status === 'running') ? {
+    title: 'Queue waiting for runtime operation',
+    detail: 'Your tasks are saved. Execution will continue after the current runtime operation finishes.',
   } : null;
 
   return <div className="app-shell">
@@ -193,7 +209,7 @@ export default function App() {
       <button className="new-conversation" onClick={() => void newConversation()} disabled={busy}><Icon name="plus" /><span>New conversation</span><kbd>+</kbd></button>
       <div className="nav-label">YOUR WORKSPACE</div>
       <nav className="primary-nav" aria-label="Workspace">
-        {(['chat', 'projects', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
+        {(['chat', 'projects', 'connections', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { if (view !== item && !canNavigate()) return; setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'connections' ? 'link' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
       </nav>
       <div className="conversation-heading"><span className="nav-label">RECENT CONVERSATIONS</span><Icon name="clock" size={13} /></div>
       <div className="conversation-list">
@@ -210,7 +226,7 @@ export default function App() {
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
       {queueBlock && <div className="runtime-notice" role="status" style={{ marginTop: 14 }}><Icon name="clock" size={17} /><span><strong>{queueBlock.title}</strong>{queueBlock.detail}{!agentConnected && !status?.maintenance && <button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button>}</span></div>}
       {status?.maintenance && !queueBlock && <div className="notice-banner">Maintenance is active. Work and durable brain writes are paused for a consistent snapshot.</div>}
-      {orphanExecutions.length > 0 && <div className="orphan-warning" role="status"><strong>Orphan execution needs reconciliation</strong><p>Inspect the host before resolving. A worker restart left a skill check or other owned execution uncertain. The queue stays paused until the worker terminates or confirms the absence of each owned process. Its actions will not be retried.</p>{orphanExecutions.map(id => <div className="orphan-execution" key={id}><code>{id}</code><button className="secondary-button danger" aria-label={`Host inspected, resolve orphan ${id}`} onClick={() => void runAction(id, 'resolve')}>Host inspected · resolve orphan</button></div>)}</div>}
+      <ExecutionRecovery orphanIds={orphanExecutions} operations={runtimeOperations} onResolve={(id, body) => runAction(id, 'resolve', body)} />
       {view === 'chat' ? <>
         <div className="conversation-top"><div><div className="eyebrow">CONVERSATION</div><h1>{selected?.title || 'A fresh start'}</h1></div><div className="model-tag"><span className={`status-dot ${worker?.runtime.authenticated ? 'ok' : ''}`} />{worker?.runtime.model || 'Codex'}<span className="muted">{worker?.runtime.version ? `v${worker.runtime.version.replace(/^.*?([\d.]+)$/, '$1')}` : 'app-server'}</span></div></div>
         {!agentConnected && !queueBlock && <div className="runtime-notice"><Icon name="terminal" size={17} /><span><strong>{worker?.runtime.authenticating ? 'Finish connecting your agent' : 'Connect your agent to get started'}</strong>{rootWorker ? 'Sign in with ChatGPT to let your agent start working.' : 'Start a root worker and sign in with ChatGPT. Conversations and memory are ready.'}<button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button></span></div>}
@@ -236,7 +252,7 @@ export default function App() {
           <form className="composer" onSubmit={submitPrompt}><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
           <p className="composer-caption">Commands run as the worker’s actual user. <span>Enter to send · Shift + Enter for a new line</span></p>
         </div>
-      </> : view === 'projects' ? <ProjectsPanel workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id); }} onSelectConversation={selectConversation} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
+      </> : view === 'projects' ? <ProjectsPanel navigationPending={busy} onBeforeNavigate={canNavigate} onUnsavedSourceChange={reportUnsavedSource} initialProjectId={projectId} workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id, true); }} onSelectConversation={selectConversation} /> : view === 'connections' ? <ConnectionsPanel onError={setError} onProject={id => { setProjectId(id); setView('projects'); }} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
     </main>
     <AgentConnection open={agentOpen} onClose={() => setAgentOpen(false)} worker={worker} onStatusChanged={refreshStatus} />
   </div>;

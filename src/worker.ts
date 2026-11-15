@@ -15,6 +15,11 @@ import { inside, prepareExecutionDirectory } from './runtime/execution.ts';
 import { projectInspectInput, projectLogsInput, projectReferenceSchema } from './projects/schemas.ts';
 import { inspectProject, projectLogs, validateProjectReference } from './runtime/projects.ts';
 import { publishArtifact } from './runtime/artifacts.ts';
+import { ManagedRuntime } from './runtime/managed.ts';
+import { managedLifecycleInput, managedPrepareInput } from './runtime/managed.ts';
+import { inRuntimeOperation, type RuntimeOperationContext } from './runtime/operations.ts';
+import { callConnector, testConnector } from './connectors/client.ts';
+import { connectorCallInput, connectorTestInput, type ConnectorSnapshot } from './connectors/schemas.ts';
 
 const runIdInput = z.object({ runId: z.string().min(1) });
 const emptyInput = z.object({}).strict();
@@ -35,7 +40,13 @@ export class WorkerServer {
   private replacementReserved = false;
   private closing = false;
   private lockOwned = false;
-  constructor(private config: Config, private adapterFactory: (config: Config, runId?: string) => CodexAdapter = (config, runId) => new CodexAdapter(config, runId), options: { authTimeoutMs?: number } = {}) {
+  private managed:ManagedRuntime;
+  private runtimeOperations=new Set<Promise<unknown>>();
+  private runtimeController=new AbortController();
+  private closingOperation?:Promise<void>;
+  private runtimeUncertain=new Set<string>();
+  constructor(private config: Config, private adapterFactory: (config: Config, runId?: string,connectors?:ConnectorSnapshot[]) => CodexAdapter = (config, runId,connectors) => new CodexAdapter(config, runId,connectors), options: { authTimeoutMs?: number } = {}) {
+    this.managed=new ManagedRuntime(config);
     this.lockPath = resolve(config.stateDir, 'worker/lock.json');
     this.authenticator = new AgentAuthenticator(() => this.adapterFactory(this.config), {
       timeoutMs: options.authTimeoutMs,
@@ -57,6 +68,7 @@ export class WorkerServer {
     // blocked until their owned process group has been resolved; never resubmit them.
     for (const run of this.journal.active()) this.journal.status(run.id, 'uncertain');
     for (const check of this.journal.checks()) this.journal.checkStatus(check.id, 'uncertain');
+    for(const operation of this.journal.runtimeOperations())this.journal.runtimeStatus(operation.id,'uncertain');
     if (existsSync(this.config.socketPath)) {
       if (!lstatSync(this.config.socketPath).isSocket()) throw new Error('Refusing to replace a non-socket worker path');
       rmSync(this.config.socketPath);
@@ -90,8 +102,30 @@ export class WorkerServer {
     try { await this.probing; } finally { this.probing = undefined; }
   }
   health(): WorkerHealth {
+    const runtimeOperations=this.journal.runtimeOperations().map(({id,method,status,requiresExternalInspection})=>({id,method,status:this.runtimeUncertain.has(id)?'uncertain' as const:status,requiresExternalInspection}));
     return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0, executionUid:process.getuid?.(),sourceProtected:false,runtime: this.runtime, replacementReserved: this.replacementReserved,
-      activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id)])] };
+      runtimeOperations,activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id),...runtimeOperations.filter(operation=>operation.status==='uncertain').map(operation=>operation.id)])] };
+  }
+  private hasUncertainRuntime():boolean{return this.runtimeUncertain.size>0||this.journal.runtimeOperations().some(operation=>operation.status==='uncertain');}
+  private async runtimeEffect(method:string,operation:()=>Promise<unknown>):Promise<unknown>{
+    if(this.hasUncertainRuntime())throw new Error('Reconcile uncertain runtime operations before starting another effect.');
+    const id=`runtime_${randomUUID()}`;this.journal.beginRuntimeOperation(id,method);let cleanupFailed=false;
+    const context:RuntimeOperationContext={
+      reserve:()=>{const launch=`launch_${randomUUID()}`;this.journal.reserveRuntimeProcess(id,launch);return launch;},
+      capture:(launch,pid,start,boot)=>this.journal.captureRuntimeProcess(launch,pid,start,boot),release:launch=>this.journal.releaseRuntimeProcess(launch),
+      external:()=>this.journal.runtimeExternal(id),cleanupFailed:()=>{cleanupFailed=true;},
+    };
+    try{
+      const result=await inRuntimeOperation(context,operation),record=this.journal.runtimeOperations().find(item=>item.id===id);
+      if(cleanupFailed)throw new Error('Owned helper cleanup is uncertain; reconcile the runtime operation.');
+      if(record?.requiresExternalInspection){this.journal.completeRuntimeOperation(id);return {...result as Record<string,unknown>,__runtimeOperationId:id};}
+      this.journal.finishRuntimeOperation(id);return result;
+    }catch(error){
+      const record=this.journal.runtimeOperations().find(item=>item.id===id);
+      if(cleanupFailed||record?.requiresExternalInspection){this.runtimeUncertain.add(id);try{this.journal.runtimeStatus(id,'uncertain');}catch{}}
+      else try{this.journal.finishRuntimeOperation(id);}catch{this.runtimeUncertain.add(id);}
+      throw error;
+    }
   }
   private connection(socket: Socket): void {
     let authenticated = false;
@@ -112,13 +146,33 @@ export class WorkerServer {
   }
   private async dispatch(method: string, raw: unknown): Promise<unknown> {
     if (this.closing) throw new Error('Worker is stopping');
+    if(method==='runtime/acknowledge'){
+      const {operationId}=z.object({operationId:z.string().regex(/^runtime_[0-9a-f-]{36}$/)}).strict().parse(raw),operation=this.journal.runtimeOperations().find(item=>item.id===operationId);
+      if(operation&&!operation.completed)throw new Error('An unfinished runtime operation requires explicit reconciliation, not a receipt acknowledgement.');
+      if(operation)this.journal.finishRuntimeOperation(operationId);this.runtimeUncertain.delete(operationId);return {acknowledged:true,operationId};
+    }
+    if(method.startsWith('managed/')||method==='connectors/test'||method==='connectors/call'){
+      if(this.replacementReserved)throw new Error('Worker replacement is reserved. Wait before starting runtime operations.');
+      let effect:(()=>Promise<unknown>)|undefined,observation:(()=>Promise<unknown>)|undefined;
+      if(method==='managed/prepare'||method==='managed/deploy'){const input=managedPrepareInput.parse(raw);effect=()=>method==='managed/prepare'?this.managed.prepare(input):this.managed.deploy(input);}
+      else if(method==='managed/stop'){const input=managedLifecycleInput.parse(raw);effect=()=>this.managed.stop(input);}
+      else if(method==='managed/status'||method==='managed/logs'){const input=managedLifecycleInput.parse(raw);observation=()=>method==='managed/status'?this.managed.status(input):this.managed.logs(input);}
+      else if(method==='connectors/test'){const input=connectorTestInput.parse(raw);effect=()=>testConnector(this.config,input.connector,{signal:this.runtimeController.signal});}
+      else if(method==='connectors/call'){const input=connectorCallInput.parse(raw);effect=()=>callConnector(this.config,input.connector,input.name,input.arguments,{signal:this.runtimeController.signal});}
+      else throw new Error(`Unsupported worker method: ${method}`);
+      const operation=(async()=>{
+        return effect?await this.runtimeEffect(method,effect):await observation!();
+      })();
+      this.runtimeOperations.add(operation);
+      try{return this.clean(await operation);}finally{this.runtimeOperations.delete(operation);this.repairOwnership();}
+    }
     if(method==='projects/prepare'){const input=z.object({project:projectReferenceSchema}).strict().parse(raw);validateProjectReference(this.config,input.project);prepareExecutionDirectory(this.config,input.project.directory);return {directory:input.project.directory,ready:true};}
     if(method==='projects/inspect'){const input=projectInspectInput.parse(raw);return this.clean(await inspectProject(this.config,input.project,input.components));}
     if(method==='projects/logs'){const input=projectLogsInput.parse(raw);return this.clean(await projectLogs(this.config,input.project,input.component));}
     if(method==='artifacts/publish')return publishArtifact(this.config,raw);
     if (method === 'worker/reserve-root-replacement') {
       emptyInput.parse(raw);
-      if (this.active || this.pendingChecks || this.journal.active().length || this.journal.checks().length || this.authenticator.busy) throw new Error('The worker has active or uncertain execution, pending skill checks, or ChatGPT sign-in. Finish or reconcile it before replacing the worker.');
+      if (this.active || this.pendingChecks || this.runtimeOperations.size || this.journal.runtimeOperations().length || this.journal.active().length || this.journal.checks().length || this.authenticator.busy) throw new Error('The worker has active or uncertain execution, pending skill checks or runtime operations, or ChatGPT sign-in. Finish or reconcile it before replacing the worker.');
       // Reserve admission synchronously before waiting for an existing read-only probe.
       this.replacementReserved = true;
       try {
@@ -132,6 +186,7 @@ export class WorkerServer {
     if (method === 'agent/status') { emptyInput.parse(raw); await this.probe(); return this.authenticator.status(this.runtime.authenticated); }
     if (method === 'agent/connect') {
       emptyInput.parse(raw);
+      if(this.hasUncertainRuntime())throw new Error('Reconcile uncertain runtime operations before connecting the agent.');
       if (this.authenticator.busy) return await this.authenticator.connect();
       if (this.runtime.authenticated) return this.authenticator.status(true);
       if (this.active || this.pendingChecks || this.journal.active().length || this.journal.checks().length) throw new Error('Wait for the active run or skill check, and resolve any uncertain execution, before connecting the agent');
@@ -151,6 +206,7 @@ export class WorkerServer {
         if (known.submission !== JSON.stringify(submission)) throw new Error('Run ID already accepted with different input');
         return { accepted: true, duplicate: true, status: known.status };
       }
+      if(this.journal.runtimeOperations().length||this.runtimeUncertain.size)throw new Error('Worker has running or uncertain runtime operations; reconcile them before submitting tasks.');
       if (this.authenticator.busy) throw new Error('ChatGPT sign-in is in progress. Finish or cancel the agent connection before running tasks');
       if (this.active || this.journal.active().length || this.journal.checks().some(check => check.status === 'uncertain')) throw new Error('Worker is occupied or has an unresolved orphan run/check');
       if (this.probing) await this.probing;
@@ -162,7 +218,7 @@ export class WorkerServer {
       if (this.authenticator.busy) throw new Error('ChatGPT sign-in is in progress. Finish or cancel the agent connection before running tasks');
       if (this.replacementReserved) throw new Error('Worker replacement is reserved. Wait for the root worker before submitting tasks.');
       this.journal.accept(submission);
-      const adapter = this.adapterFactory(this.config, submission.runId);
+      const adapter = this.adapterFactory(this.config, submission.runId,submission.connectors);
       const active: Active = { submission, adapter, completed: false, interruptRequested: false }; this.active = active;
       this.record(active, 'status', { status: 'running', accepted: true });
       setImmediate(() => void this.execute(active));
@@ -179,7 +235,22 @@ export class WorkerServer {
       const active = this.requireActive(input.runId); active.adapter.reply(input.requestId, input.answers); this.journal.status(input.runId, 'running'); return { answered: true };
     }
     if (method === 'resolve') {
-      const { runId } = runIdInput.parse(raw); const run = this.journal.get(runId);
+      const {runId,acknowledgeExternalEffects}=runIdInput.extend({acknowledgeExternalEffects:z.boolean().optional()}).parse(raw);
+      const runtime=this.journal.runtimeOperations().find(item=>item.id===runId);
+      if(runtime){
+        if(runtime.status!=='uncertain'&&!this.runtimeUncertain.has(runId))throw new Error('A running runtime operation cannot be reconciled.');
+        if(runtime.requiresExternalInspection&&!acknowledgeExternalEffects)throw new Error('Inspect external HTTP/service effects and explicitly acknowledge them before reconciliation.');
+        if(!runtime.completed)for(const process of this.journal.runtimeProcesses(runId)){
+          if(!process.released&&!process.pid)continue;
+          if(!process.pid||!process.start||!/^\d+$/.test(process.start)||!process.boot)throw new Error('Cannot verify the runtime helper identity; inspect the host before reconciliation.');
+          if(process.boot!==bootId())continue;
+          const members=groupMembers(process.pid);if(!members.length)continue;
+          if(processStamp(process.pid)!==process.start||members.some(member=>member.sid!==process.pid||BigInt(member.start)<BigInt(process.start!)))throw new Error('Cannot verify runtime process group ownership; the recorded leader is missing or its PID was reused. Inspect the host.');
+          await terminateGroup(process.pid);
+        }
+        this.journal.finishRuntimeOperation(runId);this.runtimeUncertain.delete(runId);this.repairOwnership();return {resolved:true,known:true,kind:'runtimeOperation',message:'Recorded local helper groups were reconciled. External effects were acknowledged where required; no effects were replayed or rolled back.'};
+      }
+      const run = this.journal.get(runId);
       const standalone = this.journal.checks().find(check => check.id === runId && check.run_id === null && check.status === 'uncertain');
       if (standalone) { await this.resolveOrphan(standalone); this.journal.finishCheck(standalone.id); this.repairOwnership(); return { resolved: true, known: true, kind: 'skillCheck', message: 'Owned orphan fixture check terminated/confirmed absent; its side effects were not repeated' }; }
       if (!run && !this.active && this.journal.active().length === 0 && this.journal.checks().length === 0) return { resolved: true, known: false, message: 'No worker acceptance record; owner acknowledged host reconciliation' };
@@ -191,6 +262,7 @@ export class WorkerServer {
       this.repairOwnership(); return { resolved: true };
     }
     if (method === 'checkSkill') {
+      if(this.hasUncertainRuntime())throw new Error('Reconcile uncertain runtime operations before validating a skill.');
       if (this.authenticator.busy) throw new Error('Finish or cancel ChatGPT sign-in before validating a skill');
       if (this.active?.completed) throw new Error('Run is finishing; retry validation once execution is idle');
       const input = checkSkillSchema.parse(raw);
@@ -229,7 +301,10 @@ export class WorkerServer {
   }
   private async execute(active: Active): Promise<void> {
     const adapter = active.adapter;
-    adapter.on('spawn', ({ pid }: { pid: number }) => this.journal.child(active.submission.runId, pid, processStamp(pid) ?? '', bootId()));
+    adapter.on('spawn', ({ pid,start,boot }: { pid: number;start?:string;boot?:string }) => {
+      const identity=start??processStamp(pid),kernel=boot??bootId();if(!identity||kernel==='unsupported')throw new Error('Cannot durably capture the Codex process identity.');
+      this.journal.child(active.submission.runId,pid,identity,kernel);
+    });
     adapter.on('event', (type: string, data: unknown) => {
       if (active.completed) return;
       try {
@@ -324,7 +399,7 @@ export class WorkerServer {
     if (!members.length) return;
     if (!run.child_start || members.some(member => member.sid !== run.child_pid || BigInt(member.start) < BigInt(run.child_start!))) throw new Error('Cannot verify orphan process group ownership; inspect the host before resolving');
     const current = processStamp(run.child_pid);
-    if (current && current !== run.child_start) throw new Error('Orphan PID was reused; inspect the host before resolving');
+    if (current !== run.child_start) throw new Error('Orphan process leader is missing or its PID was reused; inspect the host before resolving');
     await terminateGroup(run.child_pid);
   }
   private repairOwnership(): void {
@@ -338,17 +413,22 @@ export class WorkerServer {
     const projects=resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects'));
     if(inside(this.config.stateDir,projects))visit(projects);
   }
-  async close(): Promise<void> {
-    this.closing = true;
-    await this.authenticator.close();
-    if (this.probing) await this.probing;
-    if (this.active) await this.finish(this.active, { status: 'interrupted', error: 'Worker shut down and terminated its owned runtime process group. Detached services may continue.' });
-    await this.checks;
-    for (const socket of this.clients) socket.destroy(); this.clients.clear();
-    if (this.server) await new Promise<void>(resolveClose => this.server!.close(() => resolveClose()));
-    this.journal?.close();
-    if (this.lockOwned) { rmSync(this.config.socketPath, { force: true }); rmSync(this.lockPath, { force: true }); this.lockOwned = false; }
-    this.repairOwnership();
+  close(): Promise<void> {
+    return this.closingOperation??=(async()=>{
+      this.closing = true;
+      this.runtimeController.abort();
+      await this.managed.close();
+      await Promise.allSettled([...this.runtimeOperations]);
+      await this.authenticator.close();
+      if (this.probing) await this.probing;
+      if (this.active) await this.finish(this.active, { status: 'interrupted', error: 'Worker shut down and terminated its owned runtime process group. Detached services may continue.' });
+      await this.checks;
+      for (const socket of this.clients) socket.destroy(); this.clients.clear();
+      if (this.server) await new Promise<void>(resolveClose => this.server!.close(() => resolveClose()));
+      this.journal?.close();
+      if (this.lockOwned) { rmSync(this.config.socketPath, { force: true }); rmSync(this.lockPath, { force: true }); this.lockOwned = false; }
+      this.repairOwnership();
+    })();
   }
 }
 

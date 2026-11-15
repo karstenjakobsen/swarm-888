@@ -3,20 +3,25 @@ import { connect as connectSocket, type Socket } from 'node:net';
 import { lstatSync } from 'node:fs';
 import { z } from 'zod';
 import type { Config } from './config.js';
+import { connectorSnapshotSchema } from './connectors/schemas.ts';
 
 export const workerEventSchema = z.object({ cursor: z.number().int().positive(), runId: z.string(), type: z.string(), data: z.unknown(), createdAt: z.string() });
 export type WorkerEvent = z.infer<typeof workerEventSchema>;
+export const runtimeOperationSchema=z.object({id:z.string().min(1).max(150),method:z.string().min(1).max(100),status:z.enum(['running','uncertain']),requiresExternalInspection:z.boolean()}).strict();
+export type RuntimeOperation=z.infer<typeof runtimeOperationSchema>;
 export const workerHealthSchema = z.object({
   connected: z.literal(true), uid: z.number().int(), pid: z.number().int(), root: z.boolean(),
   executionUid:z.number().int().nonnegative().optional(),sourceProtected:z.boolean().optional(),
   runtime: z.object({ available: z.boolean(), version: z.string(), authenticated: z.boolean(), authenticating: z.boolean().optional(), detail: z.string(), model: z.string().optional() }),
   activeRunId: z.string().nullable(), uncertainRuns: z.array(z.string()), replacementReserved: z.boolean().optional(),
+  runtimeOperations:z.array(runtimeOperationSchema).max(1000).optional(),
 });
 export type WorkerHealth = z.infer<typeof workerHealthSchema>;
 export const submitSchema = z.object({
   runId: z.string().min(1).max(150).regex(/^[a-zA-Z0-9_-]+$/), conversationId: z.string().min(1).max(150).regex(/^[a-zA-Z0-9_-]+$/), threadId: z.string().nullable().optional(),
   prompt: z.string().min(1).max(200_000), cwd: z.string().startsWith('/'), bootstrap: z.string().max(40_000),
   skills: z.array(z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), path: z.string().startsWith('/'), version: z.union([z.string(), z.number()]) })).max(100),
+  connectors:z.array(connectorSnapshotSchema).max(20).optional(),
   kind: z.enum(['user', 'improvement']).optional(), timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
 });
 export type Submission = z.infer<typeof submitSchema>;
@@ -98,7 +103,7 @@ export class WorkerClient extends EventEmitter {
     const id = ++this.serial;
     return new Promise((resolve, reject) => {
       const frame = JSON.stringify({ id, method, params }) + '\n';
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Worker ${method} timed out; outcome may be uncertain`)); }, method === 'checkSkill' ? 600_000 : 30_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Worker ${method} timed out; outcome may be uncertain`)); }, method === 'checkSkill' ? 600_000 : method==='managed/deploy'?180_000:method==='managed/prepare'?60_000:30_000);
       this.pending.set(id, { socket, resolve, reject, timer });
       try { socket.write(frame); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }

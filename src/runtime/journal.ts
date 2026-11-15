@@ -5,6 +5,8 @@ import type { Submission, WorkerEvent } from '../ipc.js';
 
 export type JournalRun = { id: string; status: string; submission: string; child_pid: number | null; child_start: string | null; boot_id: string | null };
 export type JournalCheck = { id: string; run_id: string | null; status: string; candidate_path: string; child_pid: number | null; child_start: string | null; boot_id: string | null };
+export type RuntimeOperation={id:string;method:string;status:'running'|'uncertain';requiresExternalInspection:boolean;completed:boolean};
+export type RuntimeProcess={id:string;pid:number|null;start:string|null;boot:string|null;released:boolean};
 export const MAX_WORKER_EVENT_BYTES = 1024 * 1024;
 export const WORKER_REPLAY_PAGE_BYTES = 2 * 1024 * 1024;
 
@@ -19,7 +21,10 @@ export class WorkerJournal {
       CREATE TABLE IF NOT EXISTS worker_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES worker_runs(id),type TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS worker_meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS worker_checks(id TEXT PRIMARY KEY,run_id TEXT,status TEXT NOT NULL,candidate_path TEXT NOT NULL,child_pid INTEGER,child_start TEXT,boot_id TEXT);
+      CREATE TABLE IF NOT EXISTS worker_runtime_operations(id TEXT PRIMARY KEY,method TEXT NOT NULL,status TEXT NOT NULL,external_inspection INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS worker_runtime_processes(id TEXT PRIMARY KEY,operation_id TEXT NOT NULL REFERENCES worker_runtime_operations(id) ON DELETE CASCADE,pid INTEGER,start TEXT,boot TEXT,released INTEGER NOT NULL DEFAULT 0);
       INSERT OR IGNORE INTO worker_meta(key,value) VALUES('ack',0);`);
+    if(!(this.db.prepare('PRAGMA table_info(worker_runtime_operations)').all() as {name:string}[]).some(column=>column.name==='completed'))this.db.exec('ALTER TABLE worker_runtime_operations ADD COLUMN completed INTEGER NOT NULL DEFAULT 0');
   }
   accept(submission: Submission): boolean {
     if (this.get(submission.runId)) return false;
@@ -35,6 +40,20 @@ export class WorkerJournal {
   checks(): JournalCheck[] { return this.db.prepare('SELECT * FROM worker_checks').all() as JournalCheck[]; }
   checkStatus(id: string, status: string): void { this.db.prepare('UPDATE worker_checks SET status=? WHERE id=?').run(status, id); }
   finishCheck(id: string): void { this.db.prepare('DELETE FROM worker_checks WHERE id=?').run(id); }
+  runtimeOperations():RuntimeOperation[]{return (this.db.prepare('SELECT id,method,status,external_inspection,completed FROM worker_runtime_operations ORDER BY rowid').all() as {id:string;method:string;status:RuntimeOperation['status'];external_inspection:number;completed:number}[]).map(row=>({id:row.id,method:row.method,status:row.status,requiresExternalInspection:row.external_inspection===1,completed:row.completed===1}));}
+  beginRuntimeOperation(id:string,method:string):void {this.db.prepare("INSERT INTO worker_runtime_operations(id,method,status) VALUES(?,?,'running')").run(id,method);}
+  runtimeStatus(id:string,status:RuntimeOperation['status']):void {this.db.prepare('UPDATE worker_runtime_operations SET status=? WHERE id=?').run(status,id);}
+  runtimeExternal(id:string):void {this.db.prepare('UPDATE worker_runtime_operations SET external_inspection=1 WHERE id=?').run(id);}
+  completeRuntimeOperation(id:string):void {this.db.prepare("UPDATE worker_runtime_operations SET completed=1,status='uncertain' WHERE id=?").run(id);}
+  reserveRuntimeProcess(operationId:string,id:string):void {this.db.prepare('INSERT INTO worker_runtime_processes(id,operation_id) VALUES(?,?)').run(id,operationId);}
+  captureRuntimeProcess(id:string,pid:number,start:string,boot:string):void {
+    if(!Number.isSafeInteger(pid)||pid<=0||!/^\d+$/.test(start)||!boot||boot==='unsupported')throw new Error('Cannot durably capture the owned helper identity.');
+    if(Number(this.db.prepare('UPDATE worker_runtime_processes SET pid=?,start=?,boot=? WHERE id=?').run(pid,start,boot,id).changes)!==1)throw new Error('Owned helper reservation is missing.');
+  }
+  releaseRuntimeProcess(id:string):void {if(Number(this.db.prepare('UPDATE worker_runtime_processes SET released=1 WHERE id=? AND pid IS NOT NULL AND start IS NOT NULL AND boot IS NOT NULL').run(id).changes)!==1)throw new Error('Owned helper launch identity is incomplete.');}
+  runtimeProcess(operationId:string,pid:number,start:string,boot:string):void {const id=`${operationId}_${pid}_${start}`;this.reserveRuntimeProcess(operationId,id);this.captureRuntimeProcess(id,pid,start,boot);this.releaseRuntimeProcess(id);}
+  runtimeProcesses(operationId:string):RuntimeProcess[]{return (this.db.prepare('SELECT id,pid,start,boot,released FROM worker_runtime_processes WHERE operation_id=? ORDER BY rowid').all(operationId) as {id:string;pid:number|null;start:string|null;boot:string|null;released:number}[]).map(row=>({...row,released:row.released===1}));}
+  finishRuntimeOperation(id:string):void {this.db.prepare('DELETE FROM worker_runtime_operations WHERE id=?').run(id);}
   count(): number { return Number((this.db.prepare('SELECT count(*) AS n FROM worker_events').get() as { n: number }).n); }
   bytes(): number { return Number((this.db.prepare('SELECT coalesce(sum(length(CAST(data AS BLOB))),0) AS n FROM worker_events').get() as { n: number }).n); }
   append(runId: string, type: string, data: unknown, terminal = false): WorkerEvent {

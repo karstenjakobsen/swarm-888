@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Run } from '../shared.ts';
+import type { ManagedSource,managedServiceStatus } from '../managed/schemas.ts';
 
 export const projectStatus = z.enum(['healthy','running','scheduled','ready','stopped','failed','unknown']);
 export const componentKind = z.enum(['website','service','scheduled_job','script']);
@@ -18,6 +19,7 @@ const timezone = z.string().max(100).refine(value => { try { new Intl.DateTimeFo
 export const projectCreateInput = z.object({
   name, description:description.default(''), origin:z.enum(['created','adopted']).default('created'),
   directory:z.string().min(1).max(2000).optional(),
+  managed:z.boolean().optional(),template:z.enum(['service','empty']).optional(),
 }).strict().refine(value => value.origin === 'adopted' || value.directory === undefined, 'Created projects receive a server-assigned directory');
 export const projectUpdateInput = z.object({name:name.optional(),description:description.optional()}).strict();
 export const componentInput = z.object({
@@ -55,6 +57,12 @@ export interface ProjectComponent {
 export interface Project {
   id:string;name:string;description:string;directory:string;origin:'created'|'adopted';createdAt:string;updatedAt:string;
   components:ProjectComponent[];status:ProjectStatus;lastCheckedAt:string|null;conversationIds:string[];runs:Run[];
+  source?:ManagedSource;
+  deployment?:ProjectDeployment;
+  connectorIds?:string[];
+}
+export interface ProjectDeployment {
+  commit:string;releaseDirectory:string;unitName:string|null;status:z.infer<typeof managedServiceStatus>;detail:string;checkedAt:string;
 }
 export type ProjectReference = Pick<Project,'id'|'directory'>;
 export type ComponentReference = Pick<ProjectComponent,'id'|'kind'|'unitName'|'url'|'scriptPath'|'schedule'|'timezone'>;
