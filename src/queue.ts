@@ -5,7 +5,7 @@ import type { Config } from './config.ts';
 import { Store } from './store.ts';
 import { WorkerClient, type WorkerHealth } from './ipc.ts';
 import type { z } from 'zod';
-import { ReplyInput, protectedExecution } from './shared.ts';
+import { ReplyInput, rootExecution } from './shared.ts';
 import type { Brain } from './brain/index.ts';
 
 export class Queue extends EventEmitter {
@@ -92,10 +92,7 @@ export class Queue extends EventEmitter {
         if(this.closed)return;
       }
       if(this.authenticationHolds||this.maintenance||this.store.active()||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.runtime?.authenticating||this.health?.replacementReserved)return;
-      if(this.config.protectOperator&&!protectedExecution(this.health,this.config)){
-        this.workerError='Protected worker required. Agent execution must use a separate non-root account with operator files protected.';return;
-      }
-      if(this.config.requireRootWorker===true&&(this.health?.uid!==0||this.health?.root!==true)){
+      if(this.config.requireRootWorker===true&&!rootExecution(this.health)){
         this.workerError='Root worker required. Connect a worker running as UID 0 before executing tasks.';return;
       }
       const authenticationGeneration=this.authenticationGeneration;
@@ -106,14 +103,13 @@ export class Queue extends EventEmitter {
       this.health=await this.client.request('health',{});
       if(this.closed||this.maintenance)return;
       if(authenticationGeneration!==this.authenticationGeneration||this.authenticationHolds||this.health?.runtime?.authenticating||this.health?.activeRunId||this.health?.uncertainRuns?.length||this.health?.replacementReserved)return;
-      if(this.config.protectOperator&&!protectedExecution(this.health,this.config))return;
-      if(this.config.requireRootWorker===true&&(this.health?.uid!==0||this.health?.root!==true))return;
+      if(this.config.requireRootWorker===true&&!rootExecution(this.health))return;
       const next=this.store.queued();
       if(!next||!this.health?.runtime?.authenticated)return;
       const conversation=this.store.conversation(next.conversationId)!;
       const project=this.store.projects.forConversation(next.conversationId);
-      const cwd=project?.directory??(this.config.protectOperator?join(this.config.projectsDir!,'conversations',next.conversationId):join(this.config.stateDir,'workspaces',next.conversationId));
-      if(!this.config.protectOperator)mkdirSync(cwd,{recursive:true,mode:0o700});
+      const cwd=project?.directory??join(this.config.stateDir,'workspaces',next.conversationId);
+      if(!project)mkdirSync(cwd,{recursive:true,mode:0o700});
       this.store.transition(next.id,'running');
       try{
         await this.client.request('submit',{

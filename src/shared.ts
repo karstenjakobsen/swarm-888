@@ -12,6 +12,7 @@ export interface Message {id:string;conversationId:string;runId:string;role:'use
 export interface AppEvent {seq:number;runId:string|null;conversationId:string|null;type:string;data:unknown;createdAt:string}
 export const terminal = new Set<RunStatus>(['completed','failed','interrupted']);
 
-export function protectedExecution(health:{uid:number;root:boolean;executionUid?:number;sourceProtected?:boolean}|null|undefined,expected:{executionUid?:number;controllerUid?:number}={}):boolean {
-  return health?.uid===0&&health.root===true&&health.sourceProtected===true&&typeof health.executionUid==='number'&&health.executionUid>0&&health.executionUid!==expected.controllerUid&&(expected.executionUid===undefined||health.executionUid===expected.executionUid);
+/** Older brokers may be root while their agent runs as a different user. */
+export function rootExecution(health:{uid:number;root:boolean;executionUid?:number}|null|undefined):boolean {
+  return health?.uid===0&&health.root===true&&(health.executionUid??health.uid)===0;
 }

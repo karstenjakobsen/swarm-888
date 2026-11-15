@@ -12,10 +12,7 @@ export interface Config {
   secureCookie: boolean; improvementEnabled: boolean; improvementTimeoutMs: number;
   improvementMaxTurns: number; allowTempState: boolean;
   requireRootWorker?: boolean;
-  protectOperator?: boolean;
-  executionUid?: number; executionGid?: number;
-  executionUser?: string;
-  projectsDir?: string; executionHome?: string;
+  projectsDir?: string;
 }
 
 function integer(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -27,24 +24,6 @@ function integer(value: string | undefined, fallback: number, min: number, max: 
 function containsPath(root:string,path:string):boolean {
   const rel=relative(resolve(root),resolve(path));
   return rel===''||(!isAbsolute(rel)&&rel!=='..'&&!rel.startsWith(`..${sep}`));
-}
-
-/** Resolve a local dedicated account without preventing the controller from opening before setup. */
-export function resolveExecutionIdentity(env:NodeJS.ProcessEnv,controllerUid:number,accounts=readFileSync('/etc/passwd','utf8')):{executionUser?:string;executionUid?:number;executionGid?:number} {
-  const executionUser=env.APP_EXECUTION_USER??(env.APP_EXECUTION_UID===undefined&&env.APP_EXECUTION_GID===undefined?'vps-ai-projects':undefined);
-  if(executionUser!==undefined&&!/^[a-z_][a-z0-9_-]{0,31}$/.test(executionUser))throw new Error('APP_EXECUTION_USER must be a valid local account name');
-  let executionUid=env.APP_EXECUTION_UID===undefined?undefined:integer(env.APP_EXECUTION_UID,0,1,2**31-1);
-  let executionGid=env.APP_EXECUTION_GID===undefined?undefined:integer(env.APP_EXECUTION_GID,0,1,2**31-1);
-  if(executionUid===controllerUid)throw new Error('APP_EXECUTION_UID must differ from the controller UID so agents cannot modify operator releases');
-  if((executionUid===undefined)!==(executionGid===undefined))throw new Error('Set APP_EXECUTION_UID and APP_EXECUTION_GID together, or use APP_EXECUTION_USER for a dedicated account');
-  const account=executionUser?accounts.split('\n').map(line=>line.split(':')).find(fields=>fields[0]===executionUser):undefined;
-  if(account){
-    const uid=integer(account[2],0,1,2**31-1),gid=integer(account[3],0,1,2**31-1);
-    if(executionUid!==undefined&&(executionUid!==uid||executionGid!==gid))throw new Error(`APP_EXECUTION_UID/GID do not match the local account ${executionUser}`);
-    executionUid=uid;executionGid=gid;
-  }else if(executionUser&&executionUid!==undefined)throw new Error(`APP_EXECUTION_USER ${executionUser} is not an existing local account; remove the name to configure both numeric IDs explicitly`);
-  if(executionUid===controllerUid)throw new Error('APP_EXECUTION_USER must differ from the controller account so agents cannot modify operator releases');
-  return {executionUser,executionUid,executionGid};
 }
 
 export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
@@ -60,23 +39,12 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
     throw new Error('APP_STATE_DIR must be outside the source checkout and build output');
   }
   const controllerUid = integer(process.env.APP_CONTROLLER_UID, process.getuid?.() ?? 0, 0, 2 ** 31 - 1);
-  const protectOperator=process.env.APP_PROTECT_OPERATOR!=='false';
-  if(!protectOperator&&!allowTempState)throw new Error('Operator protection can only be disabled in explicit temporary test state');
-  const {executionUser,executionUid,executionGid}=protectOperator?resolveExecutionIdentity(process.env,controllerUid):{
-    executionUser:process.env.APP_EXECUTION_USER,
-    executionUid:process.env.APP_EXECUTION_UID===undefined?undefined:integer(process.env.APP_EXECUTION_UID,0,1,2**31-1),
-    executionGid:process.env.APP_EXECUTION_GID===undefined?undefined:integer(process.env.APP_EXECUTION_GID,0,1,2**31-1),
-  };
-  function externalDirectory(value:string,label:string):string {
-    if(!isAbsolute(value))throw new Error(`${label} must be absolute`);
-    const directory=resolve(value);
-    if(containsPath(projectRoot,directory)||containsPath(directory,projectRoot)||containsPath(normalized,directory)||containsPath(directory,normalized))throw new Error(`${label} must be separate from the operator source and controller state directories`);
-    if(!allowTempState&&(directory==='/tmp'||directory.startsWith('/tmp/')||directory==='/var/tmp'||directory.startsWith('/var/tmp/')))throw new Error(`${label} must be persistent, outside temporary directories`);
-    return directory;
-  }
-  const projectsDir=protectOperator?externalDirectory(process.env.APP_PROJECTS_DIR??'/srv/vps-ai-projects','APP_PROJECTS_DIR'):join(normalized,'projects');
-  const executionHome=protectOperator?externalDirectory(process.env.APP_EXECUTION_HOME??'/var/lib/vps-ai-executor','APP_EXECUTION_HOME'):join(normalized,'runtime');
-  if(protectOperator&&(containsPath(projectsDir,executionHome)||containsPath(executionHome,projectsDir)))throw new Error('APP_PROJECTS_DIR and APP_EXECUTION_HOME must be separate directories');
+  const projectsPath=process.env.APP_PROJECTS_DIR??join(normalized,'projects');
+  if(!isAbsolute(projectsPath))throw new Error('APP_PROJECTS_DIR must be absolute');
+  const projectsDir=resolve(projectsPath);
+  if(containsPath(projectRoot,projectsDir)||containsPath(projectsDir,projectRoot)||containsPath(projectsDir,normalized))throw new Error('APP_PROJECTS_DIR must not overlap the operator source or contain controller state');
+  if(containsPath(normalized,projectsDir)&&!containsPath(join(normalized,'projects'),projectsDir))throw new Error('Inside controller state, APP_PROJECTS_DIR must be within its projects directory');
+  if(!allowTempState&&(projectsDir==='/tmp'||projectsDir.startsWith('/tmp/')||projectsDir==='/var/tmp'||projectsDir.startsWith('/var/tmp/')))throw new Error('APP_PROJECTS_DIR must be persistent, outside temporary directories');
   const origins=(process.env.APP_ORIGINS ?? process.env.APP_ORIGIN ?? 'http://localhost:5173,http://127.0.0.1:5173').split(',').map(s => {
     const url=new URL(s.trim());
     if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('APP_ORIGIN(S) must contain HTTP(S) browser origins without credentials');
@@ -86,7 +54,7 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
   if (options.requireAdmin && adminPassword.length < 12) throw new Error('Set ADMIN_PASSWORD to a unique credential of at least 12 characters in .env');
   const config: Config = {
     stateDir: normalized, socketPath: join(normalized, 'worker.sock'), bridgeSocket: join(normalized, 'bridge.sock'), ipcToken: '',
-    controllerUid, codexBin: process.env.CODEX_BIN ?? join(projectRoot, 'node_modules/.bin/codex'), runtimeHome: protectOperator?join(executionHome,'codex'):join(normalized,'runtime'),
+    controllerUid, codexBin: process.env.CODEX_BIN ?? join(projectRoot, 'node_modules/.bin/codex'), runtimeHome: join(normalized,'runtime'),
     model: process.env.CODEX_MODEL || undefined, host: process.env.APP_HOST ?? '127.0.0.1',
     port: integer(process.env.APP_PORT, 3001, 1, 65535),
     origins,
@@ -94,8 +62,7 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
     improvementEnabled: process.env.APP_IMPROVEMENT_ENABLED !== 'false',
     improvementTimeoutMs: integer(process.env.APP_IMPROVEMENT_TIMEOUT_MS, 90_000, 1000, 600_000),
     improvementMaxTurns: integer(process.env.APP_IMPROVEMENT_MAX_TURNS, 3, 1, 10), allowTempState,
-    requireRootWorker:protectOperator||process.env.APP_REQUIRE_ROOT_WORKER!=='false',
-    protectOperator,executionUser,executionUid,executionGid,projectsDir,executionHome,
+    requireRootWorker:process.env.APP_REQUIRE_ROOT_WORKER!=='false',projectsDir,
   };
   initState(config);
   return config;
@@ -113,7 +80,7 @@ export function initState(config: Config): void {
   if (realpathSync(config.stateDir) !== config.stateDir) throw new Error('APP_STATE_DIR must be a canonical path without symlinks');
   if (info.uid !== config.controllerUid) throw new Error(`State directory belongs to UID ${info.uid}; expected controller UID ${config.controllerUid}. Initialize it as the controller user first.`);
   if ((info.mode & 0o077) !== 0) throw new Error('APP_STATE_DIR must have mode 0700 (chmod 700 the directory)');
-  for (const dir of ['secrets', 'runtime', 'skills', 'workspaces', 'artifacts', 'worker']) {
+  for (const dir of ['secrets', 'runtime', 'skills', 'workspaces', 'projects', 'artifacts', 'worker']) {
     const path = join(config.stateDir, dir);
     mkdirSync(path, {recursive:true, mode:0o700});
     const subdir=lstatSync(path);

@@ -32,6 +32,9 @@ test('project tools register and prepare current-turn workspaces and retain link
     assert(brain.projectContext(conversation.id).includes(project.directory));
     assert(brain.projectContext(conversation.id).includes('Never modify the operator'));
     assert(brain.bootstrap().includes(projectRoot));assert(brain.bootstrap().includes('externally')||brain.bootstrap().includes('released separately'));
+    assert.match(brain.bootstrap(),/OPERATOR SOURCE GUARDRAIL \(prompt-only\)/);
+    assert.match(brain.bootstrap(),/Never change its source/);
+    assert(!brain.bootstrap().includes('Never attempt to regain root'));
     const component=await brain.callTool('project_component_add',{projectId:project.id,name:'Report script',kind:'script',scriptPath:'scripts/report.mjs'}) as ProjectComponent;
     assert.equal(component.kind,'script');assert.equal(component.status,'unknown');
     await assert.rejects(brain.callTool('project_component_add',{projectId:project.id,name:'Escape',kind:'script',scriptPath:'../src/worker.ts'}));

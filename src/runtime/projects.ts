@@ -3,25 +3,18 @@ import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Config } from '../config.ts';
 import type { ComponentObservation, ComponentReference, ProjectReference } from '../projects/schemas.ts';
-import { executionCommand, executionEnvironment, inside } from './protection.ts';
+import { executionCommand, executionEnvironment, inside } from './execution.ts';
 
 const unitPattern=/^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*\.(service|timer)$/;
 type CommandResult={stdout:string;truncated:boolean};
 export type ProjectCommand=(command:string,args:string[])=>Promise<CommandResult>;
 export const projectCommand=(config:Config):ProjectCommand=>(command,args)=>new Promise((ok,no)=>{
-  const userManager=command==='/usr/bin/systemctl'||command==='/usr/bin/journalctl';
-  const invocation=userManager?executionCommand(config,command,['--user',...args],false):{command,args};
-  execFile(invocation.command,invocation.args,{encoding:'utf8',timeout:5000,maxBuffer:200_000,env:userManager?{...executionEnvironment(config),LC_ALL:'C',LANG:'C'}:{PATH:'/usr/bin:/bin',LC_ALL:'C',LANG:'C'}},(error,stdout)=>{
+  const invocation=executionCommand(config,command,args);
+  execFile(invocation.command,invocation.args,{encoding:'utf8',timeout:5000,maxBuffer:200_000,env:{...executionEnvironment(config),LC_ALL:'C',LANG:'C'}},(error,stdout)=>{
     if(error){no(new Error(command.endsWith('journalctl')?'Project logs are unavailable from the service manager.':'Project service state is unavailable from the service manager.'));return;}
     ok({stdout,truncated:false});
   });
 });
-
-function executionAccount(config:Config):string {
-  const uid=config.executionUid??process.getuid?.();
-  const account=readFileSync('/etc/passwd','utf8').split('\n').map(line=>line.split(':')).find(fields=>Number(fields[2])===uid)?.[0];
-  if(!account)throw new Error('The project execution account cannot be resolved.');return account;
-}
 
 function hostTimezone():string|null {
   const candidates:string[]=[];
@@ -35,7 +28,7 @@ async function cron(config:Config,project:ProjectReference,component:ComponentRe
   if(!component.scriptPath||!component.schedule)throw new Error('Cron jobs require a registered script and five-field schedule.');
   const path=resolve(project.directory,component.scriptPath);
   if(!inside(project.directory,path)||realpathSync(path)!==path||!lstatSync(path).isFile())throw new Error('The registered cron script is missing or is not canonical.');
-  const content=(await command('/usr/bin/crontab',['-u',executionAccount(config),'-l'])).stdout;
+  const content=(await command('/usr/bin/crontab',['-l'])).stdout;
   if(/^\s*CRON_TZ\s*=/m.test(content))throw new Error('This crontab uses CRON_TZ; schedule timezone semantics could not be independently verified.');
   const requested=component.schedule.trim().split(/\s+/).join(' ');
   const spellings=[path,JSON.stringify(path),`'${path.replaceAll("'","'\\''")}'`];
@@ -72,21 +65,15 @@ function timestamp(value:string|undefined):string|null {
 }
 async function service(unit:string,command:ProjectCommand):Promise<Record<string,string>> {
   if(!unitPattern.test(unit))throw new Error('Invalid registered service unit.');
-  const result=await command('/usr/bin/systemctl',['show','--no-pager','--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime,Unit,WorkingDirectory,User','--',unit]);
+  const result=await command('/usr/bin/systemctl',['show','--no-pager','--property=LoadState,ActiveState,SubState,Result,ExecMainStatus,ExecMainExitTimestamp,LastTriggerUSec,NextElapseUSecRealtime,Unit,WorkingDirectory','--',unit]);
   const state=properties(result.stdout);
   if(state.LoadState==='not-found'||!state.ActiveState)throw new Error('The registered service unit is missing.');
   return state;
 }
 
-function verifyServiceOwner(config:Config,project:ProjectReference,state:Record<string,string>):void {
+function verifyServiceDirectory(project:ProjectReference,state:Record<string,string>):void {
   const directory=state.WorkingDirectory;
   if(!directory||!inside(project.directory,directory)||realpathSync(directory)!==resolve(directory))throw new Error('Registered service does not have a verified working directory inside this project.');
-  if(config.protectOperator===true){
-    const user=state.User??'';
-    if(!user)return; // The command ran in the dedicated user's own service manager.
-    const uid=/^\d+$/.test(user)?Number(user):Number(readFileSync('/etc/passwd','utf8').split('\n').map(line=>line.split(':')).find(fields=>fields[0]===user)?.[2]);
-    if(uid!==config.executionUid)throw new Error('Registered service must run as the dedicated project execution account.');
-  }
 }
 
 export async function inspectProject(config:Config,project:ProjectReference,components:ComponentReference[],command:ProjectCommand=projectCommand(config)):Promise<{observations:Array<ComponentObservation&{componentId:string}>}> {
@@ -110,13 +97,13 @@ export async function inspectProject(config:Config,project:ProjectReference,comp
         let lastExitCode:number|null=null,lastRunAt=timestamp(state.LastTriggerUSec),result:string|undefined;
         const target=state.Unit??component.unitName.replace(/\.timer$/,'.service');
         if(unitPattern.test(target)){
-          const last=await service(target,command);verifyServiceOwner(config,project,last);result=last.Result;const completedAt=timestamp(last.ExecMainExitTimestamp);lastExitCode=completedAt&&last.ExecMainStatus&&/^\d+$/.test(last.ExecMainStatus)?Number(last.ExecMainStatus):null;lastRunAt=completedAt??lastRunAt;
+          const last=await service(target,command);verifyServiceDirectory(project,last);result=last.Result;const completedAt=timestamp(last.ExecMainExitTimestamp);lastExitCode=completedAt&&last.ExecMainStatus&&/^\d+$/.test(last.ExecMainStatus)?Number(last.ExecMainStatus):null;lastRunAt=completedAt??lastRunAt;
         }else throw new Error('The timer target service cannot be verified.');
         const enabled=state.ActiveState==='active';
         observation={status:state.ActiveState==='failed'?'failed':enabled?'scheduled':'stopped',serviceState:`${state.ActiveState}/${state.SubState??'unknown'}`,lastRunAt,nextRunAt:timestamp(state.NextElapseUSecRealtime),lastExitCode,checkedAt,detail:enabled?`Timer is scheduled.${result&&result!=='success'?` Last execution result: ${result}.`:''}`:'The registered timer is not active.'};
       }else{
         let state:Record<string,string>|undefined;
-        if(component.unitName){state=await service(component.unitName,command);verifyServiceOwner(config,project,state);}
+        if(component.unitName){state=await service(component.unitName,command);verifyServiceDirectory(project,state);}
         const running=state?.ActiveState==='active';
         observation={status:state?.ActiveState==='failed'?'failed':running?'running':state?'stopped':'unknown',checkedAt,detail:state?`Service is ${state.ActiveState}.`:'No service unit is registered.',...(state?{serviceState:`${state.ActiveState}/${state.SubState??'unknown'}`}:{})};
         if(component.kind==='website'){
@@ -142,8 +129,8 @@ export async function projectLogs(config:Config,project:ProjectReference,compone
   let logUnit=component.unitName;
   if(component.unitName.endsWith('.timer')){
     const target=state.Unit??component.unitName.replace(/\.timer$/,'.service');
-    verifyServiceOwner(config,project,await service(target,command));logUnit=target;
-  }else verifyServiceOwner(config,project,state);
+    verifyServiceDirectory(project,await service(target,command));logUnit=target;
+  }else verifyServiceDirectory(project,state);
   const result=await command('/usr/bin/journalctl',['--no-pager','--output=short-iso','--lines=200',`--unit=${logUnit}`]);
   return {text:result.stdout.slice(-180_000),truncated:result.truncated||result.stdout.length>180_000,checkedAt:new Date().toISOString()};
 }

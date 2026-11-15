@@ -12,7 +12,7 @@ import { publishArtifact } from '../src/runtime/artifacts.ts';
 function fixture(){
   const directory=mkdtempSync(join(tmpdir(),'operator-project-runtime-')),projectsDir=join(directory,'projects'),project={id:'11111111-1111-4111-8111-111111111111',directory:join(projectsDir,'fixture')};
   mkdirSync(project.directory,{recursive:true});mkdirSync(join(directory,'artifacts'));
-  return {directory,project,config:{stateDir:directory,projectsDir,controllerUid:process.getuid!(),executionUid:65534} as Config,close:()=>rmSync(directory,{recursive:true,force:true})};
+  return {directory,project,config:{stateDir:directory,projectsDir,controllerUid:process.getuid!()} as Config,close:()=>rmSync(directory,{recursive:true,force:true})};
 }
 function component(kind:ComponentReference['kind'],overrides:Partial<ComponentReference>={}):ComponentReference{return {id:'22222222-2222-4222-8222-222222222222',kind,unitName:null,url:null,scriptPath:null,schedule:null,timezone:null,...overrides};}
 
@@ -48,6 +48,7 @@ test('a never-run timer has no invented last exit code and its logs come from th
     assert.equal(result.observations[0].status,'scheduled');assert.equal(result.observations[0].lastExitCode,null);assert.equal(result.observations[0].lastRunAt,null);
     assert.equal((await projectLogs(f.config,f.project,reference,command)).text,'actual job output');
     assert(calls.find(call=>call.path.endsWith('journalctl'))?.args.includes('--unit=fixture.service'));
+    assert(calls.every(call=>!call.args.includes('--user')));
   }finally{f.close();}
 });
 
@@ -68,7 +69,10 @@ test('cron status verifies the exact registered script and schedule without inve
   const f=fixture();
   try{
     const script=join(f.project.directory,'daily.mjs');writeFileSync(script,'console.log("fixture")');
-    const command:ProjectCommand=async(path)=>({stdout:path.endsWith('crontab')?`0 2 * * * /usr/bin/node ${script}\n`:'1\n',truncated:false});
+    const command:ProjectCommand=async(path,args)=>{
+      if(path.endsWith('crontab'))assert.deepEqual(args,['-l']);
+      return {stdout:path.endsWith('crontab')?`0 2 * * * /usr/bin/node ${script}\n`:'1\n',truncated:false};
+    };
     const result=await inspectProject(f.config,f.project,[component('scheduled_job',{scriptPath:'daily.mjs',schedule:'0 2 * * *'})],command),observation=result.observations[0];
     assert.equal(observation.status,'scheduled');assert.equal(observation.nextRunAt,null);assert.equal(observation.lastRunAt,null);assert.equal(observation.lastExitCode,null);
     const complex:ProjectCommand=async()=>({stdout:`0 2 * * * /usr/bin/node ${script} && touch /tmp/not-inferred\n`,truncated:false});
@@ -77,7 +81,7 @@ test('cron status verifies the exact registered script and schedule without inve
 });
 
 test('artifact publishing copies an owned project file but rejects symlink escape',async()=>{
-  const f=fixture();delete f.config.executionUid;
+  const f=fixture();
   try{
     const source=join(f.project.directory,'report.txt');writeFileSync(source,'project artifact');
     const published=await publishArtifact(f.config,{path:source});

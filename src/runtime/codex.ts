@@ -15,7 +15,7 @@ import type { CancelLoginAccountParams } from './generated/v2/CancelLoginAccount
 import type { CancelLoginAccountResponse } from './generated/v2/CancelLoginAccountResponse.js';
 import type { AccountLoginCompletedNotification } from './generated/v2/AccountLoginCompletedNotification.js';
 import { terminateGroup } from './processes.js';
-import { executionCommand, executionEnvironment, prepareExecutionProfile, verifyExecutionProtection } from './protection.ts';
+import { executionCommand, executionEnvironment, prepareExecutionProfile } from './execution.ts';
 import { createToolProxy } from './tool-proxy.ts';
 
 export const CODEX_VERSION = '0.166.0';
@@ -28,9 +28,7 @@ export type DeviceLogin = Extract<LoginAccountResponse, { type: 'chatgptDeviceCo
 const clarificationSchema = z.object({ threadId: z.string(), turnId: z.string(), itemId: z.string(), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string(), isSecret: z.boolean().optional(), options: z.array(z.object({ label: z.string(), description: z.string() })).nullable().optional() }).passthrough()) }).passthrough();
 
 export function runtimeEnvironment(config: Config, runId?: string): NodeJS.ProcessEnv {
-  if(config.protectOperator===true)return {...executionEnvironment(config),CODEX_HOME:config.runtimeHome,CODEX_DISABLE_UPDATE_CHECK:'1',OPERATOR_RUN_ID:runId??''};
-  return { ...process.env, CODEX_HOME: resolve(config.stateDir, 'runtime'), APP_STATE_DIR: config.stateDir,
-    APP_BRIDGE_SOCKET: resolve(config.stateDir, 'bridge.sock'), APP_BRIDGE_TOKEN: config.ipcToken,
+  return { ...executionEnvironment(config), CODEX_HOME: config.runtimeHome,
     OPERATOR_RUN_ID: runId ?? '', CODEX_DISABLE_UPDATE_CHECK: '1' };
 }
 
@@ -50,10 +48,9 @@ export class CodexAdapter extends EventEmitter {
   constructor(private config: Config, private runId?: string) { super(); }
 
   async start(): Promise<void> {
-    verifyExecutionProtection(this.config);
     prepareExecutionProfile(this.config);
     const versionCommand=executionCommand(this.config,this.config.codexBin,['--version']);
-    const version = spawnSync(versionCommand.command, versionCommand.args, { env: runtimeEnvironment(this.config), cwd:this.config.protectOperator?this.config.runtimeHome:undefined, encoding: 'utf8', timeout: 10_000 });
+    const version = spawnSync(versionCommand.command, versionCommand.args, { env: runtimeEnvironment(this.config), cwd:this.config.runtimeHome, encoding: 'utf8', timeout: 10_000 });
     if (version.error) throw new Error(`Codex executable unavailable: ${version.error.message}. Run npm ci.`);
     this.version = version.stdout.trim().replace(/^codex-cli\s+/, '');
     if (version.status !== 0 || this.version !== CODEX_VERSION) throw new Error(`Codex ${CODEX_VERSION} required; executable reports ${this.version || 'unknown'}`);
@@ -64,14 +61,14 @@ export class CodexAdapter extends EventEmitter {
       '-c', 'approval_policy="never"', '-c', 'sandbox_mode="danger-full-access"',
       '-c', `mcp_servers.operator.command=${JSON.stringify(process.execPath)}`,
       '-c', `mcp_servers.operator.args=${JSON.stringify(['--import', loader, mcpScript])}`,
-      '-c', `mcp_servers.operator.env_vars=${JSON.stringify(['APP_STATE_DIR', 'APP_BRIDGE_SOCKET', 'APP_BRIDGE_TOKEN', 'OPERATOR_RUN_ID', ...(process.env.LD_LIBRARY_PATH ? ['LD_LIBRARY_PATH'] : [])])}`,
+      '-c', `mcp_servers.operator.env_vars=${JSON.stringify(['APP_BRIDGE_SOCKET', 'APP_BRIDGE_TOKEN', 'OPERATOR_RUN_ID', ...(process.env.LD_LIBRARY_PATH ? ['LD_LIBRARY_PATH'] : [])])}`,
       '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',
     ];
-    if(this.config.protectOperator===true)this.toolProxy=await createToolProxy(this.config,this.runId);
+    this.toolProxy=await createToolProxy(this.config,this.runId);
     const invocation=executionCommand(this.config,this.config.codexBin,args);
     const environment=runtimeEnvironment(this.config,this.runId);
     if(this.toolProxy){environment.APP_BRIDGE_SOCKET=this.toolProxy.socketPath;environment.APP_BRIDGE_TOKEN=this.toolProxy.token;}
-    const child = spawn(invocation.command, invocation.args, { env:environment, cwd:this.config.protectOperator?this.config.runtimeHome:undefined, stdio: 'pipe', detached: true });
+    const child = spawn(invocation.command, invocation.args, { env:environment, cwd:this.config.runtimeHome, stdio: 'pipe', detached: true });
     this.process = child;
     child.once('spawn', () => this.emit('spawn', { pid: child.pid! }));
     child.stdout.setEncoding('utf8'); child.stdout.on('data', (chunk: string) => this.consume(chunk));

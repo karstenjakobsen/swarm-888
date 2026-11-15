@@ -11,8 +11,8 @@ import { projectRoot, type Config } from '../src/config.ts';
 import type { WorkerClient } from '../src/ipc.ts';
 
 class ObservationWorker extends EventEmitter {
-  online=true;protected=true;observations:any[]=[];calls:Array<{method:string;params:any}>=[];
-  async connect(){if(!this.online)throw new Error('Fixture worker offline');return {sourceProtected:this.protected};}
+  online=true;observations:any[]=[];calls:Array<{method:string;params:any}>=[];
+  async connect(){if(!this.online)throw new Error('Fixture worker offline');return {uid:0,root:true,executionUid:0};}
   async request(method:string,params:any){this.calls.push({method,params});if(method==='projects/prepare')return {directory:params.project.directory,ready:true};if(method==='projects/inspect')return {observations:this.observations};if(method==='projects/logs')return {text:'Fixture service log',truncated:false,checkedAt:new Date().toISOString()};throw new Error('Unexpected method');}
 }
 function fixture(){
@@ -89,9 +89,8 @@ test('changing a component invalidates observations and incomplete worker sample
     f.worker.observations=[];await assert.rejects(f.projects.refresh(project.id),/incomplete or invalid/);assert.equal(f.projects.get(project.id).components[0].observation,null);
     f.worker.observations=[{componentId:component.id,status:'healthy',detail:'Not a valid time',checkedAt:'tomorrow'}];
     await assert.rejects(f.projects.refresh(project.id),/invalid project observation/);
-    f.config.protectOperator=true;f.worker.protected=false;
-    await assert.rejects(f.projects.refresh(project.id),/protected worker/);
-    assert.equal(f.projects.get(project.id).status,'unknown');
+    f.worker.observations=[{componentId:component.id,status:'running',detail:'Actual root-worker observation without source protection',checkedAt:new Date().toISOString()}];
+    assert.equal((await f.projects.refresh(project.id)).status,'running');
   }finally{f.close();}
 });
 

@@ -256,7 +256,7 @@ test('Projects registers durable website context and opens a linked operator con
 test('project observations show schedules and logs, then become unknown when the worker disconnects on a phone', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   let workerConnected = true;
-  const worker = { connected: true, uid: 0, root: true, pid: 12345, executionUid: 1001, sourceProtected: true, runtime: { available: true, authenticated: true, version: 'fixture', detail: 'Observed fixture, no live service' }, activeRunId: null, uncertainRuns: [] };
+  const worker = { connected: true, uid: 0, root: true, pid: 12345, runtime: { available: true, authenticated: true, version: 'fixture', detail: 'Observed fixture, no live service' }, activeRunId: null, uncertainRuns: [] };
   const state = () => ({ worker: workerConnected ? worker : null, workerError: workerConnected ? null : 'Fixture disconnected', maintenance: false, queue: [] });
   const project = {
     id: '7c13606f-9ccc-4e74-bf39-0c5b131aa012', name: 'Nightly reports', description: 'Scheduled project fixture', origin: 'created', directory: '/srv/projects/nightly-reports', createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z', status: 'scheduled', lastCheckedAt: '2026-11-15T10:00:00Z', conversationIds: [], runs: [],

@@ -5,7 +5,7 @@ import { Store } from './store.ts';
 import { Brain } from './brain/index.ts';
 import { exportBrain, restoreBrain } from './backup.ts';
 import { acquireLock } from './lock.ts';
-import { executionCommand, executionEnvironment, prepareExecutionProfile, verifyExecutionProtection } from './runtime/protection.ts';
+import { executionCommand, executionEnvironment, prepareExecutionProfile } from './runtime/execution.ts';
 
 async function main(){
   const [command,argument]=process.argv.slice(2),config=loadConfig();
@@ -17,7 +17,7 @@ async function main(){
     case'auth':{
       const mode=argument??'--with-api-key';
       if(!['--with-api-key','--device-auth','status'].includes(mode)||process.argv.length>4)throw new Error('Usage: npm run auth [-- --device-auth | -- status]. The default reads an API key from stdin.');
-      if(config.protectOperator){verifyExecutionProtection(config);prepareExecutionProfile(config);}
+      prepareExecutionProfile(config);
       // The key is read by Codex from stdin. No key in argv, browser, or application logs.
       if(mode==='--with-api-key'&&process.stdin.isTTY)console.error('Pipe an OpenAI API key into this command, or use npm run auth -- --device-auth to sign in with ChatGPT. Only the application’s dedicated Codex profile is changed.');
       let release=()=>{};

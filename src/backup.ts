@@ -24,7 +24,7 @@ function verifyDatabase(file:string){
 function legacySnapshotLayout(config:Config,operation:'export'|'restore'){
   const runtime=resolve(config.runtimeHome),expected=join(resolve(config.stateDir),'runtime');
   const projects=config.projectsDir&&resolve(config.projectsDir);
-  if(runtime!==expected||(projects&&!inside(config.stateDir,projects)))throw new Error(`Legacy brain ${operation} does not include the protected execution profile or external project directories. Use an owner-controlled backup of operator state, APP_EXECUTION_HOME and APP_PROJECTS_DIR together; automatic external-data restore is not supported.`);
+  if(runtime!==expected||(projects&&!inside(config.stateDir,projects)))throw new Error(`Legacy brain ${operation} does not include a custom runtime profile or external project directories. Use an owner-controlled backup of operator state, the runtime profile and APP_PROJECTS_DIR together; automatic external-data restore is not supported.`);
 }
 function rejectProjectSnapshot(database:string){
   if(!existsSync(database))return;

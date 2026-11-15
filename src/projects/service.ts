@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { projectRoot, type Config } from '../config.ts';
 import type { Store } from '../store.ts';
-import { protectedExecution } from '../shared.ts';
 import type { WorkerClient } from '../ipc.ts';
 import { componentInput, componentReference, componentUpdateInput, projectCreateInput, projectId, projectInspectResult, projectLogsResult, projectPrepareResult, projectUpdateInput, type Project } from './schemas.ts';
 
@@ -46,22 +45,20 @@ export class ProjectService {
   async prepare(id:string){
     const project=this.get(id);this.validateDirectory(project.directory);
     try{
-      const health=await this.client.connect();
-      if(this.config.protectOperator&&!protectedExecution(health,this.config))throw failure('Project preparation requires a protected worker. Configure the dedicated execution account first.',503);
+      await this.client.connect();
       const result=projectPrepareResult.parse(await this.client.request('projects/prepare',{project:{id:project.id,directory:project.directory}}));
       if(result.directory!==project.directory)throw failure('The worker prepared an unexpected project directory',502);
       return result;
     }catch(error){
       if((error as {statusCode?:number}).statusCode)throw error;
-      throw failure(`Project ${project.id} is registered but its workspace is not ready. Reconnect the protected worker, then retry project_prepare for this project.`,503);
+      throw failure(`Project ${project.id} is registered but its workspace is not ready. Reconnect the root worker, then retry project_prepare for this project.`,503);
     }
   }
   async refresh(id:string):Promise<Project> {
     const project=this.get(id);this.validateDirectory(project.directory);
     if(!project.components.length)return project;
     try{
-      const health=await this.client.connect();
-      if(this.config.protectOperator&&!protectedExecution(health,this.config))throw failure('Project inspection requires a protected worker. Configure the dedicated execution account first.',503);
+      await this.client.connect();
       this.observedConnection=true;this.inspectionFailed=false;
       const references=project.components.map(componentReference);
       const result=projectInspectResult.parse(await this.client.request('projects/inspect',{project:{id:project.id,directory:project.directory},components:references}));
@@ -79,8 +76,7 @@ export class ProjectService {
     const project=this.get(id);this.validateDirectory(project.directory);projectId.parse(componentId);
     const component=this.store.projects.component(id,componentId);
     try{
-      const health=await this.client.connect();
-      if(this.config.protectOperator&&!protectedExecution(health,this.config))throw failure('Project inspection requires a protected worker. Configure the dedicated execution account first.',503);
+      await this.client.connect();
       this.observedConnection=true;this.inspectionFailed=false;
       return projectLogsResult.parse(await this.client.request('projects/logs',{project:{id:project.id,directory:project.directory},component:componentReference(component)}));
     }catch(error){

@@ -1,11 +1,11 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, chownSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { bridgeRequest } from '../mcp.ts';
-import { trustedExecutionDirectory } from './protection.ts';
+import { trustedExecutionDirectory } from './execution.ts';
 
 const requestSchema=z.object({id:z.union([z.string().max(200),z.number()]),token:z.string().length(64),method:z.enum(['tools/list','tools/call']),params:z.unknown().optional()}).strict();
 const callSchema=z.object({name:z.string().max(100),arguments:z.unknown().optional(),runId:z.unknown().optional()}).strict();
@@ -23,7 +23,6 @@ export async function forwardToolRequest(raw:unknown,runId:string|undefined,toke
 
 /** The agent sees a per-session tool credential, never the controller/worker secret. */
 export async function createToolProxy(config:Config,runId?:string):Promise<{socketPath:string;token:string;close:()=>Promise<void>}> {
-  if(!config.executionHome||!config.executionUid)throw new Error('Protected tool proxy requires a configured execution account.');
   const parent=trustedExecutionDirectory(config,'tool-proxies');
   const directory=mkdtempSync(join(parent,'session-'));chmodSync(directory,0o711);
   const socketPath=join(directory,'tools.sock'),token=randomBytes(32).toString('hex');
@@ -50,7 +49,7 @@ export async function createToolProxy(config:Config,runId?:string):Promise<{sock
   });
   try{
     await new Promise<void>((ok,no)=>{server.once('error',no);server.listen(socketPath,ok);});
-    chmodSync(socketPath,0o600);chownSync(socketPath,config.executionUid,config.executionGid??-1);
+    chmodSync(socketPath,0o600);
   }catch(error){server.close();rmSync(directory,{recursive:true,force:true});throw error;}
   let shutdown:Promise<void>|undefined;
   return {socketPath,token,close:()=>shutdown??=(async()=>{

@@ -105,9 +105,9 @@ async function retrieveAndUse(manifest: Manifest, suffix: string) {
 async function main() {
   await api('/api/login', { password: config.adminPassword }); const status = await api('/api/status');
   if (!status.worker?.runtime?.authenticated) throw new Error(`Real worker/model authentication is required: ${status.workerError ?? status.worker?.runtime?.detail ?? 'start the worker and authenticate its dedicated profile'}`);
-  if (status.worker.sourceProtected !== true || !Number.isInteger(status.worker.executionUid) || status.worker.executionUid <= 0) throw new Error('Verified operator source protection and a dedicated non-root execution UID are required before live acceptance can create projects or runs.');
-  const executionUid = status.worker.executionUid;
-  console.log(`Observed protected agent execution UID ${executionUid}; worker broker UID ${status.worker.uid}.`);
+  const executionUid = status.worker.executionUid ?? status.worker.uid;
+  if (status.worker.uid !== 0 || status.worker.root !== true || executionUid !== 0) throw new Error('A worker executing as UID 0 is required before live acceptance can create projects or runs. Restart any worker still using a non-root execution account.');
+  console.log(`Observed root worker execution UID ${executionUid}; prompt instructions discourage operator-source edits.`);
   if (process.argv.includes('--verify-restart') || process.argv.includes('--verify-restore')) {
     const manifest = await ensureProject(JSON.parse(readFileSync(manifestPath, 'utf8')) as Manifest);
     const memory = await api(`/api/memory?q=${encodeURIComponent(manifest.factKey)}`); assert(memory.length > 0, 'Memory did not survive restart/restore');
@@ -127,7 +127,7 @@ async function main() {
   assert(replay.every(event => event.seq > cursor)); assert(called(firstHistory, run.id, 'progress_checkpoint'));
   assert(called(firstHistory, run.id, 'artifact_publish'));
   assert.equal(await publishedText(firstHistory, run.id, hostFilename), `uid=${executionUid}\nsentinel=${id}\n`);
-  console.log('PASS independently published host output with dedicated execution UID and browser-stream disconnect/replay without canceling work');
+  console.log('PASS independently published host output with root execution UID and browser-stream disconnect/replay without canceling work');
 
   await prompt(first.id,
     `Remember this owner-provided acceptance fact through memory_write: key ${manifest.factKey}, value ${manifest.factValue}. Store content containing both exact strings, kind user_fact, source "owner live acceptance fixture", category "acceptance". Call progress_checkpoint afterward. Do not put the fact into standing owner instructions.`, ['memory_write', 'progress_checkpoint']);
@@ -171,6 +171,6 @@ Declare this representative check: ${JSON.stringify({ name: 'sum fixture', comma
   assert(Date.parse(secondRun.startedAt) >= Date.parse(firstRun.finishedAt), 'Two host-changing runs overlapped');
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
   console.log(`PASS serialized queue and observed interruption. Acceptance manifest: ${manifestPath}`);
-  console.log('Next: stop controller/worker, restart them, then run this script with --verify-restart. Use --verify-restore only after a separately verified backup/restore covering controller state, the protected execution profile, and project files; the legacy snapshot command does not support that layout.');
+  console.log('Next: stop controller/worker, restart them, then run this script with --verify-restart. Built-in project backup/restore is not supported; use an owner-controlled backup covering controller state, the runtime profile, and project files before --verify-restore.');
 }
 main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });

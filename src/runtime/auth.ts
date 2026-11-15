@@ -99,7 +99,7 @@ export class AgentAuthenticator {
     try {
       const health = await session.adapter.health(true);
       if (session.done) return;
-      if (!health.authenticated) throw new Error('Sign-in completion did not configure the dedicated account');
+      if (!health.authenticated) throw new Error('Sign-in completion did not authenticate the application Codex profile');
       await this.finish(session, { state: 'connected', health });
     } catch {
       if (!session.done) await this.finish(session, { state: 'error', error: 'ChatGPT sign-in could not be verified. Connect again to try again.' });

@@ -4,9 +4,8 @@ import type { AgentConnection } from '../src/agent-connection-schema';
 // Agent connection and worker-start endpoints are test doubles. Administrator login,
 // conversations, queued tasks, and workspace status use the real controller.
 async function modelSignInFixture(page: Page, workerConnected = true) {
-  const identity = { executionUid: 1001, sourceProtected: true };
   const rootWorkerCommand = 'sudo env APP_STATE_DIR=/tmp/operator-browser-fixture APP_CONTROLLER_UID=1000 /usr/bin/node --import tsx /srv/operator/src/worker.ts';
-  let connection: AgentConnection = { state: 'disconnected', workerConnected, workerUid: workerConnected ? 0 : null, ...(workerConnected ? identity : {}), ...(!workerConnected ? { rootWorkerCommand } : {}) };
+  let connection: AgentConnection = { state: 'disconnected', workerConnected, workerUid: workerConnected ? 0 : null, ...(!workerConnected ? { rootWorkerCommand } : {}) };
   let starts = 0;
   let cancellations = 0;
   let workerStarts = 0;
@@ -18,15 +17,15 @@ async function modelSignInFixture(page: Page, workerConnected = true) {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/agent/connect') {
       starts++;
-      connection = failNextStart ? { state: 'error', workerConnected: true, workerUid: 0, ...identity, error: 'ChatGPT sign-in could not start. Please retry.' } : {
-        state: 'connecting', workerConnected: true, workerUid: 0, ...identity,
+      connection = failNextStart ? { state: 'error', workerConnected: true, workerUid: 0, error: 'ChatGPT sign-in could not start. Please retry.' } : {
+        state: 'connecting', workerConnected: true, workerUid: 0,
         verificationUrl: 'https://auth.openai.com/codex/device', userCode: `TEST-CODE${starts}`,
         expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
       };
       failNextStart = false;
     } else if (path === '/api/agent/cancel') {
       cancellations++;
-      connection = { state: 'disconnected', workerConnected: true, workerUid: 0, ...identity };
+      connection = { state: 'disconnected', workerConnected: true, workerUid: 0 };
     } else if (path === '/api/agent/worker') {
       workerStarts++;
       if (failNextWorkerStart) {
@@ -34,14 +33,14 @@ async function modelSignInFixture(page: Page, workerConnected = true) {
         await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'The host requires administrator permission. Run the setup command, then try again.' }) });
         return;
       }
-      connection = { state: 'disconnected', workerConnected: true, workerUid: 0, ...identity };
+      connection = { state: 'disconnected', workerConnected: true, workerUid: 0 };
     }
     await route.fulfill({ status: 200, contentType: 'application/json', headers: { 'cache-control': 'no-store' }, body: JSON.stringify(connection) });
   });
   return {
     get starts() { return starts; }, get cancellations() { return cancellations; },
     get workerStarts() { return workerStarts; }, get statusRequests() { return statusRequests; },
-    complete() { connection = { state: 'connected', workerConnected: true, workerUid: 0, ...identity }; },
+    complete() { connection = { state: 'connected', workerConnected: true, workerUid: 0 }; },
     failStart() { failNextStart = true; },
     failWorkerStart() { failNextWorkerStart = true; },
   };
@@ -67,7 +66,7 @@ test('ChatGPT sign-in fixture survives refresh and completion refreshes the dura
   await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
   const dialog = page.getByRole('dialog', { name: 'Connect your agent' });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('Agent UID 1001 · Operator protected');
+  await expect(dialog).toContainText('UID 0 · root');
   await dialog.getByRole('button', { name: 'Continue with ChatGPT' }).click();
   await expect(dialog.getByLabel('One-time sign-in code')).toHaveText('TEST-CODE1');
   const signIn = dialog.getByRole('link', { name: 'Open ChatGPT sign-in' });
@@ -124,7 +123,7 @@ test('sign-in fixture supports cancellation, retry, and keyboard return to the c
   await dialog.getByRole('button', { name: 'Cancel sign-in' }).click();
 });
 
-test('phone connection fixture requests a protected worker and keeps host setup and sign-in inside the viewport', async ({ page, context }, testInfo) => {
+test('phone connection fixture requests a root worker and keeps host setup and sign-in inside the viewport', async ({ page, context }, testInfo) => {
   const fixture = await modelSignInFixture(page, false);
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -132,16 +131,16 @@ test('phone connection fixture requests a protected worker and keeps host setup 
   await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('Worker disconnected');
-  await expect(dialog).toContainText('Start the protected worker');
+  await expect(dialog).toContainText('Start the root worker');
   fixture.failWorkerStart();
-  await dialog.getByRole('button', { name: 'Start worker' }).click();
+  await dialog.getByRole('button', { name: 'Start root worker' }).click();
   await expect(dialog.getByRole('alert')).toContainText('administrator permission');
   await expect(dialog.getByLabel('Worker setup command')).toContainText('sudo env APP_STATE_DIR=/tmp/operator-browser-fixture');
   await dialog.getByRole('button', { name: 'Copy worker command' }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('sudo env APP_STATE_DIR=');
   expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await dialog.getByRole('button', { name: 'Start worker' }).click();
-  await expect(dialog).toContainText('Agent UID 1001 · Operator protected');
+  await dialog.getByRole('button', { name: 'Start root worker' }).click();
+  await expect(dialog).toContainText('UID 0 · root');
   expect(fixture.workerStarts).toBe(2);
   await dialog.getByRole('button', { name: 'Continue with ChatGPT' }).click();
   await expect(dialog.getByLabel('One-time sign-in code')).toHaveText('TEST-CODE1');
@@ -151,13 +150,39 @@ test('phone connection fixture requests a protected worker and keeps host setup 
   await dialog.getByRole('button', { name: 'Cancel sign-in' }).click();
 });
 
-test('an authenticated root identity without source protection never appears ready', async ({ page }) => {
-  await page.route('**/api/agent/connection', route => route.fulfill({ json: { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 0, sourceProtected: false } }));
+test('an authenticated root worker is ready without source-protection flags', async ({ page }) => {
+  await page.route('**/api/agent/connection', route => route.fulfill({ json: { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 0 } }));
+  await login(page);
+  await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Agent connected' });
+  await expect(dialog).toContainText('Worker connected · UID 0 · root');
+  await expect(dialog.getByRole('heading', { name: 'Ready to work' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Back to workspace' })).toBeVisible();
+  await expect(dialog).not.toContainText('Operator protected');
+});
+
+test('an authenticated normal-user worker still requires root before appearing ready', async ({ page }) => {
+  await page.route('**/api/agent/connection', route => route.fulfill({ json: { state: 'connected', workerConnected: true, workerUid: 1001 } }));
   await login(page);
   await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
   const dialog = page.getByRole('dialog', { name: 'Connect your agent' });
-  await expect(dialog).toContainText('Protection unverified');
-  await expect(dialog.getByRole('heading', { name: 'Protect the operator before running tasks' })).toBeVisible();
+  await expect(dialog).toContainText('Worker connected · UID 1001 · non-root');
+  await expect(dialog.getByRole('heading', { name: 'A root worker is required' })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Continue with ChatGPT' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: 'Back to workspace' })).toHaveCount(0);
+});
+
+test('a legacy root broker with a non-root execution account must restart before appearing ready', async ({ page }) => {
+  await page.route('**/api/status', route => route.fulfill({ json: {
+    worker: { uid: 0, root: true, executionUid: 2001, pid: 42, activeRunId: null, runtime: { available: true, authenticated: true, version: 'fixture', detail: 'Legacy worker fixture' } },
+    workerError: null, maintenance: false, queue: [],
+  } }));
+  await page.route('**/api/agent/connection', route => route.fulfill({ json: { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 2001 } }));
+  await login(page);
+  await expect(page.locator('.privilege-pill')).toContainText('UID 2001 · non-root');
+  await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect your agent' });
+  await expect(dialog).toContainText('Worker connected · UID 2001 · non-root');
+  await expect(dialog.getByRole('heading', { name: 'A root worker is required' })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Back to workspace' })).toHaveCount(0);
 });
