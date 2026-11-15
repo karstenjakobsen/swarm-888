@@ -21,10 +21,12 @@ export class Queue extends EventEmitter {
   private buffered:any[]=[];
   private authenticationHolds=0;
   private authenticationGeneration=0;
+  private readonly onEvent=(event:any)=>{if(this.closed)return;if(this.replaying){this.buffered.push(event);return;}try{this.receive(event);}catch(e){this.workerError=String(e);this.connected=false;this.client.close();}};
+  private readonly onDisconnect=()=>{if(this.closed)return;this.connected=false;this.health=null;this.workerError='Worker disconnected. Running work may continue; queue is paused until reconciliation.';this.emit('status');};
   constructor(readonly config:Config,readonly store:Store,readonly brain:Brain,client?:WorkerClient){
     super();this.client=client??new WorkerClient(config);
-    this.client.on('event',(event:any)=>{if(this.closed)return;if(this.replaying){this.buffered.push(event);return;}try{this.receive(event);}catch(e){this.workerError=String(e);this.connected=false;this.client.close();}});
-    this.client.on('disconnect',()=>{if(this.closed)return;this.connected=false;this.health=null;this.workerError='Worker disconnected. Running work may continue; queue is paused until reconciliation.';this.emit('status');});
+    this.client.on('event',this.onEvent);
+    this.client.on('disconnect',this.onDisconnect);
   }
   get maintenance(){return this.store.setting('maintenance')==='true';}
   holdAuthentication(){
@@ -149,5 +151,5 @@ export class Queue extends EventEmitter {
     setImmediate(()=>void this.tick());return {resolved:true};
   }
   status(){return {worker:this.health,workerError:this.workerError,maintenance:this.maintenance,queue:this.store.runs().filter(r=>!['completed','failed','interrupted'].includes(r.status))};}
-  close(){this.closed=true;if(this.timer)clearInterval(this.timer);this.client.close();}
+  close(){this.closed=true;if(this.timer)clearInterval(this.timer);this.client.off('event',this.onEvent);this.client.off('disconnect',this.onDisconnect);this.client.close();}
 }

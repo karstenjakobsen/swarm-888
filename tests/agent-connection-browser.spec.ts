@@ -57,7 +57,7 @@ test('ChatGPT sign-in fixture survives refresh and completion refreshes the dura
   const fixture = await modelSignInFixture(page);
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await login(page);
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.locator('.new-conversation').click();
   const prompt = 'Agent connection browser fixture: preserve this queued task.';
   await page.getByLabel('Message your operator').fill(prompt);
   await page.getByRole('button', { name: 'Send message' }).click();

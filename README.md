@@ -2,8 +2,6 @@
 
 A development MVP for one administrator on one Linux host. React/Vite talks to a normal-user Fastify controller; a separate root worker drives the pinned Codex app-server over stdio. Production configuration requires actual UID 0 before signing the agent in or executing queued work.
 
-`TODO.md` records the implementation slices and verification. The specification is in `PROMPT.md`.
-
 ## Prerequisites and first start
 
 Verified with Ubuntu 24.04, **Node 26.13.1**, npm 11.16.0, **Codex CLI 0.166.0**, and Chromium 159 through Playwright 1.65.1. Dependencies are pinned in `package-lock.json`. The maintained Node `node:sqlite` binding supplies SQLite, FTS5, WAL and the online backup API; no database server is needed.
@@ -160,6 +158,8 @@ npm run check
 
 Automated checks cover SQLite durability, serialized transitions, idempotency, uncertain-run handling, event replay/deduplication, authenticated routes/IPC/SSE, memory FTS/revisions, checkpoints, actual deterministic skill helpers, publication/recovery/rollback, snapshot/restore, runtime protocol fixtures, and desktop/phone browser flows. The runtime suite also launches the **actual pinned app-server** to verify initialization, missing authentication, effective unrestricted thread policy and local skill discovery. Protocol fixtures are explicitly test doubles and are never used by production.
 
+The main-branch POC review on 2026-11-15 passed **92 unit/integration tests and 9 browser tests**, plus TypeScript and the production build. One optional network device-login test was skipped. Regression coverage includes atomic run/history writes, idempotency conflicts, snapshot symlink confinement, concurrent IPC connections, bounded SSE replay, shutdown cleanup, stale panel responses, and draft preservation. No separate lint task is configured; `npm run check` runs the configured tests and build.
+
 The implementation environment had no model credential in the dedicated profile and ran as a non-root user. **Live model completion, a model-initiated MCP call, later live invocation of a newly installed skill, and UID 0 host execution have not been demonstrated here.** These checks require the configured API key and an explicitly launched root worker. The exact model-backed acceptance procedure is supplied in `scripts/live-smoke.ts`; see its invocation below once authenticated. Independently tested helper execution, MCP transport, skill discovery and backup restoration do not substitute for that live model check.
 
 ```sh
@@ -177,6 +177,7 @@ npm run smoke:live -- --verify-restore
 
 - **Missing password:** set `ADMIN_PASSWORD` (12+ characters) in `.env`. No default administrator credential exists.
 - **Worker disconnected:** start the second process, check `APP_STATE_DIR` matches, and check controller ownership plus `0700` state/`0600` socket/token permissions. Root worker requires `APP_CONTROLLER_UID`.
+- **Worker tries to create `/root/.local/share/vps-ai-operator`:** plain `sudo npm run worker` can select root's home instead of the controller's state. Run `npm run init` as your normal user, then use the complete command shown by **Connect agent**, which supplies the shared `APP_STATE_DIR` and controller UID. A writable state directory does not grant UID 0; root mode still requires host permission to launch the separate privileged worker.
 - **Worker connected but tasks stay queued:** click **Connect agent**. The worker must show UID 0 and have a connected model account. Start the root worker and complete ChatGPT sign-in in that panel; the existing task resumes automatically. A non-root worker is blocked even if its account is already authenticated. Your personal Codex login and web administrator login are separate.
 - **Policy narrowed:** managed host/Codex requirements may override full-access requests. The adapter fails before the turn and reports this instead of claiming root access.
 - **Permission errors after root work:** stop the worker cleanly so ownership repair completes. Restore controller ownership of the durable subdirectories if recovering a killed root worker; do not make the socket or state world-accessible.

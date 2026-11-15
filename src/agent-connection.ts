@@ -17,9 +17,10 @@ export class AgentConnectionService {
   private starting?:Promise<AgentConnection>;
   private closed=false;
   private lastHealth?:WorkerHealth;
+  private readonly onDisconnect=()=>{this.lastHealth=undefined;};
   constructor(private config:Config,private queue:Queue,client?:WorkerClient){
     this.client=client??new WorkerClient(config);
-    this.client.on('disconnect',()=>{this.lastHealth=undefined;});
+    this.client.on('disconnect',this.onDisconnect);
   }
   private launch(){
     const loader=createRequire(import.meta.url).resolve('tsx');
@@ -120,5 +121,5 @@ export class AgentConnectionService {
     if(child.pid&&child.exitCode===null)child.kill('SIGTERM');
     throw failure('The root worker did not become available. Run the privileged command shown in Connect agent and check its terminal output.',503);
   }
-  close(){this.closed=true;this.client.close();}
+  close(){this.closed=true;this.client.off('disconnect',this.onDisconnect);this.client.close();}
 }

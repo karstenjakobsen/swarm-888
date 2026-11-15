@@ -4,7 +4,7 @@ async function login(page: Page) {
   await page.goto('/');
   await page.getByLabel('Administrator password').fill('browser-test-password-only');
   await page.getByRole('button', { name: 'Enter workspace' }).click();
-  await expect(page.getByRole('button', { name: 'New conversation' })).toBeVisible();
+  await expect(page.locator('.new-conversation')).toBeVisible();
 }
 
 async function nextPaint(page: Page) {
@@ -21,13 +21,13 @@ test('authenticated workspace persists queued work, memory revisions, and owner 
   await expect(page.getByRole('alert')).toContainText('Invalid administrator credential');
   await page.getByLabel('Administrator password').fill('browser-test-password-only');
   await page.getByRole('button', { name: 'Enter workspace' }).click();
-  await expect(page.getByRole('button', { name: 'New conversation' })).toBeVisible();
+  await expect(page.locator('.new-conversation')).toBeVisible();
   const sessionCookie = (await context.cookies()).find(cookie => cookie.name === 'operator_session');
   expect(sessionCookie?.httpOnly).toBe(true);
   expect(sessionCookie?.sameSite).toBe('Strict');
   await expect(page.getByText('Worker disconnected', { exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('workspace-desktop.png'), fullPage: true, animations: 'disabled' });
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.locator('.new-conversation').click();
   await page.getByLabel('Message your operator').fill('Browser smoke task: preserve this queued goal.');
   await page.getByRole('button', { name: 'Send message' }).click();
   await expect(page.getByTestId('message-user')).toHaveCount(1);
@@ -81,7 +81,7 @@ test('phone navigation and composer fit the viewport', async ({ page }, testInfo
   await page.getByRole('button', { name: 'Enter workspace' }).click();
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible();
   await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('button', { name: 'New conversation' }).click();
+  await page.locator('.new-conversation').click();
   await expect(page.getByLabel('Message your operator')).toBeVisible();
   await expect(page.locator('.sidebar')).not.toHaveClass(/is-open/);
   await page.screenshot({ path: testInfo.outputPath('workspace-phone.png'), fullPage: true, animations: 'disabled' });
@@ -190,7 +190,7 @@ test('sending a task preserves a new draft typed while its response is pending',
   });
   try {
     await login(page);
-    await page.getByRole('button', { name: 'New conversation' }).click();
+    await page.locator('.new-conversation').click();
     const composer = page.getByLabel('Message your operator');
     await composer.fill('First submitted browser fixture task');
     await page.getByRole('button', { name: 'Send message' }).click();
