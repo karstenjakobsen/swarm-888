@@ -20,20 +20,23 @@ class ConnectionWorker extends EventEmitter {
   available = true;
   activeRunId: string | null = null;
   uncertainRuns: string[] = [];
+  runtimeOperations:Array<{id:string;method:string;status:'running';requiresExternalInspection:boolean}>=[];
   connection: Record<string, unknown> = { state: 'disconnected', workerConnected: true, workerUid: 1234 };
   calls: Array<{ method: string; params: any }> = [];
   submissions: any[] = [];
   online = true;
   executionUid?:number;
   sourceProtected?:boolean;
+  projectsDir?:string;
 
   health() {
     return {
       connected: true, uid: this.uid, pid: 4321, root: this.uid === 0,
       runtime: { available: this.available, version: 'connection-fixture', authenticated: this.authenticated, authenticating: this.authenticating, detail: 'Isolated connection fixture' },
-      activeRunId: this.activeRunId, uncertainRuns: this.uncertainRuns,
+      activeRunId: this.activeRunId, uncertainRuns: this.uncertainRuns, runtimeOperations:this.runtimeOperations,
       ...(this.executionUid===undefined?{}:{executionUid:this.executionUid}),
       ...(this.sourceProtected===undefined?{}:{sourceProtected:this.sourceProtected}),
+      ...(this.projectsDir===undefined?{}:{projectsDir:this.projectsDir}),
     };
   }
   async connect() {
@@ -87,6 +90,7 @@ async function fixture() {
   };
   initState(config);
   const worker = new ConnectionWorker();
+  worker.projectsDir=join(stateDir,'projects');
   const controller = await createController(config, { client: worker as unknown as WorkerClient, startQueue: false, startBridge: false });
   // Foundation validation has its own integration tests; this fixture has no process executor.
   controller.brain.skillAction('skill-maintenance', 'disable');
@@ -369,5 +373,37 @@ test('an older root broker with non-root agent execution requires a restart',asy
     assert.equal(denied.statusCode,409);await f.queue.tick();assert.equal(f.store.run(run.id)?.status,'queued');assert.equal(f.worker.submissions.length,0);
     const restart=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});
     assert.equal(restart.statusCode,409);assert.match(restart.json().error,/Stop it in its terminal/);
+  }finally{await f.dispose();}
+});
+
+for(const mode of ['different','missing'] as const)test(`connection status exposes setup for ${mode} root-worker project configuration without changing account authentication`,async()=>{
+  const f=await fixture();
+  try{
+    f.worker.uid=0;f.worker.executionUid=0;f.worker.complete();
+    const expected=join(f.config.stateDir,'projects'),reported=join(f.config.stateDir,'previous-projects');f.worker.projectsDir=mode==='different'?reported:undefined;
+    const status=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});assert.equal(status.statusCode,200);assert.equal(status.json().state,'error');assert.equal(status.json().workerSetupRequired,true);assert.equal(status.json().workerUid,0);
+    assert(status.json().error.includes(expected));assert(status.json().error.includes(mode==='different'?reported:'unknown (older worker)'));assert(status.json().rootWorkerCommand.includes(`APP_PROJECTS_DIR=${expected}`));assert.match(status.json().error,/npm run worker:root/);
+    const connect=await f.app.inject({method:'POST',url:'/api/agent/connect',headers:f.headers,payload:{}});assert.equal(connect.statusCode,409);assert.equal(f.worker.authenticated,true);assert.equal(f.worker.calls.some(call=>call.method==='agent/connect'),false);
+    assert.equal(f.worker.online,true);assert.equal(f.worker.calls.some(call=>call.method==='worker/reserve-root-replacement'),false);
+  }finally{await f.dispose();}
+});
+
+for(const busy of ['run','uncertain','operation','login'] as const)test(`the worker launch API refuses replacement during ${busy} activity`,async()=>{
+  const f=await fixture();
+  try{
+    f.worker.uid=0;f.worker.executionUid=0;f.worker.projectsDir=join(f.config.stateDir,'previous-projects');
+    if(busy==='run')f.worker.activeRunId='active-run';
+    if(busy==='uncertain')f.worker.uncertainRuns=['uncertain-run'];
+    if(busy==='operation')f.worker.runtimeOperations=[{id:'runtime_fixture',method:'managed/prepare',status:'running',requiresExternalInspection:false}];
+    if(busy==='login')f.worker.authenticating=true;
+    const restart=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});assert.equal(restart.statusCode,409,restart.body);assert.match(restart.json().error,/Finish or reconcile/);assert.equal(f.worker.online,true);assert.equal(f.worker.calls.some(call=>call.method==='worker/reserve-root-replacement'),false);
+  }finally{await f.dispose();}
+});
+
+test('worker launch API reuses a matching root worker and emits an explicit fallback project root in generated commands',async()=>{
+  const f=await fixture();
+  try{
+    f.worker.uid=0;f.worker.executionUid=0;f.worker.complete();const started=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});assert.equal(started.statusCode,200,started.body);assert.equal(started.json().state,'connected');
+    f.worker.online=false;const unavailable=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});assert.equal(f.config.projectsDir,undefined);assert(unavailable.json().rootWorkerCommand.includes(`APP_PROJECTS_DIR=${join(f.config.stateDir,'projects')}`));
   }finally{await f.dispose();}
 });

@@ -10,9 +10,10 @@ import type { WorkerClient } from '../src/ipc.ts';
 
 class ReceiptWorker {
   capability=true;online=true;ackFails=false;connects=0;calls:Array<{method:string;input:any}>=[];
+  projectsDir?:string;
   id=`runtime_${randomUUID()}`;payload:Record<string,unknown>={status:'running',detail:'Confirmed fixture effect'};ackId?:string;
   beforeAck?:()=>void;beforeConnect?:()=>Promise<void>;
-  async connect(){this.connects++;await this.beforeConnect?.();if(!this.online)throw new Error('Fixture disconnected');return this.capability?{runtimeOperations:[]}:{uid:0};}
+  async connect(){this.connects++;await this.beforeConnect?.();if(!this.online)throw new Error('Fixture disconnected');return this.capability?{runtimeOperations:[],...(this.projectsDir?{projectsDir:this.projectsDir}:{})}:{uid:0};}
   async request(method:string,input:any){this.calls.push({method,input});if(method==='runtime/acknowledge'){this.beforeAck?.();if(this.ackFails)throw new Error('Fixture ACK lost');return {acknowledged:true,operationId:this.ackId??input.operationId};}return {...this.payload,__runtimeOperationId:this.id};}
 }
 function fixture(){
@@ -65,5 +66,21 @@ test('invalid or conflicting receipt identities never ACK, and mismatched ACKs r
     f.worker.id=`runtime_${randomUUID()}`;f.worker.ackId=`runtime_${randomUUID()}`;assert.deepEqual(await f.receipts.request('connectors/call',{}),f.worker.payload);assert.equal(f.receipts.list()[0].acknowledgedAt,null);
     f.worker.payload={status:'changed'};await assert.rejects(f.receipts.request('managed/stop',{}),/reused/);assert.equal(f.worker.calls.filter(call=>call.method==='runtime/acknowledge').length,1);
     f.worker.ackId=undefined;assert.equal(await f.receipts.recover(),true);assert(f.receipts.list()[0].acknowledgedAt);
+  }finally{f.close();}
+});
+
+test('project-root mismatches and older workers are rejected before any runtime request or receipt',async()=>{
+  const f=fixture();
+  try{
+    const controllerRoot=join(f.directory,'controller-projects'),workerRoot=join(f.directory,'worker-projects');
+    const receipts=new RuntimeReceipts(f.store.db,f.worker as unknown as WorkerClient,controllerRoot);
+    const input={project:{id:randomUUID(),directory:join(controllerRoot,'local-connector')}};
+    f.worker.projectsDir=workerRoot;
+    await assert.rejects(receipts.request('managed/prepare',input),error=>{assert.equal((error as {statusCode:number}).statusCode,409);assert((error as Error).message.includes(controllerRoot));assert((error as Error).message.includes(workerRoot));return true;});
+    f.worker.projectsDir=undefined;await assert.rejects(receipts.request('managed/prepare',input),/running worker does not report.*APP_PROJECTS_DIR/);
+    f.worker.projectsDir=controllerRoot;
+    await assert.rejects(receipts.request('managed/prepare',{project:{id:randomUUID(),directory:join(workerRoot,'old-registered-project')}}),/saved path has not been changed/);
+    assert.equal(f.worker.calls.length,0);assert.equal(receipts.list().length,0);
+    await receipts.request('managed/prepare',input);assert.equal(f.worker.calls[0].method,'managed/prepare');
   }finally{f.close();}
 });

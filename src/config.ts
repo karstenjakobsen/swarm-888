@@ -77,7 +77,7 @@ export function initState(config: Config): void {
   catch (error) {
     const code=(error as NodeJS.ErrnoException).code;
     if(code!=='EACCES'&&code!=='EPERM')throw error;
-    throw Object.assign(new Error(`Cannot create APP_STATE_DIR ${config.stateDir}: permission denied. Initialize a writable persistent directory as the normal controller user with npm run init. Launch the worker with the exact command from Connect agent, which includes APP_STATE_DIR and APP_CONTROLLER_UID; plain sudo npm run worker can select /root instead.`,{cause:error}),{code});
+    throw Object.assign(new Error(`Cannot create APP_STATE_DIR ${config.stateDir}: permission denied. Initialize a writable persistent directory as the normal controller user with npm run init. Run npm run worker:root as that user, or use the exact command from Connect agent; plain sudo npm run worker can select /root instead.`,{cause:error}),{code});
   }
   const info = statSync(config.stateDir);
   if (realpathSync(config.stateDir) !== config.stateDir) throw new Error('APP_STATE_DIR must be a canonical path without symlinks');

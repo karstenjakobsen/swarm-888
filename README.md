@@ -36,7 +36,7 @@ npm run dev
 Open **http://127.0.0.1:5173** (or localhost) and log in with `ADMIN_PASSWORD`.
 
 1. Click **Connect agent** in the top bar.
-2. Click **Start root worker**. The controller attempts a noninteractive sudo launch. If the OS requires your password, copy the exact command shown in the panel and run it in your VPS terminal. The UI displays the actual agent execution UID and requires root before sign-in and task dispatch. An older broker that launches a non-root agent must first be stopped and replaced.
+2. Click **Start root worker**. The controller attempts a noninteractive sudo launch. If the OS requires your password, run `npm run worker:root` as your normal user in the operator directory, or copy the exact command shown in the panel into your VPS terminal. The UI displays the actual agent execution UID and requires root before sign-in and task dispatch. An older broker that launches a non-root agent must first be stopped and replaced.
 3. Click **Continue with ChatGPT**, copy the displayed one-time code, and open the linked OpenAI sign-in page.
 4. Finish signing in. The panel verifies the account, switches to **Agent connected**, and resumes saved tasks automatically. Refreshing or closing the panel does not cancel sign-in. Cancel, expiry and retry are supported in the same UI.
 
@@ -52,13 +52,21 @@ Browser sign-in is the ordinary authentication path. For optional CLI login, sto
 
 No separate OS account, execution UID/GID, `setpriv`, user-manager configuration, or read-only release setup is required. The worker, Codex, and helper scripts execute as the worker’s actual user: root in the production configuration. The web controller and Vite continue to reject root execution.
 
-Start the controller/UI with `npm run dev` as your normal user. In **Connect agent**, copy the generated root-worker command. It supplies the same `APP_STATE_DIR`, `APP_CONTROLLER_UID`, pinned Node/loader, and checkout path. Enter your sudo password in your terminal when required. Avoid plain `sudo npm run worker`, which can select root’s home and a different state directory.
+Start the controller/UI with `npm run dev` as your normal user. In another terminal in the operator directory, run:
+
+```sh
+npm run worker:root
+```
+
+Run this without a `sudo` prefix: it reads your current `.env` and normal-user configuration before requesting sudo itself. Enter your password in that terminal when required. **Connect agent** also provides an exact command containing the current controller's `APP_STATE_DIR`, `APP_CONTROLLER_UID`, `APP_PROJECTS_DIR`, pinned Node/loader, and checkout path. Avoid plain `sudo npm run worker`, which can select root’s home and a different state directory.
 
 The bootstrap and project context instruct the agent to leave operator core source, installed build, dependencies, configuration, startup definitions, and update mechanisms alone; requests to change the operator should be reported to the owner for an external release. Assigned generated package source is the explicit exception, edited and committed through source tools. Memory and skills remain editable through their application tools. This is a prompt-only guardrail. No OS protection claim is made, and root can override the instruction.
 
 The UI requires actual agent UID 0, including when an older broker reports a distinct execution UID. Stop an older dedicated-account worker in its terminal and run a fresh root-worker command. Existing `APP_PROTECT_OPERATOR` and `APP_EXECUTION_*` settings are obsolete and ignored; they do not block startup. No existing OS accounts or systemd configuration are removed automatically.
 
 Projects default to `APP_STATE_DIR/projects`, and Codex state remains at `APP_STATE_DIR/runtime`. `APP_PROJECTS_DIR` can select another absolute persistent directory. Explicit directory overrides are retained; existing projects continue to require their registered paths. The root worker prepares new project workspaces, so the default layout needs no separate directory provisioning.
+
+After changing `APP_PROJECTS_DIR`, restart `npm run dev`, then run `npm run worker:root` or use **Restart root worker** in **Connect agent**. The running worker retains its startup configuration, and Node's explicit launch environment takes precedence over `.env`. A fresh launcher can replace a mismatched idle worker after verifying its process identity and reserving execution; busy or uncertain workers must finish or be reconciled first. Older workers without replacement support require stopping in their terminal. Matching workers are reused, and saved ChatGPT sign-in is retained. Registered project paths are retained rather than moved automatically.
 
 From your laptop, forward the loopback Vite port:
 

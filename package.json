@@ -10,6 +10,7 @@
     "dev": "node --env-file-if-exists=.env --import tsx scripts/dev.ts",
     "controller": "node --env-file-if-exists=.env --import tsx src/controller.ts",
     "worker": "node --env-file-if-exists=.env --import tsx src/worker.ts",
+    "worker:root": "node --env-file-if-exists=.env --import tsx scripts/root-worker.ts",
     "init": "node --env-file-if-exists=.env --import tsx src/cli.ts init",
     "auth": "node --env-file-if-exists=.env --import tsx src/cli.ts auth",
     "brain:export": "node --env-file-if-exists=.env --import tsx src/cli.ts export",

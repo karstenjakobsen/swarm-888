@@ -27,7 +27,7 @@ export function ExecutionRecovery({ orphanIds, operations, onResolve }: {
 
   return <>
     {running.length > 0 && <div className="runtime-operations-notice" role="status"><Icon name="clock" size={16} /><div><strong>Runtime operation in progress</strong>{running.map(operation => <p key={operation.id}><code>{operation.method}</code><span>Running</span></p>)}<small>Queued tasks wait for runtime operations to finish.</small></div></div>}
-    {orphanIds.length > 0 && <section className="orphan-warning execution-recovery" aria-label="Execution recovery"><strong>Orphan execution needs reconciliation</strong><p>The queue stays paused while execution is uncertain. Reconciliation checks the recorded local process groups and terminates verified helpers or confirms their absence. It does not repeat the interrupted operation.</p>
+    {orphanIds.length > 0 && <section className="orphan-warning execution-recovery" aria-label="Execution recovery"><strong>Orphan execution needs reconciliation</strong><p>Inspect the host and affected external services before reconciling. The queue stays paused while execution is uncertain. Reconciliation checks only the recorded local process groups and terminates verified helpers or confirms their absence. It does not verify or undo external actions, and it does not repeat the interrupted operation.</p>
       {orphanIds.map(id => {
         const operation = operations.find(value => value.id === id);
         const external = operation?.requiresExternalInspection === true;

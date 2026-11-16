@@ -18,7 +18,7 @@ class ManagedWorker extends EventEmitter {
   activeRunId:string|null=null;submissions:any[]=[];deployments=new Map<string,any>();
   runtime:ManagedRuntime;
   constructor(private config:Config){super();this.runtime=new ManagedRuntime(config);}
-  health(){return {connected:true,uid:0,executionUid:0,root:true,pid:1234,activeRunId:this.activeRunId,uncertainRuns:[],runtimeOperations:[],runtime:{available:true,authenticated:true,version:'fixture',detail:'No model or real systemd operations'}};}
+  health(){return {connected:true,uid:0,executionUid:0,root:true,pid:1234,activeRunId:this.activeRunId,uncertainRuns:[],runtimeOperations:[],projectsDir:this.config.projectsDir,runtime:{available:true,authenticated:true,version:'fixture',detail:'No model or real systemd operations'}};}
   async connect(){return this.health();}
   async request(method:string,input:any={}){
     if(method==='health')return this.health();

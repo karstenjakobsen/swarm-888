@@ -22,7 +22,7 @@ test('unwritable state reports controller initialization and complete worker lau
     assert.throws(()=>initState({stateDir:join(parent,'state')} as Config),error=>{
       assert.equal((error as NodeJS.ErrnoException).code,'EACCES');
       assert.match((error as Error).message,/APP_STATE_DIR.*permission denied/);
-      assert.match((error as Error).message,/APP_CONTROLLER_UID/);return true;
+      assert.match((error as Error).message,/npm run worker:root/);return true;
     });
   }finally{chmodSync(parent,0o700);rmSync(parent,{recursive:true,force:true});}
 });

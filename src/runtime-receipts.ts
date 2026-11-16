@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import type { WorkerClient } from './ipc.ts';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import type { WorkerClient, WorkerHealth } from './ipc.ts';
 
 const operationId=z.string().refine(value=>value.startsWith('runtime_')&&z.string().uuid().safeParse(value.slice(8)).success,'Invalid runtime operation receipt ID');
 const acknowledgement=z.object({acknowledged:z.literal(true),operationId}).strict();
@@ -11,11 +12,23 @@ type ReceiptRow={operationId:string;method:string;projectId:string|null;payload:
 /** Effect results become durable controller evidence before the worker forgets them. */
 export class RuntimeReceipts {
   private recovering?:Promise<boolean>;
-  constructor(private db:DatabaseSync,private client:WorkerClient){}
-  private async connect():Promise<void>{
+  constructor(private db:DatabaseSync,private client:WorkerClient,private projectsDir?:string){}
+  private async connect():Promise<WorkerHealth>{
     let health;
     try{health=await this.client.connect();}catch{throw failure('The worker is unavailable. Reconnect it before running a runtime operation.',503);}
     if(!Array.isArray(health.runtimeOperations))throw failure('Restart the older worker before running runtime operations; durable result receipts are required.');
+    return health;
+  }
+  private projectRoot(health:WorkerHealth,input:unknown){
+    if(!input||typeof input!=='object'||Array.isArray(input)||!('project' in input))return;
+    const project=(input as {project?:unknown}).project;
+    if(!project||typeof project!=='object'||!('directory' in project)||typeof project.directory!=='string')return;
+    const expected=this.projectsDir?resolve(this.projectsDir):undefined;
+    if(!health.projectsDir)throw failure(`The running worker does not report its APP_PROJECTS_DIR. Restart it from Connect agent or run npm run worker:root as your normal user${expected?` to use ${expected}`:''}.`);
+    const actual=resolve(health.projectsDir);
+    if(expected&&actual!==expected)throw failure(`Controller APP_PROJECTS_DIR is ${expected}, but the running worker uses ${actual}. Restart the root worker from Connect agent or run npm run worker:root as your normal user. Existing projects have not been moved.`);
+    const directory=resolve(project.directory),path=relative(actual,directory);
+    if(!path||isAbsolute(path)||path==='..'||path.startsWith(`..${sep}`))throw failure(`Registered project directory ${directory} is outside APP_PROJECTS_DIR ${actual}. Use the original configured projects root or explicitly import the project into the current root; its saved path has not been changed.`);
   }
   private async acknowledge(id:string):Promise<void>{
     const result=acknowledgement.parse(await this.client.request('runtime/acknowledge',{operationId:id}));
@@ -24,7 +37,7 @@ export class RuntimeReceipts {
   }
   async request(method:string,input:unknown,beforeDispatch?:()=>void):Promise<unknown>{
     z.string().min(1).max(100).refine(value=>!value.includes('\0')).parse(method);
-    await this.connect();beforeDispatch?.();
+    const health=await this.connect();this.projectRoot(health,input);beforeDispatch?.();
     const raw:unknown=await this.client.request(method,input);
     if(!raw||typeof raw!=='object'||Array.isArray(raw)||!Object.hasOwn(raw,'__runtimeOperationId'))return raw;
     const {__runtimeOperationId,...payload}=raw as Record<string,unknown>;

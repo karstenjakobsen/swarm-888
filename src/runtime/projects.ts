@@ -48,7 +48,7 @@ async function cron(config:Config,project:ProjectReference,component:ComponentRe
 
 export function validateProjectReference(config:Config,project:ProjectReference):void {
   const root=resolve(config.projectsDir??resolve(config.stateDir,'projects')),directory=resolve(project.directory);
-  if(directory===root||!inside(root,directory))throw new Error('Project directory must be inside APP_PROJECTS_DIR.');
+  if(directory===root||!inside(root,directory))throw new Error(`Project directory ${directory} must be inside the worker's APP_PROJECTS_DIR ${root}. Check that the controller and worker use the same configuration; restart from Connect agent or run npm run worker:root as your normal user after changing APP_PROJECTS_DIR.`);
   let parent=directory;
   while(true){
     try{if(realpathSync(parent)!==parent)throw new Error('Project directories must be canonical without symlinks.');break;}

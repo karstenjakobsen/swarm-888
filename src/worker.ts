@@ -104,6 +104,7 @@ export class WorkerServer {
   health(): WorkerHealth {
     const runtimeOperations=this.journal.runtimeOperations().map(({id,method,status,requiresExternalInspection})=>({id,method,status:this.runtimeUncertain.has(id)?'uncertain' as const:status,requiresExternalInspection}));
     return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0, executionUid:process.getuid?.(),sourceProtected:false,runtime: this.runtime, replacementReserved: this.replacementReserved,
+      projectsDir:resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects')),
       runtimeOperations,activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id),...runtimeOperations.filter(operation=>operation.status==='uncertain').map(operation=>operation.id)])] };
   }
   private hasUncertainRuntime():boolean{return this.runtimeUncertain.size>0||this.journal.runtimeOperations().some(operation=>operation.status==='uncertain');}

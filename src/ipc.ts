@@ -15,6 +15,7 @@ export const workerHealthSchema = z.object({
   runtime: z.object({ available: z.boolean(), version: z.string(), authenticated: z.boolean(), authenticating: z.boolean().optional(), detail: z.string(), model: z.string().optional() }),
   activeRunId: z.string().nullable(), uncertainRuns: z.array(z.string()), replacementReserved: z.boolean().optional(),
   runtimeOperations:z.array(runtimeOperationSchema).max(1000).optional(),
+  projectsDir:z.string().startsWith('/').max(4000).optional(),
 });
 export type WorkerHealth = z.infer<typeof workerHealthSchema>;
 export const submitSchema = z.object({

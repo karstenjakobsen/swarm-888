@@ -186,3 +186,47 @@ test('a legacy root broker with a non-root execution account must restart before
   await expect(dialog.getByRole('heading', { name: 'A root worker is required' })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Back to workspace' })).toHaveCount(0);
 });
+
+test('a connected root worker with stale configuration exposes restart commands and preserves sign-in after password fallback', async ({ page, context }, testInfo) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const rootWorkerCommand = 'sudo env APP_STATE_DIR=/tmp/operator-browser-current APP_CONTROLLER_UID=1000 APP_PROJECTS_DIR=/tmp/operator-browser-projects /usr/bin/node --import tsx /srv/operator/src/root-worker.ts';
+  let connection: AgentConnection = { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 0, workerSetupRequired: true, rootWorkerCommand };
+  let restarts = 0, signIns = 0, statusRequests = 0;
+  page.on('request', request => { if (new URL(request.url()).pathname === '/api/status') statusRequests++; });
+  await page.route('**/api/agent/*', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/agent/worker') {
+      restarts++;
+      return route.fulfill({ status: 503, json: { error: 'The host requires administrator permission. Run the terminal command and enter your sudo password.' } });
+    }
+    if (path === '/api/agent/connect') signIns++;
+    return route.fulfill({ json: connection });
+  });
+  await login(page);
+  await page.locator('.topbar').getByRole('button', { name: 'Connect agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Restart the root worker', exact: true });
+  await expect(dialog).toContainText('Worker connected · UID 0 · root');
+  await expect(dialog).toContainText('Worker configuration changed');
+  await expect(dialog.getByRole('heading', { name: 'Ready to work' })).toHaveCount(0);
+  await expect(dialog.getByRole('button', { name: /Continue with ChatGPT|Retry ChatGPT sign-in/ })).toHaveCount(0);
+  await expect(dialog.getByLabel('Root worker restart command')).toHaveText('npm run worker:root');
+  await expect(dialog).toContainText('as your normal user without a sudo prefix');
+  await expect(dialog.getByLabel('Worker setup command')).toHaveText(rootWorkerCommand);
+  await dialog.getByRole('button', { name: 'Restart root worker', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('administrator permission');
+  await expect(dialog.getByLabel('Worker setup command')).toHaveText(rootWorkerCommand);
+  await dialog.getByRole('button', { name: 'Copy worker command' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(rootWorkerCommand);
+  await expect(dialog.getByRole('button', { name: 'Copy worker command' })).toHaveText('Copied');
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('worker-config-restart-phone.png'), animations: 'disabled' });
+  // Simulate the fresh worker observed after the owner runs the terminal command.
+  const statusRequestsBeforeReplacement = statusRequests;
+  connection = { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 0 };
+  await expect(page.getByRole('dialog', { name: 'Agent connected', exact: true })).toContainText('Ready to work');
+  await expect(page.getByRole('dialog').getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => statusRequests).toBeGreaterThan(statusRequestsBeforeReplacement);
+  await expect(page.getByRole('button', { name: 'Back to workspace', exact: true })).toBeVisible();
+  expect(restarts).toBe(1); expect(signIns).toBe(0);
+});

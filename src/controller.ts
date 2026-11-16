@@ -31,7 +31,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const queue=new Queue(config,store,brain,options.client);
   const agentConnection=new AgentConnectionService(config,queue,options.agentClient??options.client);
   const projects=new ProjectService(config,store,queue.client,()=>Boolean(queue.health));
-  const receipts=new RuntimeReceipts(store.db,queue.client);
+  const receipts=new RuntimeReceipts(store.db,queue.client,config.projectsDir??join(config.stateDir,'projects'));
   const managed=new ManagedService(config,store,projects,queue.client,receipts);
   const connectors=new ConnectorService(store,queue.client,projects,managed,receipts);
   queue.setManaged(managed,connectors,receipts);

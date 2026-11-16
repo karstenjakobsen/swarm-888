@@ -16,7 +16,7 @@ export class ManagedService {
   readonly repository:ManagedRepository;
   private sourceCreations=new Map<string,Promise<ManagedExport>>();
   private receipts:RuntimeReceipts;
-  constructor(config:Config,private store:Store,private projects:ProjectService,client:WorkerClient,receipts?:RuntimeReceipts){this.repository=new ManagedRepository(config);this.receipts=receipts??new RuntimeReceipts(store.db,client);}
+  constructor(config:Config,private store:Store,private projects:ProjectService,client:WorkerClient,receipts?:RuntimeReceipts){this.repository=new ManagedRepository(config);this.receipts=receipts??new RuntimeReceipts(store.db,client,config.projectsDir??join(config.stateDir,'projects'));}
   async createProject(raw:unknown,conversationId?:string){
     const input=projectCreateInput.parse(raw);
     if(input.origin==='adopted'&&input.managed)throw fail('Register an existing project first, then add managed source explicitly.');

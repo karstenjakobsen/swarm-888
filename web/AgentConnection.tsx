@@ -27,12 +27,14 @@ export function AgentConnection({ open, onClose, worker, onStatusChanged }: {
   const mounted = useRef(true);
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; requestGeneration.current++; }; }, []);
+  useEffect(() => { setCommandCopied(false); }, [connection?.rootWorkerCommand]);
 
   const acceptConnection = useCallback((value: Connection) => {
     const previous = currentConnection.current;
     currentConnection.current = value;
     setConnection(value);
-    if ((value.state === 'connected' && previous?.state !== 'connected') || value.workerConnected !== previous?.workerConnected) {
+    if (previous?.workerSetupRequired && !value.workerSetupRequired && value.state === 'connected') setError('');
+    if ((value.state === 'connected' && previous?.state !== 'connected') || value.workerConnected !== previous?.workerConnected || value.workerSetupRequired !== previous?.workerSetupRequired) {
       void onStatusChanged().catch(() => {});
     }
   }, [onStatusChanged]);
@@ -101,6 +103,7 @@ export function AgentConnection({ open, onClose, worker, onStatusChanged }: {
   const workerUid = connection?.workerUid ?? worker?.uid;
   const executionUid = connection?.executionUid ?? worker?.executionUid ?? workerUid;
   const rootWorker = workerConnected && workerUid === 0 && executionUid === 0;
+  const setupRequired = connection?.workerSetupRequired === true;
   const state = connection?.state;
   const validCode = state === 'connecting' && connection?.verificationUrl === verificationUrl && connection.userCode;
   const expires = connection?.expiresAt ? new Date(connection.expiresAt) : null;
@@ -109,18 +112,18 @@ export function AgentConnection({ open, onClose, worker, onStatusChanged }: {
     {open && <div className="agent-dialog-content">
       <header className="agent-dialog-heading"><div className="agent-dialog-symbol"><Icon name="skill" size={23} /></div><button className="icon-button" aria-label="Close agent connection" onClick={onClose}><Icon name="close" /></button></header>
       <div className="eyebrow">YOUR OPERATOR</div>
-      <h2 id="agent-dialog-title">{state === 'connected' && rootWorker ? 'Agent connected' : 'Connect your agent'}</h2>
-      <p id="agent-dialog-description">Connect your ChatGPT account to let the agent work on your tasks.</p>
+      <h2 id="agent-dialog-title">{setupRequired ? 'Restart the root worker' : state === 'connected' && rootWorker ? 'Agent connected' : 'Connect your agent'}</h2>
+      <p id="agent-dialog-description">{setupRequired ? 'Apply the current worker configuration. The worker will reuse its saved ChatGPT sign-in.' : 'Connect your ChatGPT account to let the agent work on your tasks.'}</p>
       <div className="agent-worker-identity" title={workerConnected ? `Actual execution UID ${executionUid ?? 'unknown'}` : undefined}><span className={`status-dot ${rootWorker ? 'ok' : ''}`} /><span>{workerConnected ? `Worker connected · UID ${executionUid ?? 'unknown'} · ${rootWorker ? 'root' : 'non-root'}` : 'Worker disconnected'}</span></div>
 
       {(error || refreshError) && <div className="inline-error agent-connection-error" role="alert">{error || refreshError}</div>}
       {connection?.error && connection.error !== error && <div className="inline-error agent-connection-error" role="alert">{connection.error}</div>}
 
-      {loading ? <div className="agent-connection-wait" role="status"><Icon name="refresh" size={15} />Checking your connection…</div> : !rootWorker ? <div className="agent-connection-section">
-        <h3>{workerConnected ? 'A root worker is required' : 'Start the root worker'}</h3>
-        <p>The worker runs project commands with root access. Start it, then connect your ChatGPT account. The agent is instructed to leave operator files unchanged.</p>
-        <button className="primary-button" disabled={busy} onClick={() => void act('worker')}><Icon name="terminal" size={16} />{busy ? 'Starting root worker…' : 'Start root worker'}</button>
-        {(error || refreshError || connection?.error) && connection?.rootWorkerCommand && <div className="agent-root-setup"><h3>Host setup</h3><p>If the host requires administrator permission, run this command on the VPS, then try again here.</p><code aria-label="Worker setup command">{connection.rootWorkerCommand}</code><button className="secondary-button" aria-label="Copy worker command" onClick={() => void copyWorkerCommand()}>{commandCopied ? 'Copied' : 'Copy command'}</button></div>}
+      {loading ? <div className="agent-connection-wait" role="status"><Icon name="refresh" size={15} />Checking your connection…</div> : !rootWorker || setupRequired ? <div className="agent-connection-section">
+        <h3>{setupRequired ? 'Worker configuration changed' : workerConnected ? 'A root worker is required' : 'Start the root worker'}</h3>
+        <p>{setupRequired ? 'Restart the connected worker with this controller’s current configuration. The launcher verifies that the old worker is idle before replacing it. Active or uncertain workers stay running.' : 'The worker runs project commands with root access. Start it, then connect your ChatGPT account. The agent is instructed to leave operator files unchanged.'}</p>
+        <button className="primary-button" disabled={busy} onClick={() => void act('worker')}><Icon name="terminal" size={16} />{setupRequired ? busy ? 'Restarting root worker…' : 'Restart root worker' : busy ? 'Starting root worker…' : 'Start root worker'}</button>
+        {(setupRequired || error || refreshError || connection?.error) && connection?.rootWorkerCommand && <div className="agent-root-setup"><h3>Host setup</h3>{setupRequired ? <><p>In the operator directory, run this as your normal user without a sudo prefix. It loads the current .env configuration, then asks for your sudo password.</p><code aria-label="Root worker restart command">npm run worker:root</code><p>Alternatively, copy this exact command for the current controller configuration. The connection updates after the verified idle worker is replaced.</p></> : <p>If the host requires administrator permission, run this command on the VPS, then try again here.</p>}<code aria-label="Worker setup command">{connection.rootWorkerCommand}</code><button className="secondary-button" aria-label="Copy worker command" onClick={() => void copyWorkerCommand()}>{commandCopied ? 'Copied' : setupRequired ? 'Copy exact command' : 'Copy command'}</button></div>}
       </div> : state === 'connected' ? <div className="agent-connection-section agent-connected">
         <div className="agent-success-mark"><Icon name="check" size={22} /></div>
         <h3>Ready to work</h3>
