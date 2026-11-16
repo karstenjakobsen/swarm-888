@@ -9,6 +9,8 @@ The objective is the complete reusable platform needed to later build applicatio
 - [x] Registered multiple workers with separate sockets, journals, native profiles and authentication; startup-selected model/effort; launching OS user by default and explicit optional root.
 - [x] Durable per-worker task attempts, replay/receipt ownership, uncertainty recovery, concurrent independent projects, project write leases through source finalization, and scoped conversation threads.
 - [x] Workers UI, registration/start commands, authentication/readiness/draining, manual task assignment, project defaults and visible model/usage/block reasons.
+- [x] Model dropdown from the worker's public Codex catalog, safe offline cache fallback, model-specific reasoning effort options, and loading/retry handling without losing the registration draft.
+- [x] Confirmed conversation removal from the workspace, with active/related task-tree, in-flight tool, source-finalization and lease guards; durable recovery/job history retained, hidden from future model context, and stale-response/cross-tab UI handling.
 - [x] Bounded parent/child delegation through operator tools, project/connection/privilege scope inheritance, recorded results and task cancellation.
 - [x] Durable interval/cron/event jobs with deduplicated triggers, pause/resume/run-once/history, chosen worker and execution limits.
 - [x] Credential-aware connections with backend-held write-only secrets, selected HTTP/header/stdio injection, generic OAuth authorization/refresh/reconnection, redaction and durable waiting for missing connections.
@@ -47,8 +49,8 @@ The objective is the complete reusable platform needed to later build applicatio
 
 Verified on 2026-11-16:
 
-- Final review verification: 270 unit/integration tests passed, one optional live-auth test skipped; TypeScript and production build passed; all 38 browser tests passed. No separate lint task is configured; `git diff --check` passed. Checks reported no warnings.
-- Full verification used the Chromium already installed in `/tmp/vps-operator-browsers`: `env -u NO_COLOR PLAYWRIGHT_BROWSERS_PATH=/tmp/vps-operator-browsers npm run check`. See `/tmp/operator-review-check-final.log` for the combined checks and `/tmp/operator-review-backend-final.log` for the final backend pass after the parallel-registration correction. Browser tests used disposable localhost servers and temporary Git/state directories.
+- Latest verification including conversation removal: 292 unit/integration tests passed, one optional live-auth test skipped; TypeScript and production build passed; all 47 browser tests passed. No separate lint task is configured; `git diff --check` passed. Checks reported no warnings.
+- Browser verification uses the Chromium installed in `/tmp/vps-operator-browsers`: `env -u NO_COLOR PLAYWRIGHT_BROWSERS_PATH=/tmp/vps-operator-browsers npm run test:browser`. Latest evidence: `/tmp/operator-conversation-delete-backend.log`, `/tmp/operator-conversation-delete-browser.log`, and `/tmp/operator-conversation-delete-build.log`. Browser tests used disposable localhost servers and temporary Git/state directories.
 - Real temporary Git repositories verify automatic scoped commits, preserving owner HEAD/index/staged/unstaged changes, immutable exports, known-credential rejection, and restart-safe source finalization.
 - Real stdio and local HTTP MCP fixtures verify initialization, discovery, calls, response limits, cleanup, and failed requests. The actual pinned Codex app-server discovers and calls a dynamically registered tool without receiving controller/model/bridge credentials in its connector subprocess.
 - Desktop and phone browser checks cover source edits/commits, distinct deployed revisions, deployment/log/stop controls, connector registration/testing/calls, project assignments, and stale/offline status.
@@ -59,7 +61,7 @@ Verified on 2026-11-16:
 
 | Requirement | Implementation and verification |
 | --- | --- |
-| Multiple workers and model selection | `src/workers`, private per-worker state/launch manifests, Workers UI; `workers-runtime`, `worker-launch`, `platform` and browser tests |
+| Multiple workers and model selection | `src/workers`, private per-worker state/launch manifests, live/cache model catalog and Workers dropdown; `workers-runtime`, `worker-launch`, `platform`, `model-catalog`, `worker-models-api` and browser tests |
 | Durable ownership and concurrent projects | Store attempts/project leases and Queue replay/dispatch; `platform`, `platform-policy`, `runtime-receipts`, crash recovery and queue lifecycle tests |
 | Bounded delegation | TaskService and run-bound platform tools, frozen connection grants, privilege/budget/tree limits; `platform-policy` and `scenario-platform` |
 | Recurring analysis and collector events | JobService interval/cron/event schedules, restart-safe deduplication and job-only bearer ingress; `platform`, `job-events`, `scenario-platform`, Jobs browser flows |
@@ -67,6 +69,7 @@ Verified on 2026-11-16:
 | Long-running project services | References-only runtime environment, private service launch descriptor and redacting supervisor; `project-environment` tests and runtime credential browser flows |
 | Reusable skills in Git | Managed source commits and revision-pinned immutable publication; `skill-source` and existing skill lifecycle tests |
 | Existing installation upgrade | Five-migration legacy database upgraded and reopened with history/receipts/replay preserved and per-worker concurrency retained; `platform` upgrade regression |
+| Conversation cleanup | Migration 009, workspace visibility/context filtering, related-work/tool/finalization/lease guards, durable replay and job deduplication; `conversation-deletion`, `conversation-deletion-api` and six desktop/phone browser regressions |
 | End-to-end reusable scenario | Real controller persistence, temporary Git/checks, local authenticated MCP, selected simulated small-model worker, results/usage, delegation and restart; `scenario-platform` plus browser UI coverage |
 
 Provider app registration, account authorization, market-data semantics, signal quality, trading/risk rules and live deployment are future project acceptance, not claims made by these generic fixtures. Native MCP token expiry during a running session and service credential changes require the application's next snapshot/restart. Source protection remains prompt-only. The old snapshot CLI rejects expanded layouts; use the documented complete stopped-state backup.

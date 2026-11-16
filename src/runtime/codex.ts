@@ -19,6 +19,8 @@ import { createToolProxy } from './tool-proxy.ts';
 import { connectorEnvironment } from '../connectors/client.ts';
 import { connectorServerName, connectorSnapshotSchema, type ConnectorSnapshot } from '../connectors/schemas.ts';
 import { spawnOwned, terminateOwned } from './operations.ts';
+import { workerEffort } from '../workers/schemas.ts';
+import { workerModelSchema,type WorkerModel } from '../workers/models-schema.ts';
 
 export const CODEX_VERSION = '0.166.0';
 const envelope = z.object({ id: z.union([z.number(), z.string()]).optional(), method: z.string().optional(), params: z.unknown().optional(), result: z.unknown().optional(), error: z.object({ code: z.number(), message: z.string() }).passthrough().optional() });
@@ -120,6 +122,25 @@ export class CodexAdapter extends EventEmitter {
     }
     const authenticated = result.account !== null || !result.requiresOpenaiAuth;
     return { authenticated, detail: authenticated ? 'Codex authentication configured' : 'Model authentication missing. Connect the agent in the web interface to sign in with ChatGPT.' };
+  }
+
+  /** Discovery only: no thread/turn, account mutation, or inference request. */
+  async listModels():Promise<WorkerModel[]> {
+    const entry=z.object({id:z.string().min(1).max(200),model:z.string().min(1).max(200),displayName:z.string().min(1).max(200),description:z.string().max(4000),hidden:z.boolean(),supportedReasoningEfforts:z.array(z.object({reasoningEffort:z.string()})).max(20),defaultReasoningEffort:z.string().optional(),isDefault:z.boolean().optional()});
+    const models:WorkerModel[]=[],ids=new Set<string>(),cursors=new Set<string>(),deadline=Date.now()+5000;let cursor:string|undefined,total=0;
+    for(let page=0;page<20;page++){
+      const remaining=deadline-Date.now();if(remaining<=0)throw new Error('Codex model catalog lookup timed out');
+      const response=z.object({data:z.array(entry).max(1000),nextCursor:z.string().nullable().optional()}).parse(await this.request('model/list',{includeHidden:false,limit:100,...(cursor?{cursor}:{})},remaining));
+      total+=response.data.length;if(total>1000)throw new Error('Codex model catalog exceeded its size limit');
+      for(const model of response.data){
+        if(model.hidden||ids.has(model.model))continue;ids.add(model.model);
+        const efforts=model.supportedReasoningEfforts.flatMap(({reasoningEffort})=>{const parsed=workerEffort.safeParse(reasoningEffort);return parsed.success?[parsed.data]:[];}),defaultEffort=workerEffort.safeParse(model.defaultReasoningEffort);
+        models.push(workerModelSchema.parse({id:model.model,name:model.displayName,description:model.description,supportedEfforts:[...new Set(efforts)],defaultEffort:defaultEffort.success&&efforts.includes(defaultEffort.data)?defaultEffort.data:null,isDefault:model.isDefault??false}));
+      }
+      if(!response.nextCursor)return models;
+      if(cursors.has(response.nextCursor))throw new Error('Codex model catalog repeated its pagination cursor');cursors.add(response.nextCursor);cursor=response.nextCursor;
+    }
+    throw new Error('Codex model catalog exceeded its pagination limit');
   }
 
   async startDeviceLogin(): Promise<DeviceLogin> {
@@ -232,10 +253,10 @@ export class CodexAdapter extends EventEmitter {
     // Account/config events are intentionally excluded from execution records.
     if (/^(item\/|turn\/|thread\/tokenUsage)/.test(frame.method)) this.emit('event', 'activity', { method: frame.method, ...(frame.params && typeof frame.params === 'object' ? frame.params : {}) });
   }
-  request(method: string, params: unknown): Promise<any> {
+  request(method: string, params: unknown,timeoutMs=30_000): Promise<any> {
     const id = ++this.serial;
     return new Promise((resolveResult, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex ${method} timed out`)); }, 30_000);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`Codex ${method} timed out`)); }, timeoutMs);
       this.pending.set(id, { resolve: resolveResult, reject, timer });
       try { this.send({ id, method, params }); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }

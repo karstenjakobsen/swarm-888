@@ -22,6 +22,7 @@ import { callConnector, testConnector } from './connectors/client.ts';
 import { connectorCallInput, connectorTestInput, type ConnectorSnapshot } from './connectors/schemas.ts';
 import { prepareWorkerDirectory, workerDirectory } from './workers/config.ts';
 import { loadWorkerConfig } from './workers/startup.ts';
+import type { WorkerModel } from './workers/models-schema.ts';
 
 const runIdInput = z.object({ runId: z.string().min(1) });
 const emptyInput = z.object({}).strict();
@@ -34,6 +35,7 @@ export class WorkerServer {
   private runtime: WorkerHealth['runtime'] = { available: false, version: CODEX_VERSION, authenticated: false, detail: 'Codex runtime has not been checked' };
   private healthCheckedAt = 0;
   private probing?: Promise<void>;
+  private listingModels?:Promise<WorkerModel[]>;
   private lockPath: string;
   journal!: WorkerJournal;
   private checks: Promise<unknown> = Promise.resolve();
@@ -52,7 +54,7 @@ export class WorkerServer {
     this.lockPath = resolve(workerDirectory(config),'lock.json');
     this.authenticator = new AgentAuthenticator(() => this.adapterFactory(this.config), {
       timeoutMs: options.authTimeoutMs,
-      beforeStart: async () => { if (this.probing) await this.probing; if (this.closing) throw new Error('Worker is stopping'); },
+      beforeStart: async () => { while (this.probing) await this.probing; if (this.closing) throw new Error('Worker is stopping'); },
       changed: (connection, busy, health) => {
         this.runtime = { ...this.runtime, authenticating: busy, ...(health ? { available: true, ...health } : {}),
           ...(connection.state === 'connecting' && !health ? { detail: 'Waiting for ChatGPT sign-in' } : {}),
@@ -96,20 +98,35 @@ export class WorkerServer {
   private async probe(): Promise<void> {
     if (this.active || this.authenticator.busy || Date.now() - this.healthCheckedAt < 30_000) return;
     if (this.probing) return this.probing;
-    this.probing = (async () => {
+    const probing = (async () => {
       const adapter = this.adapterFactory(this.config);
       adapter.on('fault', () => {}); adapter.on('exit', () => {});
       try { await adapter.start(); const health = await adapter.health(); this.runtime = { available: true, version: adapter.version, ...health, authenticating: this.authenticator.busy, ...(this.config.model ? { model: this.config.model } : {}) }; }
       catch (error) { this.runtime = { available: false, version: CODEX_VERSION, authenticated: false, authenticating: this.authenticator.busy, detail: this.redact(error instanceof Error ? error.message : String(error)) }; }
       finally { await adapter.close(); this.healthCheckedAt = Date.now(); }
     })();
-    try { await this.probing; } finally { this.probing = undefined; }
+    this.probing=probing;
+    try { await probing; } finally { if(this.probing===probing)this.probing = undefined; }
   }
   health(): WorkerHealth {
     const runtimeOperations=this.journal.runtimeOperations().map(({id,method,status,requiresExternalInspection})=>({id,method,status:this.runtimeUncertain.has(id)?'uncertain' as const:status,requiresExternalInspection}));
     return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0,workerId:this.config.workerId??'default',journalId:this.journal.journalId,model:this.config.model??null,...(this.config.effort?{effort:this.config.effort}:{}),workerMode:this.config.workerMode??(this.config.requireRootWorker?'root':'user'),executionUid:process.getuid?.(),sourceProtected:false,runtime: this.runtime, replacementReserved: this.replacementReserved,
       projectsDir:resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects')),
       runtimeOperations,activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id),...runtimeOperations.filter(operation=>operation.status==='uncertain').map(operation=>operation.id)])] };
+  }
+  private models():Promise<WorkerModel[]> {
+    if(this.listingModels)return this.listingModels;
+    const operation=(async()=>{
+      while(this.probing)await this.probing;
+      if(this.closing||this.replacementReserved||this.authenticator.busy)throw new Error('Worker model discovery is unavailable during sign-in or restart. Retry afterward.');
+      if(this.active)return this.active.adapter.listModels();
+      const adapter=this.adapterFactory({...this.config,model:undefined,effort:undefined});
+      adapter.on('fault',()=>{});adapter.on('exit',()=>{});
+      const lookup=(async()=>{try{await adapter.start();return await adapter.listModels();}finally{await adapter.close();this.repairOwnership();}})();
+      const probe=lookup.then(()=>{},()=>{});this.probing=probe;
+      try{return await lookup;}finally{if(this.probing===probe)this.probing=undefined;}
+    })();
+    this.listingModels=operation;void operation.finally(()=>{if(this.listingModels===operation)this.listingModels=undefined;}).catch(()=>{});return operation;
   }
   private hasUncertainRuntime():boolean{return this.runtimeUncertain.size>0||this.journal.runtimeOperations().some(operation=>operation.status==='uncertain');}
   private async runtimeEffect(method:string,operation:()=>Promise<unknown>):Promise<unknown>{
@@ -151,6 +168,7 @@ export class WorkerServer {
   }
   private async dispatch(method: string, raw: unknown): Promise<unknown> {
     if (this.closing) throw new Error('Worker is stopping');
+    if(method==='models/list'){emptyInput.parse(raw);return this.models();}
     if(method==='runtime/acknowledge'){
       const {operationId}=z.object({operationId:z.string().regex(/^runtime_[0-9a-f-]{36}$/)}).strict().parse(raw),operation=this.journal.runtimeOperations().find(item=>item.id===operationId);
       if(operation&&!operation.completed)throw new Error('An unfinished runtime operation requires explicit reconciliation, not a receipt acknowledgement.');
@@ -181,7 +199,7 @@ export class WorkerServer {
       // Reserve admission synchronously before waiting for an existing read-only probe.
       this.replacementReserved = true;
       try {
-        if (this.probing) await this.probing;
+        while (this.probing) await this.probing;
         if (this.closing || !this.replacementReserved) throw new Error('Worker replacement reservation was released or the worker is stopping');
         return { reserved: true, pid: process.pid, uid: process.getuid?.() ?? -1 };
       } catch (error) { this.replacementReserved = false; throw error; }
@@ -217,12 +235,14 @@ export class WorkerServer {
       if(this.journal.runtimeOperations().length||this.runtimeUncertain.size)throw new Error('Worker has running or uncertain runtime operations; reconcile them before submitting tasks.');
       if (this.authenticator.busy) throw new Error('ChatGPT sign-in is in progress. Finish or cancel the agent connection before running tasks');
       if (this.active || this.journal.active().length || this.journal.checks().some(check => check.status === 'uncertain')) throw new Error('Worker is occupied or has an unresolved orphan run/check');
-      if (this.probing) await this.probing;
-      let pendingChecks: Promise<unknown>;
-      do { pendingChecks = this.checks; await pendingChecks; } while (pendingChecks !== this.checks);
-      if (this.active || this.journal.active().length || this.journal.checks().length) throw new Error('Worker became occupied or has an orphan check while waiting for representative checks');
-      if (this.journal.count() >= this.journal.maxEvents - 10) throw new Error('Worker outbox needs controller acknowledgement before another run');
       if (!this.runtime.available || !this.runtime.authenticated) { await this.probe(); if (!this.runtime.available || !this.runtime.authenticated) throw new Error(this.runtime.detail); }
+      let pendingChecks: Promise<unknown>;
+      do { while(this.probing)await this.probing;pendingChecks = this.checks; await pendingChecks; } while (this.probing||pendingChecks !== this.checks);
+      if(this.closing)throw new Error('Worker is stopping');
+      if (this.active || this.journal.active().length || this.journal.checks().length) throw new Error('Worker became occupied or has an orphan check while waiting for representative checks');
+      if(this.journal.runtimeOperations().length||this.runtimeUncertain.size)throw new Error('Worker has running or uncertain runtime operations; reconcile them before submitting tasks.');
+      if (this.journal.count() >= this.journal.maxEvents - 10) throw new Error('Worker outbox needs controller acknowledgement before another run');
+      if (!this.runtime.available || !this.runtime.authenticated)throw new Error(this.runtime.detail);
       if (this.authenticator.busy) throw new Error('ChatGPT sign-in is in progress. Finish or cancel the agent connection before running tasks');
       if (this.replacementReserved) throw new Error('Worker replacement is reserved. Wait for the root worker before submitting tasks.');
       this.journal.accept(submission);
@@ -433,7 +453,7 @@ export class WorkerServer {
       await this.managed.close();
       await Promise.allSettled([...this.runtimeOperations]);
       await this.authenticator.close();
-      if (this.probing) await this.probing;
+      while (this.probing) await this.probing;
       if (this.active) await this.finish(this.active, { status: 'interrupted', error: 'Worker shut down and terminated its owned runtime process group. Detached services may continue.' });
       await this.checks;
       for (const socket of this.clients) socket.destroy(); this.clients.clear();

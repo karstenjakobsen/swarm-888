@@ -17,7 +17,7 @@ export class TaskService {
     if(input.workerId){const worker=this.queue.registry.get(input.workerId);if(worker.mode==='root'&&!input.requiredRoot)throw fail('Selecting a root worker requires the explicit root-access option');if(worker.mode==='user'&&input.requiredRoot)throw fail('This task requires root but the selected worker runs as a normal user');}
     for(const id of input.requiredConnectorIds??[])this.connectors.get(id);
   }
-  submit(conversationId:string,raw:unknown){const input=PromptInput.parse(raw);this.assertSafe(input);this.validate(input,input.prompt);const {prompt,requestId,...options}=input;const run=this.store.enqueue(conversationId,prompt,requestId,'user',null,options);setImmediate(()=>void this.queue.tick());return run;}
+  submit(conversationId:string,raw:unknown){const input=PromptInput.parse(raw);if(!this.store.conversation(conversationId))throw fail('Conversation not found',404);this.assertSafe(input);this.validate(input,input.prompt);const {prompt,requestId,...options}=input;const run=this.store.enqueue(conversationId,prompt,requestId,'user',null,options);setImmediate(()=>void this.queue.tick());return run;}
   rootGranted(parent:Run):boolean{return Boolean(parent.requiredRoot||parent.attemptId&&this.store.attempt(parent.attemptId)?.uid===0);}
   inherited(parent:Run,raw:TaskOptions):TaskOptions {
     raw=taskOptions.parse(Object.fromEntries(Object.entries(raw).filter(([key])=>key in taskOptions.shape)));
@@ -35,7 +35,7 @@ export class TaskService {
     if(!prior)this.checkTree(parent);
     const {prompt,requestId:_request,...rawOptions}=input,options=this.inherited(parent,rawOptions);
     this.validate(options,prompt);
-    const project=this.store.projects.forConversation(parent.conversationId),conversation=prior?this.store.conversation(String(prior.conversationId))!:project?this.projects.newConversation(project.id):this.store.newConversation(`Delegated: ${prompt.slice(0,65)}`);
+    const project=this.store.projects.forConversation(parent.conversationId),conversation=prior?this.store.conversation(String(prior.conversationId),true)!:project?this.projects.newConversation(project.id):this.store.newConversation(`Delegated: ${prompt.slice(0,65)}`);
     const run=this.store.enqueue(conversation.id,prompt,requestId,'user',parent.id,{...options,taskType:'delegated'});setImmediate(()=>void this.queue.tick());return run;
   }
   checkTree(parent:Run){

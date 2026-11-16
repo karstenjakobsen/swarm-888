@@ -351,3 +351,8 @@
 .event-token-setup input{display:block;width:100%;font-size:11px;margin:10px 0}
 .event-token-setup .source-actions{margin:12px 0}
 @media(max-width:680px){.project-environment select,.project-environment textarea{font-size:12px}}
+.conversation-row{display:flex;align-items:center;gap:3px;min-width:0}
+.conversation-row .conversation-link{flex:1;min-width:0;width:auto}
+.conversation-delete{flex:0 0 30px;min-height:32px;padding:6px;color:var(--subtle)}
+.conversation-delete:hover:enabled,.conversation-delete:focus-visible{color:var(--danger);background:var(--surface-2)}
+@media(hover:none){.conversation-delete{flex-basis:36px;min-height:40px}}

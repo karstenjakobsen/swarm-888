@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-export type IconName = 'chat' | 'brain' | 'skill' | 'folder' | 'plus' | 'arrow' | 'stop' | 'chevron' | 'logout' | 'menu' | 'close' | 'search' | 'terminal' | 'clock' | 'check' | 'settings' | 'refresh' | 'link' | 'layers' | 'globe' | 'code';
+export type IconName = 'chat' | 'brain' | 'skill' | 'folder' | 'plus' | 'arrow' | 'stop' | 'chevron' | 'logout' | 'menu' | 'close' | 'search' | 'terminal' | 'clock' | 'check' | 'settings' | 'refresh' | 'link' | 'layers' | 'globe' | 'code' | 'trash';
 const paths: Record<IconName, React.ReactNode> = {
   layers: <><path d="m12 3 10 5-10 5L2 8l10-5Z" /><path d="m2 12 10 5 10-5M2 16l10 5 10-5" /></>,
   globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z" /></>,
@@ -15,6 +15,7 @@ const paths: Record<IconName, React.ReactNode> = {
   logout: <><path d="M9 4H4v16h5m6-12 4 4-4 4m-6-4h10" /></>,
   menu: <path d="M4 6h16M4 12h16M4 18h16" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
+  trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
   terminal: <><rect x="2" y="3" width="20" height="18" rx="3" /><path d="m6 8 4 4-4 4m7 0h5" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,

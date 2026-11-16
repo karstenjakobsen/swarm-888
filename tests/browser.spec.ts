@@ -453,6 +453,126 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function conversationDeletionFixture(page: Page) {
+  await page.addInitScript(() => {
+    class FixtureEventSource extends EventTarget {
+      onopen: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor() { super(); (window as any).__conversationEventSource = this; queueMicrotask(() => this.onopen?.(new Event('open'))); }
+      close() {}
+    }
+    Object.defineProperty(window, 'EventSource', { value: FixtureEventSource });
+  });
+  const now = '2026-11-16T10:00:00Z', first = { id: 'delete_first', title: 'Saved conversation', threadId: null, createdAt: now, updatedAt: now }, second = { ...first, id: 'delete_second', title: 'Other conversation' };
+  const fixture = { rows: [first, second], deletions: [] as string[], error: '', gate: null as ReturnType<typeof deferred> | null, created: 0 };
+  const state = { worker: null, workerError: null, maintenance: false, queue: [] };
+  const detail = (conversation: typeof first) => ({ conversation, messages: [{ id: `message_${conversation.id}`, conversationId: conversation.id, runId: `run_${conversation.id}`, role: 'user', content: `${conversation.title} chat history`, createdAt: now }], runs: [], events: [] });
+  await page.route('**/api/status', route => route.fulfill({ json: state }));
+  await page.route('**/api/conversations', route => {
+    if (route.request().method() === 'POST') { const conversation = { ...first, id: `delete_created_${++fixture.created}`, title: 'New conversation' }; fixture.rows = [conversation, ...fixture.rows]; return route.fulfill({ json: conversation }); }
+    return route.fulfill({ json: fixture.rows });
+  });
+  await page.route('**/api/conversations/*', async route => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1)!;
+    if (route.request().method() === 'DELETE') {
+      fixture.deletions.push(id); expect(route.request().headers()['x-csrf-token']).toBeTruthy();
+      await fixture.gate?.promise;
+      if (fixture.error) return route.fulfill({ status: 409, json: { error: fixture.error } });
+      fixture.rows = fixture.rows.filter(conversation => conversation.id !== id); return route.fulfill({ json: { ok: true } });
+    }
+    const conversation = fixture.rows.find(value => value.id === id);
+    return conversation ? route.fulfill({ json: detail(conversation) }) : route.fulfill({ status: 404, json: { error: 'Conversation has been deleted from the workspace.' } });
+  });
+  let seq = 10_000;
+  const emit = async (type: string, conversationId: string | null, data: Record<string, unknown> = {}) => {
+    await page.evaluate(value => (window as any).__conversationEventSource.dispatchEvent(new MessageEvent('event', { data: JSON.stringify(value) })), { seq: ++seq, type, conversationId, data, runId: null, createdAt: now });
+  };
+  return { fixture, first, second, detail, emit };
+}
+
+test('conversation deletion confirms removal, keeps unrelated drafts and deletes the last chat on a phone', async ({ page }) => {
+  const { fixture, first, second } = await conversationDeletionFixture(page); await login(page);
+  await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible();
+  const composer = page.getByLabel('Message your operator'); await composer.fill('Keep this unrelated draft');
+  page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('button', { name: `Delete conversation "${second.title}"`, exact: true }).click();
+  expect(fixture.deletions).toEqual([]); await expect(composer).toHaveValue('Keep this unrelated draft');
+  let confirmation = ''; page.once('dialog', async dialog => { confirmation = dialog.message(); await dialog.accept(); });
+  await page.getByRole('button', { name: `Delete conversation "${second.title}"`, exact: true }).click();
+  await expect(page.locator('.conversation-link')).toHaveCount(1); expect(confirmation).toContain('Recovery and execution records'); expect(confirmation).toContain('running services are kept');
+  await expect(composer).toHaveValue('Keep this unrelated draft'); await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 }); await page.getByRole('button', { name: 'Open navigation' }).click();
+  const remove = page.getByRole('button', { name: `Delete conversation "${first.title}"`, exact: true }); await expect(remove).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  page.once('dialog', dialog => dialog.accept()); await remove.click();
+  await expect(page.locator('.conversation-link')).toHaveCount(0); await expect(page.getByRole('heading', { name: 'A fresh start', exact: true })).toBeVisible();
+  await expect(composer).toHaveValue(''); await expect(page.getByTestId('message-user')).toHaveCount(0);
+  expect(fixture.deletions).toEqual([second.id, first.id]);
+});
+
+test('a rejected conversation deletion keeps history and drafts and locks competing mutations while pending', async ({ page }) => {
+  const { fixture, first, second } = await conversationDeletionFixture(page), gate = deferred(); fixture.gate = gate; fixture.error = 'Finish or reconcile pending work before deleting this conversation.';
+  try {
+    await login(page); await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible();
+    const composer = page.getByLabel('Message your operator'); await composer.fill('Keep the current draft');
+    page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: `Delete conversation "${first.title}"`, exact: true }).click();
+    await expect.poll(() => fixture.deletions.length).toBe(1); await expect(composer).toBeDisabled(); await expect(page.locator('.new-conversation')).toBeDisabled(); await expect(page.locator('.conversation-link').filter({ hasText: second.title })).toBeDisabled();
+    gate.resolve(); await expect(page.getByRole('alert')).toContainText(fixture.error); await expect(composer).toBeEnabled(); await expect(composer).toHaveValue('Keep the current draft');
+    await expect(page.locator('.conversation-link')).toHaveCount(2); await expect(page.getByTestId('message-user')).toContainText(`${first.title} chat history`);
+  } finally { gate.resolve(); }
+});
+
+test('deleted conversations stay removed after delayed list/detail reads and streamed events arrive', async ({ page }) => {
+  const { fixture, first, second, detail, emit } = await conversationDeletionFixture(page), pending = deferred(); let lists = 0, details = 0;
+  try {
+    await login(page); await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible();
+    const snapshot = [...fixture.rows];
+    await page.route('**/api/conversations', async route => { if (route.request().method() !== 'GET') return route.fallback(); lists++; await pending.promise; return route.fulfill({ headers: { 'x-conversation-list-fixture': 'late' }, json: snapshot }); });
+    await page.route(`**/api/conversations/${first.id}`, async route => { if (route.request().method() !== 'GET') return route.fallback(); details++; await pending.promise; return route.fulfill({ headers: { 'x-conversation-detail-fixture': 'late' }, json: detail(first) }); });
+    await emit('run', first.id); await expect.poll(() => lists > 0 && details > 0).toBe(true);
+    page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: `Delete conversation "${first.title}"`, exact: true }).click();
+    await expect(page.getByRole('heading', { name: second.title, exact: true })).toBeVisible();
+    const late = page.waitForResponse(response => response.headers()['x-conversation-detail-fixture'] === 'late'); pending.resolve(); await (await late).finished(); await nextPaint(page);
+    await emit('message', first.id, { message: { id: 'late-deleted-message', role: 'user', content: 'Resurrected deleted text' } }); await emit('run', second.id); await nextPaint(page);
+    await expect(page.locator('.conversation-link')).toHaveCount(1); await expect(page.locator('.conversation-link')).toContainText(second.title); await expect(page.getByTestId('message-user')).toContainText(`${second.title} chat history`); await expect(page.getByText('Resurrected deleted text')).toHaveCount(0);
+  } finally { pending.resolve(); }
+});
+
+test('historical deletion replay cannot cancel the initial visible conversation list', async ({ page }) => {
+  const { fixture, first, emit } = await conversationDeletionFixture(page), pending = deferred(); let reads = 0;
+  const historical = { ...first, id: 'historical_deleted', title: 'Historical removed chat' }; fixture.rows = [historical, ...fixture.rows]; const snapshot = [...fixture.rows];
+  await page.route('**/api/conversations', async route => { if (route.request().method() !== 'GET') return route.fallback(); reads++; await pending.promise; return route.fulfill({ json: snapshot }); });
+  try {
+    await login(page); await expect.poll(() => reads > 0).toBe(true); fixture.rows = fixture.rows.filter(conversation => conversation.id !== historical.id);
+    await emit('conversation_deleted', null, { conversationId: historical.id }); pending.resolve();
+    await expect(page.locator('.conversation-link')).toHaveCount(2); await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible(); await expect(page.locator('.conversation-link').filter({ hasText: historical.title })).toHaveCount(0);
+  } finally { pending.resolve(); }
+});
+
+test('a delayed post-delete list cannot overwrite a newly created conversation', async ({ page }) => {
+  const { fixture, first, second } = await conversationDeletionFixture(page), pending = deferred(); let reads = 0;
+  try {
+    await login(page); await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible();
+    await page.route('**/api/conversations', async route => { if (route.request().method() !== 'GET') return route.fallback(); const snapshot = [...fixture.rows]; reads++; await pending.promise; return route.fulfill({ headers: { 'x-conversation-list-fixture': 'before-create' }, json: snapshot }); });
+    page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: `Delete conversation "${second.title}"`, exact: true }).click(); await expect.poll(() => reads > 0).toBe(true);
+    await page.locator('.new-conversation').click(); await expect(page.getByRole('heading', { name: 'New conversation', exact: true })).toBeVisible();
+    await page.getByLabel('Message your operator').fill('Keep the newly created draft');
+    const late = page.waitForResponse(response => response.headers()['x-conversation-list-fixture'] === 'before-create'); pending.resolve(); await (await late).finished(); await nextPaint(page);
+    await expect(page.locator('.conversation-link')).toHaveCount(2); await expect(page.locator('.conversation-link').filter({ hasText: 'New conversation' })).toBeVisible(); await expect(page.getByLabel('Message your operator')).toHaveValue('Keep the newly created draft');
+  } finally { pending.resolve(); }
+});
+
+test('local and remote conversation deletion preserve an unsaved project editor', async ({ page }) => {
+  const { fixture, first, second, emit } = await conversationDeletionFixture(page); await sourceReviewFixture(page); await login(page);
+  await expect(page.getByRole('heading', { name: first.title, exact: true })).toBeVisible(); await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const workspace = page.getByRole('region', { name: 'Source and deployment' }), draft = 'export const value = "keep my source draft";\n';
+  await workspace.getByLabel('Source file', { exact: true }).selectOption('server.mjs'); await workspace.getByLabel('Source code').fill(draft);
+  fixture.rows = fixture.rows.filter(conversation => conversation.id !== first.id); await emit('conversation_deleted', null, { conversationId: first.id });
+  await expect(workspace.getByLabel('Source code')).toHaveValue(draft); await expect(page.locator('.conversation-link')).toHaveCount(1);
+  page.once('dialog', dialog => dialog.accept()); await page.getByRole('button', { name: `Delete conversation "${second.title}"`, exact: true }).click();
+  await expect(page.locator('.conversation-link')).toHaveCount(0); await expect(workspace.getByLabel('Source code')).toHaveValue(draft);
+  page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('button', { name: 'Conversations', exact: true }).click(); await expect(workspace.getByLabel('Source code')).toHaveValue(draft);
+});
+
 test('source requests lock the editor and navigation preserves an unsaved draft', async ({ page }) => {
   const fixture = await sourceReviewFixture(page);
   const write = deferred(), read = deferred(), navigation = deferred();
@@ -870,12 +990,17 @@ async function workerPlatformFixture(page: Page) {
   const conversation = { id: 'platform_conversation', title: 'Platform fixture conversation', threadId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const project = { id: '6307ae41-578b-4fa3-8859-8fb33c242bfd', name: 'Automation workspace', description: 'Generic project fixture', origin: 'created', directory: '/tmp/platform-fixture/project', status: 'ready', components: [], runs: [], conversationIds: [conversation.id], connectorIds: ['4a8b2937-295e-4be7-92e7-ddb06c5a6917'], defaultWorkerId: 'research' as string | null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastCheckedAt: null };
   const connector: Connector = { id: project.connectorIds[0]!, name: 'Provider tools', description: 'Credential-aware fixture', transport: 'http', url: 'https://provider.example/mcp', enabled: true, projectId: project.id, tools: [{ name: 'echo', description: 'Fixture echo', inputSchema: { type: 'object' } }], status: 'connected', detail: 'Discovered fixture tool.', checkedAt: new Date().toISOString(), readiness: { ready: true }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  const fixture = { workers: [platformWorker('research'), platformWorker('deploy', 'root')], project, connectors: [connector], runs: [] as Run[], jobs: [] as import('../src/jobs/schemas').Job[], credentials: [] as import('../src/credentials/schemas').CredentialMetadata[], connections: {} as Record<string, import('../src/agent-connection-schema').AgentConnection>, submitted: [] as Record<string, any>[] };
+  const models: import('../src/workers/models-schema').WorkerModelCatalog = { models: [
+    { id: 'fixture-analysis-model', name: 'Fixture Analysis', description: 'A model for building and analysis.', supportedEfforts: ['low', 'high'], defaultEffort: 'low', isDefault: true },
+    { id: 'fixture-routine-model', name: 'Fixture Routine', description: 'A model for straightforward recurring tasks.', supportedEfforts: ['low'], defaultEffort: 'low', isDefault: false },
+  ], source: 'worker' };
+  const fixture = { workers: [platformWorker('research'), platformWorker('deploy', 'root')], models, project, connectors: [connector], runs: [] as Run[], jobs: [] as import('../src/jobs/schemas').Job[], credentials: [] as import('../src/credentials/schemas').CredentialMetadata[], connections: {} as Record<string, import('../src/agent-connection-schema').AgentConnection>, submitted: [] as Record<string, any>[] };
   for (const value of fixture.workers) fixture.connections[value.worker.id] = { state: 'connected', workerConnected: true, workerUid: value.health!.uid, executionUid: value.health!.uid };
   const status = () => ({ worker: fixture.workers[0]?.health ?? null, workers: fixture.workers, workerError: null, maintenance: false, queue: fixture.runs.filter(run => !['completed', 'failed', 'interrupted'].includes(run.status)) });
   const makeRun = (body: Record<string, any>, taskType: Run['taskType'] = 'interactive'): Run => ({ id: `platform_run_${fixture.runs.length + 1}`, conversationId: conversation.id, prompt: body.prompt, requestId: body.requestId || `scheduled_${fixture.runs.length + 1}`, kind: 'user', status: 'queued', summary: '', error: null, parentRunId: null, createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, ...body, taskType });
   await page.route('**/api/status', route => route.fulfill({ json: status() }));
   await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(status())}\n\n` }));
+  await page.route('**/api/worker-models', route => route.fulfill({ json: fixture.models }));
   await page.route('**/api/workers', route => {
     if (route.request().method() === 'POST') { const input = route.request().postDataJSON(); const value = platformWorker(input.id, input.mode); value.worker = { ...value.worker, ...input }; value.connected = false; value.health = null; fixture.workers.push(value); fixture.connections[input.id] = { state: 'disconnected', workerConnected: false, workerUid: null }; return route.fulfill({ json: value }); }
     return route.fulfill({ json: fixture.workers });
@@ -926,7 +1051,7 @@ test('Workers registers user-mode profiles, signs in independently, and drains a
   await expect(page.getByLabel('Worker mode', { exact: true })).toHaveValue('user');
   await page.getByLabel('Worker name', { exact: true }).fill('Analysis worker');
   await page.getByLabel('Worker ID', { exact: true }).fill('analysis');
-  await page.getByLabel('Worker model', { exact: true }).fill('fixture-analysis-model');
+  await page.getByLabel('Worker model', { exact: true }).selectOption('fixture-analysis-model');
   await page.getByLabel('Worker effort', { exact: true }).selectOption('high');
   await page.locator('.platform-editor').getByRole('button', { name: 'Register worker', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Analysis worker', exact: true })).toBeVisible();
@@ -954,6 +1079,70 @@ test('Workers registers user-mode profiles, signs in independently, and drains a
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('workers-phone.png'), animations: 'disabled' });
+});
+
+test('worker registration selects catalog models and clears reasoning effort unsupported by a new model', async ({ page }) => {
+  await workerPlatformFixture(page);
+  await login(page); await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  await page.getByRole('button', { name: 'Register worker', exact: true }).click();
+  const editor = page.locator('.platform-editor'), model = page.getByRole('combobox', { name: 'Worker model', exact: true }), effort = page.getByRole('combobox', { name: 'Worker effort', exact: true });
+  await expect(model).toHaveValue(''); await expect(editor.getByRole('button', { name: 'Register worker', exact: true })).toBeDisabled();
+  await model.selectOption('fixture-analysis-model');
+  await expect(model.locator('option:checked')).toHaveText('Fixture Analysis · fixture-analysis-model · default');
+  await expect(editor).toContainText('A model for building and analysis.');
+  await expect(effort.locator('option')).toHaveText(['Model default (low)', 'low', 'high']);
+  await effort.selectOption('high'); await model.selectOption('fixture-routine-model');
+  await expect(effort).toHaveValue(''); await expect(effort.locator('option')).toHaveText(['Model default (low)', 'low']);
+  await expect(editor).toContainText('A model for straightforward recurring tasks.');
+  await page.getByLabel('Worker name', { exact: true }).fill('Routine worker'); await page.getByLabel('Worker ID', { exact: true }).fill('routine');
+  const submitted = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/workers');
+  await editor.getByRole('button', { name: 'Register worker', exact: true }).click();
+  const input = (await submitted).postDataJSON(); expect(input.model).toBe('fixture-routine-model'); expect(input).not.toHaveProperty('effort');
+  await expect(page.getByRole('heading', { name: 'Routine worker', exact: true })).toBeVisible();
+});
+
+test('worker model loading, errors and empty catalogs preserve the registration draft through retries', async ({ page }) => {
+  const { fixture } = await workerPlatformFixture(page), pending = deferred();
+  let phase: 'loading' | 'empty' | 'available' = 'loading', started = false;
+  await page.route('**/api/worker-models', async route => {
+    const current = phase;
+    if (current === 'loading') { started = true; await pending.promise; return route.fulfill({ status: 503, json: { error: 'Model catalog temporarily unavailable.' } }); }
+    if (current === 'empty') return route.fulfill({ json: { models: [], source: 'unavailable', detail: 'Start a worker to load its model catalog.' } });
+    return route.fulfill({ json: { ...fixture.models, source: 'cache', detail: 'Showing the saved model catalog. Availability is checked when this worker starts.' } });
+  });
+  try {
+    await login(page); await page.getByRole('button', { name: 'Workers', exact: true }).click(); await page.getByRole('button', { name: 'Register worker', exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    const editor = page.locator('.platform-editor'), model = page.getByLabel('Worker model', { exact: true });
+    await page.getByLabel('Worker name', { exact: true }).fill('Keep my draft'); await page.getByLabel('Worker ID', { exact: true }).fill('keep-draft');
+    await expect(model).toBeDisabled(); await expect(editor.getByRole('status')).toHaveText('Loading available Codex models…'); await expect(editor.getByRole('button', { name: 'Register worker', exact: true })).toBeDisabled();
+    pending.resolve(); await expect(editor.getByRole('alert')).toHaveText('Model catalog temporarily unavailable.');
+    await expect(page.getByLabel('Worker name', { exact: true })).toHaveValue('Keep my draft');
+    phase = 'empty'; await editor.getByRole('button', { name: 'Reload models', exact: true }).click();
+    await expect(editor.getByRole('status')).toHaveText('Start a worker to load its model catalog.'); await expect(model).toBeDisabled();
+    phase = 'available'; await editor.getByRole('button', { name: 'Reload models', exact: true }).click();
+    await expect(model).toBeEnabled(); await expect(editor).toContainText('Showing the saved model catalog.'); await expect(editor.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByLabel('Worker ID', { exact: true })).toHaveValue('keep-draft'); await model.selectOption('fixture-analysis-model');
+    await expect(editor.getByRole('button', { name: 'Register worker', exact: true })).toBeEnabled();
+  } finally { pending.resolve(); }
+});
+
+test('a late model catalog response cannot replace the current model selection', async ({ page }) => {
+  const { fixture } = await workerPlatformFixture(page), late = deferred(); let calls = 0;
+  await page.route('**/api/worker-models', async route => {
+    if (++calls === 1) { await late.promise; return route.fulfill({ headers: { 'x-model-catalog-fixture': 'late' }, json: { ...fixture.models, models: [fixture.models.models[0]] } }); }
+    return route.fulfill({ json: fixture.models });
+  });
+  try {
+    await login(page); await page.getByRole('button', { name: 'Workers', exact: true }).click(); await page.getByRole('button', { name: 'Register worker', exact: true }).click();
+    // Development StrictMode starts a replacement load before the first response completes.
+    const model = page.getByLabel('Worker model', { exact: true }); await model.selectOption('fixture-routine-model');
+    await page.getByLabel('Worker effort', { exact: true }).selectOption('low');
+    const response = page.waitForResponse(value => value.headers()['x-model-catalog-fixture'] === 'late'); late.resolve(); await response; await nextPaint(page);
+    await expect(model).toHaveValue('fixture-routine-model'); await expect(page.getByLabel('Worker effort', { exact: true })).toHaveValue('low');
+    await expect(model.locator('option[value="fixture-routine-model"]')).toHaveCount(1);
+    await expect(page.locator('.platform-editor').getByRole('alert')).toHaveCount(0);
+  } finally { late.resolve(); }
 });
 
 test('task routing captures worker/root grants, project defaults, provenance, usage, and blocked reasons', async ({ page }) => {

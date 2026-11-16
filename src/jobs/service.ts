@@ -51,7 +51,7 @@ export class JobService {
     this.validateOptions(effectiveOptions,prompt);
     const requestId=`job_${job.id}_${createHash('sha256').update(key).digest('hex').slice(0,32)}`;
     const known=this.store.db.prepare('SELECT id,conversationId FROM runs WHERE requestId=?').get(requestId);
-    const conversation=known?this.store.conversation(String(known.conversationId))!:this.projects.newConversation(job.projectId);
+    const conversation=known?this.store.conversation(String(known.conversationId),true)!:this.projects.newConversation(job.projectId);
     const run=this.store.enqueue(conversation.id,prompt,requestId,'user',parentRunId,{...effectiveOptions,taskType:'scheduled'});
     this.store.transaction(()=>{
       this.store.db.prepare('INSERT OR IGNORE INTO job_runs(jobId,runId,scheduledFor) VALUES(?,?,?)').run(job.id,run.id,key);

@@ -33,6 +33,7 @@ export class Brain {
   private connectors?:ConnectorService;
   private platformTools:Record<string,(raw:any,context:ToolContext)=>unknown|Promise<unknown>>={};
   private secretGuard?:(value:unknown)=>void;
+  private taskContext?:()=>Array<{id:string;status:string;summary:string}>;
   private skillOperations=new Map<string,Promise<unknown>>();
   private publishArtifact?: (input:{path:string;filename?:string})=>Promise<unknown>;
   constructor(private db: DatabaseSync, private stateDir: string) {
@@ -57,6 +58,7 @@ export class Brain {
   setManaged(managed:ManagedService,connectors:ConnectorService){this.managed=managed;this.connectors=connectors;}
   setPlatformTools(tools:Record<string,(raw:any,context:ToolContext)=>unknown|Promise<unknown>>){this.platformTools=tools;}
   setSecretGuard(guard:(value:unknown)=>void){this.secretGuard=guard;}
+  setTaskContext(load:()=>Array<{id:string;status:string;summary:string}>){this.taskContext=load;}
   setArtifactPublisher(publish:(input:{path:string;filename?:string})=>Promise<unknown>){this.publishArtifact=publish;}
   projectContext(conversationId:string){return this.projects?.contextForConversation(conversationId)??'';}
   async ensureFoundation(){
@@ -112,7 +114,8 @@ export class Brain {
   }
   bootstrap(){
     let work:Array<Record<string,any>>=[];
-    if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").get())work=this.db.prepare("SELECT id,status,summary FROM runs WHERE status IN ('queued','running','waiting','waiting_for_input') OR summary<>'' ORDER BY createdAt DESC LIMIT 6").all() as Array<Record<string,any>>;
+    if(this.taskContext)work=this.taskContext();
+    else if(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").get())work=this.db.prepare("SELECT id,status,summary FROM runs WHERE status IN ('queued','running','waiting','waiting_for_input') OR summary<>'' ORDER BY createdAt DESC LIMIT 6").all() as Array<Record<string,any>>;
     const catalogue=this.skills.list().filter(s=>s.state==='active').slice(0,20).map(s=>`${s.name} v${s.activeVersion}: ${s.description.slice(0,160)}`).join('\n').slice(0,3000);
     return [
       'You are the administrator’s durable VPS AI operator. Execute the requested work using real tools with the worker’s actual privileges. Report unavailable capabilities accurately.',

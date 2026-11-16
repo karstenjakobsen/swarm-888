@@ -12,6 +12,8 @@ import { ProjectStore } from './projects/store.ts';
 import { ManagedStore } from './managed/store.ts';
 import { ConnectorStore } from './connectors/store.ts';
 
+const failure=(message:string,statusCode=400)=>Object.assign(new Error(message),{statusCode});
+
 export class Store extends EventEmitter {
   db: DatabaseSync;
   projects: ProjectStore;
@@ -24,7 +26,7 @@ export class Store extends EventEmitter {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;');
     this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS fts_capability_check USING fts5(content); DROP TABLE fts_capability_check;');
     this.db.exec('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
-    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql'].entries()){
+    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql','009-conversation-deletion.sql'].entries()){
       if(this.db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(index+1))continue;
       this.transaction(()=>{this.db.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));this.db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(index+1,new Date().toISOString());});
     }
@@ -51,11 +53,36 @@ export class Store extends EventEmitter {
     const row=this.db.prepare("SELECT data FROM events WHERE runId=? AND type='activity' AND json_extract(data,'$.method')='thread/tokenUsage/updated' ORDER BY seq DESC LIMIT 1").get(runId) as {data:string}|undefined;
     return row?JSON.parse(row.data).tokenUsage:undefined;
   }
-  conversations():Conversation[] {return this.db.prepare('SELECT * FROM conversations ORDER BY updatedAt DESC').all() as unknown as Conversation[];}
-  conversation(id:string):Conversation|undefined {return this.db.prepare('SELECT * FROM conversations WHERE id=?').get(id) as unknown as Conversation|undefined;}
+  conversations():Conversation[] {return this.db.prepare('SELECT id,title,threadId,createdAt,updatedAt FROM conversations WHERE deletedAt IS NULL ORDER BY updatedAt DESC').all() as unknown as Conversation[];}
+  conversation(id:string,includeDeleted=false):Conversation|undefined {return this.db.prepare(`SELECT id,title,threadId,createdAt,updatedAt FROM conversations WHERE id=?${includeDeleted?'':' AND deletedAt IS NULL'}`).get(id) as unknown as Conversation|undefined;}
+  recentWork():Array<{id:string;status:string;summary:string}> {
+    return this.db.prepare("SELECT r.id,r.status,r.summary FROM runs r JOIN conversations c ON c.id=r.conversationId WHERE c.deletedAt IS NULL AND (r.status IN ('queued','running','waiting','waiting_for_input') OR r.summary<>'') ORDER BY r.createdAt DESC LIMIT 6").all() as Array<{id:string;status:string;summary:string}>;
+  }
+  /** Remove the workspace entry without discarding the execution ledger needed for replay. */
+  removeConversation(id:string,inFlightRunIds:readonly string[]=[]):{ok:true} {
+    const event=this.transaction(()=>{
+      const conversation=this.db.prepare('SELECT deletedAt FROM conversations WHERE id=?').get(id);
+      if(!conversation)throw failure('Conversation not found',404);
+      if(conversation.deletedAt)return;
+      const related=`WITH RECURSIVE related(id) AS (
+        SELECT id FROM runs WHERE conversationId=?
+        UNION SELECT r.id FROM runs r JOIN related parent ON r.parentRunId=parent.id
+        UNION SELECT r.parentRunId FROM runs r JOIN related child ON r.id=child.id WHERE r.parentRunId IS NOT NULL
+      )`;
+      if(this.db.prepare(`${related} SELECT 1 FROM runs r JOIN related t ON t.id=r.id WHERE r.status IN ('queued','running','waiting','uncertain') LIMIT 1`).get(id))throw failure('Finish or reconcile queued, active, or related tasks before deleting this conversation.',409);
+      if(inFlightRunIds.length&&this.db.prepare(`${related} SELECT 1 FROM related t JOIN json_each(?) pending ON pending.value=t.id LIMIT 1`).get(id,JSON.stringify(inFlightRunIds)))throw failure('Wait for this conversation’s tool operations to finish before deleting it.',409);
+      if(this.db.prepare(`${related} SELECT 1 FROM source_finalizations sf JOIN related t ON t.id=sf.runId WHERE sf.state='pending' LIMIT 1`).get(id))throw failure('Finish pending source commits before deleting this conversation.',409);
+      if(this.db.prepare(`${related} SELECT 1 FROM project_leases lease JOIN related t ON t.id=lease.runId LIMIT 1`).get(id))throw failure('Resolve the project execution lease before deleting this conversation.',409);
+      const now=new Date().toISOString();
+      this.db.prepare('UPDATE conversations SET deletedAt=?,updatedAt=? WHERE id=?').run(now,now,id);
+      return this.eventRow('conversation_deleted',{conversationId:id});
+    });
+    if(event)this.emit('event',event);
+    return {ok:true};
+  }
   newConversation(title='New conversation'):Conversation {
     const now=new Date().toISOString();const c={id:randomUUID(),title,threadId:null,createdAt:now,updatedAt:now};
-    this.db.prepare('INSERT INTO conversations VALUES (?,?,?,?,?)').run(c.id,c.title,null,now,now);return c;
+    this.db.prepare('INSERT INTO conversations(id,title,threadId,createdAt,updatedAt) VALUES (?,?,?,?,?)').run(c.id,c.title,null,now,now);return c;
   }
   run(id:string):Run|undefined {const row=this.db.prepare('SELECT * FROM runs WHERE id=?').get(id);return row?storedRun(row):undefined;}
   runs(conversationId?:string):Run[] {return (conversationId?this.db.prepare('SELECT * FROM runs WHERE conversationId=? ORDER BY createdAt').all(conversationId):this.db.prepare('SELECT * FROM runs ORDER BY createdAt').all()).map(storedRun);}
@@ -69,6 +96,7 @@ export class Store extends EventEmitter {
   claim(id:string,worker:{id:string;model?:string|null;effort?:string|null},health:{journalId?:string;uid:number;runtime:{model?:string}},connectionIds:string[]=[]):Run {
     const event=this.transaction(()=>{
       const run=this.run(id);if(!run||run.status!=='queued')throw new Error('The task is no longer queued');
+      if(!this.conversation(run.conversationId))throw failure('Conversation not found',404);
       const project=this.projects.forConversation(run.conversationId),lease=project?this.db.prepare('SELECT runId FROM project_leases WHERE projectId=?').get(project.id):undefined;
       if(lease&&lease.runId!==run.id)throw new Error('Another task owns this project until execution and source finalization finish');
       const now=new Date().toISOString(),attemptId=randomUUID(),token=randomUUID(),journalId=health.journalId??'legacy',model=health.runtime.model??worker.model??null;
@@ -91,7 +119,7 @@ export class Store extends EventEmitter {
         const sameOptions=prior.connectionScope===(parsed.requiredConnectorIds===undefined?'project':'explicit')&&prior.timeoutMs===(parsed.timeoutMs??600000)&&prior.maxToolCalls===(parsed.maxToolCalls??32)&&prior.maxContextChars===(parsed.maxContextChars??32000)&&prior.maxOutputChars===(parsed.maxOutputChars??64000)&&prior.taskType===(options.taskType??(kind==='improvement'?'improvement':'interactive'));
         if(!sameOptions||prior.conversationId!==conversationId||prior.prompt!==prompt||prior.kind!==kind||prior.parentRunId!==parentRunId||prior.workerId!==(parsed.workerId??null)||Boolean(prior.requiredRoot)!==Boolean(parsed.requiredRoot)||JSON.stringify(prior.requiredConnectorIds)!==JSON.stringify(parsed.requiredConnectorIds??[]))throw new Error('Request ID already used with different input');return prior;
       }
-    if(!this.conversation(conversationId))throw new Error('Conversation not found');
+    if(!this.conversation(conversationId))throw failure('Conversation not found',404);
     const id=randomUUID(),now=new Date().toISOString();
     const event=this.transaction(()=>{
       this.db.prepare("INSERT INTO runs(id,conversationId,prompt,status,kind,requestId,parentRunId,createdAt,workerId,requiredRoot,requiredConnectorIds,timeoutMs,maxToolCalls,maxContextChars,maxOutputChars,taskType,connectionScope) VALUES (?,?,?,'queued',?,?,?,?,?,?,?,?,?,?,?,?,?)").run(id,conversationId,prompt,kind,requestId,parentRunId,now,parsed.workerId??null,parsed.requiredRoot?1:0,JSON.stringify(parsed.requiredConnectorIds??[]),parsed.timeoutMs??600000,parsed.maxToolCalls??32,parsed.maxContextChars??32000,parsed.maxOutputChars??64000,options.taskType??(kind==='improvement'?'improvement':'interactive'),parsed.requiredConnectorIds===undefined?'project':'explicit');

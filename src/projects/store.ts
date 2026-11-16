@@ -93,6 +93,7 @@ export class ProjectStore {
   linkConversation(projectId:string,conversationId:string):void {
     this.transaction(()=>{
       if(!this.get(projectId))throw failure('Project not found',404);
+      if(!this.db.prepare('SELECT 1 FROM conversations WHERE id=? AND deletedAt IS NULL').get(conversationId))throw failure('Conversation not found',404);
       const linked=this.db.prepare('SELECT projectId FROM project_conversations WHERE conversationId=?').get(conversationId) as {projectId:string}|undefined;
       if(linked){if(linked.projectId!==projectId)throw failure('Conversation already belongs to another project',409);return;}
       const active=this.db.prepare("SELECT id,attemptId FROM runs WHERE conversationId=? AND status IN ('running','waiting','uncertain') LIMIT 1").get(conversationId);
@@ -115,8 +116,8 @@ export class ProjectStore {
     const checked=components.flatMap(item=>item.observation?[item.observation.checkedAt]:[]).sort();
     const statuses=components.map(item=>item.status);
     const status:ProjectStatus=statuses.includes('failed')?'failed':!statuses.length||statuses.includes('unknown')?'unknown':statuses.includes('stopped')?'stopped':statuses.includes('healthy')?'healthy':statuses.includes('running')?'running':statuses.includes('scheduled')?'scheduled':'ready';
-    const conversationIds=(this.db.prepare('SELECT conversationId FROM project_conversations WHERE projectId=? ORDER BY rowid DESC').all(row.id) as {conversationId:string}[]).map(item=>item.conversationId);
-    const runs=this.db.prepare('SELECT r.* FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? ORDER BY r.createdAt DESC,r.rowid DESC LIMIT 20').all(row.id).map(storedRun);
+    const conversationIds=(this.db.prepare('SELECT pc.conversationId FROM project_conversations pc JOIN conversations c ON c.id=pc.conversationId WHERE pc.projectId=? AND c.deletedAt IS NULL ORDER BY pc.rowid DESC').all(row.id) as {conversationId:string}[]).map(item=>item.conversationId);
+    const runs=this.db.prepare('SELECT r.* FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId JOIN conversations c ON c.id=r.conversationId WHERE pc.projectId=? AND c.deletedAt IS NULL ORDER BY r.createdAt DESC,r.rowid DESC LIMIT 20').all(row.id).map(storedRun);
     const source=this.db.prepare('SELECT source FROM project_sources WHERE projectId=?').get(row.id) as {source:string}|undefined;
     const deployed=this.db.prepare('SELECT commitSha,releaseDirectory,unitName,status,detail,checkedAt FROM project_deployments WHERE projectId=?').get(row.id) as ({commitSha:string}&Omit<ProjectDeployment,'commit'>)|undefined;
     const connectorIds=(this.db.prepare('SELECT connectorId FROM project_connectors WHERE projectId=? ORDER BY connectorId').all(row.id) as {connectorId:string}[]).map(item=>item.connectorId);

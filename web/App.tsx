@@ -35,6 +35,11 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const currentId = useRef<string | null>(null);
+  const conversationRows = useRef<Conversation[]>([]);
+  const removedConversations = useRef(new Set<string>());
+  const conversationListRequest = useRef(0), conversationDetailRequest = useRef(0);
+  const deletingConversation = useRef<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
@@ -49,6 +54,7 @@ export default function App() {
   const unsavedSource = useRef(false);
   const reportUnsavedSource = useCallback((dirty: boolean) => { unsavedSource.current = dirty; }, []);
   const canNavigate = () => {
+    if (deletingConversation.current) return false;
     if (!unsavedSource.current) return true;
     return window.confirm('Discard unsaved source edits and leave this editor?');
   };
@@ -86,18 +92,38 @@ export default function App() {
     setStatus(value);
   }, []);
   const refreshConversations = useCallback(async () => {
+    const request = ++conversationListRequest.current;
     const value = await api<Conversation[]>('/conversations');
-    setConversations(asList(value));
+    if (request !== conversationListRequest.current) return;
+    const rows = asList(value).filter((conversation: Conversation) => !removedConversations.current.has(conversation.id));
+    conversationRows.current = rows; setConversations(rows);
+    if (!currentId.current && rows[0]) { currentId.current = rows[0].id; setConversationId(rows[0].id); }
   }, []);
   const loadConversation = useCallback(async (id: string) => {
-    const value = await api<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`);
+    if (currentId.current !== id || removedConversations.current.has(id)) return;
+    const request = ++conversationDetailRequest.current;
+    try {
+      const value = await api<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`);
+      if (currentId.current === id && request === conversationDetailRequest.current && !removedConversations.current.has(id)) {
+        setDetail(value);
+        setEvents(previous => {
+          const map = new Map(previous.filter(event => !event.conversationId || !removedConversations.current.has(event.conversationId)).map(event => [event.seq, event]));
+          for (const event of value.events || []) if (!event.conversationId || !removedConversations.current.has(event.conversationId)) map.set(event.seq, event);
+          return [...map.values()].sort((a, b) => a.seq - b.seq);
+        });
+      }
+    } catch (cause) { if (currentId.current === id && request === conversationDetailRequest.current && !removedConversations.current.has(id) && deletingConversation.current !== id) throw cause; }
+  }, []);
+  const removeConversationFromWorkspace = useCallback((id: string) => {
+    if (removedConversations.current.has(id)) return;
+    removedConversations.current.add(id);
+    const remaining = conversationRows.current.filter(conversation => conversation.id !== id);
+    conversationRows.current = remaining; setConversations(remaining);
+    setEvents(previous => previous.filter(event => event.conversationId !== id));
     if (currentId.current === id) {
-      setDetail(value);
-      setEvents(previous => {
-        const map = new Map(previous.map(event => [event.seq, event]));
-        for (const event of value.events || []) map.set(event.seq, event);
-        return [...map.values()].sort((a, b) => a.seq - b.seq);
-      });
+      const next = remaining[0]?.id ?? null;
+      currentId.current = next; conversationDetailRequest.current++; setConversationId(next); setDetail(null);
+      setPrompt(''); setPendingRequest(null); setExecutionOptions({ workerId: null, requiredRoot: false }); setMobileOpen(false); setError('');
     }
   }, []);
 
@@ -106,11 +132,8 @@ export default function App() {
     let alive = true;
     const initialize = async () => {
       try {
-        const values = await api<Conversation[]>('/conversations');
+        await refreshConversations();
         if (!alive) return;
-        const rows = asList(values);
-        setConversations(rows);
-        if (!currentId.current && rows[0]) { currentId.current = rows[0].id; setConversationId(rows[0].id); }
         await refreshStatus();
       } catch (cause: any) { if (alive) setError(cause.message); }
     };
@@ -124,6 +147,8 @@ export default function App() {
       try { value = JSON.parse((event as MessageEvent).data); } catch { return; }
       if (typeof value.seq !== 'number' || value.seq <= cursor.current) return;
       cursor.current = value.seq;
+      if (value.type === 'conversation_deleted' && typeof value.data?.conversationId === 'string') { removeConversationFromWorkspace(value.data.conversationId); return; }
+      if (value.conversationId && removedConversations.current.has(value.conversationId)) return;
       setEvents(previous => previous.some(item => item.seq === value.seq) ? previous : [...previous, value]);
       if (value.type === 'run' || value.type === 'completed' || value.type === 'thread' || value.type === 'clarification') {
         void refreshStatus().catch(() => {});
@@ -139,7 +164,7 @@ export default function App() {
       try { const value = JSON.parse((event as MessageEvent).data); if ('worker' in value) setStatus(value); } catch { /* reconnection will refresh state */ }
     });
     return () => { alive = false; source.close(); window.clearInterval(interval); setStreamConnected(false); };
-  }, [authenticated, loadConversation, refreshConversations, refreshStatus]);
+  }, [authenticated, loadConversation, refreshConversations, refreshStatus, removeConversationFromWorkspace]);
 
   useEffect(() => {
     currentId.current = conversationId;
@@ -148,19 +173,34 @@ export default function App() {
   }, [conversationId, authenticated, loadConversation]);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [detail?.messages.length, events.length]);
 
-  const selectConversation = (id: string, discardConfirmed = false) => { if (!discardConfirmed && !canNavigate()) return; setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); setExecutionOptions({ workerId: null, requiredRoot: false }); };
+  const selectConversation = (id: string, discardConfirmed = false) => { if (deletingConversation.current || removedConversations.current.has(id) || !discardConfirmed && !canNavigate()) return; currentId.current = id; setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); setExecutionOptions({ workerId: null, requiredRoot: false }); };
   const newConversation = async () => {
-    if (!canNavigate()) return;
+    if (busy || !canNavigate()) return;
     setBusy(true);
     try {
       const value = await post<Conversation>('/conversations', {});
+      if (removedConversations.current.has(value.id)) throw new Error('This conversation was deleted from the workspace. Create a new conversation to continue.');
+      conversationListRequest.current++;
+      conversationRows.current = [value, ...conversationRows.current];
       setConversations(previous => [value, ...previous]);
       selectConversation(value.id, true);
+      void refreshConversations().catch(() => {});
     } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
+  };
+  const deleteConversation = async (conversation: Conversation) => {
+    if (busy || deletingConversation.current || removedConversations.current.has(conversation.id)) return;
+    if (!window.confirm(`Delete "${conversation.title || 'Untitled conversation'}" from your workspace?\n\nRecovery and execution records, saved memory, projects, files, and running services are kept.${currentId.current === conversation.id && prompt.trim() ? '\n\nThe unsent draft in this conversation will be discarded.' : ''}`)) return;
+    deletingConversation.current = conversation.id; setDeletingId(conversation.id); setError('');
+    try {
+      await api(`/conversations/${encodeURIComponent(conversation.id)}`, { method: 'DELETE' });
+      removeConversationFromWorkspace(conversation.id);
+      void refreshConversations().catch(() => {});
+    } catch (cause: any) { setError(cause.message); setMobileOpen(false); }
+    finally { deletingConversation.current = null; setDeletingId(null); }
   };
   const submitPrompt = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!prompt.trim() || busy || !document.querySelector<HTMLFormElement>('form.composer')?.reportValidity()) return;
+    if (!prompt.trim() || busy || deletingConversation.current || !document.querySelector<HTMLFormElement>('form.composer')?.reportValidity()) return;
     setBusy(true); setError('');
     let id = conversationId;
     const request = pendingRequest?.prompt === prompt.trim() && JSON.stringify(pendingRequest.options) === JSON.stringify(executionOptions) ? pendingRequest : { prompt: prompt.trim(), requestId: crypto.randomUUID(), options: { ...executionOptions } };
@@ -168,8 +208,11 @@ export default function App() {
     try {
       if (!id) {
         const value = await post<Conversation>('/conversations', {});
+        if (removedConversations.current.has(value.id)) throw new Error('This conversation was deleted before the task could be submitted. Create a new conversation to continue.');
         id = value.id;
         currentId.current = id; setConversationId(id);
+        conversationListRequest.current++;
+        conversationRows.current = [value, ...conversationRows.current];
         setConversations(previous => [value, ...previous]);
       }
       await post(`/conversations/${encodeURIComponent(id)}/runs`, { prompt: request.prompt, requestId: request.requestId, ...request.options });
@@ -179,7 +222,15 @@ export default function App() {
     } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
   };
   const openRun = async (id: string) => {
-    try { const run = await api<Run>(`/runs/${encodeURIComponent(id)}`); if (!canNavigate()) return; currentId.current = run.conversationId; selectConversation(run.conversationId, true); await loadConversation(run.conversationId); } catch (cause: any) { setError(cause.message); }
+    try {
+      const run = await api<Run>(`/runs/${encodeURIComponent(id)}`);
+      if (removedConversations.current.has(run.conversationId)) { setError('This conversation has been deleted from the workspace. Execution history is retained for recovery.'); return; }
+      // Retained job/run history can outlive a conversation; verify it before leaving this view.
+      await api<ConversationDetail>(`/conversations/${encodeURIComponent(run.conversationId)}`);
+      if (!canNavigate() || removedConversations.current.has(run.conversationId)) return;
+      selectConversation(run.conversationId, true);
+      await loadConversation(run.conversationId);
+    } catch (cause: any) { setError(cause.message); }
   };
   const runAction = async (runId: string, action: string, body = {}) => {
     try {
@@ -191,7 +242,7 @@ export default function App() {
   const logout = async () => {
     if (!canNavigate()) return;
     setBusy(true);
-    try { await post('/logout'); setAuthenticated(false); setCsrf(''); setDetail(null); setConversations([]); setConversationId(null); currentId.current = null; setEvents([]); cursor.current = 0; } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
+    try { await post('/logout'); setAuthenticated(false); setCsrf(''); setDetail(null); conversationListRequest.current++; conversationDetailRequest.current++; conversationRows.current = []; setConversations([]); setConversationId(null); currentId.current = null; setEvents([]); cursor.current = 0; } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
   };
 
   if (authenticated === null) return <div className="loading-page"><Brand /><span className="muted">Connecting to your workspace…</span></div>;
@@ -248,19 +299,19 @@ export default function App() {
     {mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
     <aside className={`sidebar ${mobileOpen ? 'is-open' : ''}`}>
       <div className="sidebar-brand"><Brand /><span className="edition">LOCAL</span><button className="icon-button mobile-only" aria-label="Close navigation" onClick={() => setMobileOpen(false)}><Icon name="close" /></button></div>
-      <button className="new-conversation" onClick={() => void newConversation()} disabled={busy}><Icon name="plus" /><span>New conversation</span><kbd>+</kbd></button>
+      <button className="new-conversation" onClick={() => void newConversation()} disabled={busy || Boolean(deletingId)}><Icon name="plus" /><span>New conversation</span><kbd>+</kbd></button>
       <div className="nav-label">YOUR WORKSPACE</div>
       <nav className="primary-nav" aria-label="Workspace">
-        {(['chat', 'projects', 'workers', 'jobs', 'connections', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { if (view !== item && !canNavigate()) return; setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'workers' ? 'terminal' : item === 'jobs' ? 'clock' : item === 'connections' ? 'link' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
+        {(['chat', 'projects', 'workers', 'jobs', 'connections', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} disabled={Boolean(deletingId)} onClick={() => { if (view !== item && !canNavigate()) return; setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'workers' ? 'terminal' : item === 'jobs' ? 'clock' : item === 'connections' ? 'link' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
       </nav>
       <div className="conversation-heading"><span className="nav-label">RECENT CONVERSATIONS</span><Icon name="clock" size={13} /></div>
       <div className="conversation-list">
-        {conversations.map(conversation => <button key={conversation.id} className={`conversation-link ${conversation.id === conversationId && view === 'chat' ? 'selected' : ''}`} onClick={() => selectConversation(conversation.id)}><span className="conversation-dot" /><span>{conversation.title || 'Untitled conversation'}</span><Icon name="chevron" size={13} /></button>)}
+        {conversations.map(conversation => <div className="conversation-row" key={conversation.id}><button className={`conversation-link ${conversation.id === conversationId && view === 'chat' ? 'selected' : ''}`} disabled={Boolean(deletingId)} onClick={() => selectConversation(conversation.id)}><span className="conversation-dot" /><span>{conversation.title || 'Untitled conversation'}</span><Icon name="chevron" size={13} /></button><button className="icon-button conversation-delete" aria-label={`Delete conversation "${conversation.title || 'Untitled conversation'}"`} title={queue.some(run => run.conversationId === conversation.id && activeStates.has(run.status)) ? 'Finish or reconcile this conversation’s tasks before deleting it.' : 'Delete conversation'} disabled={busy || Boolean(deletingId) || queue.some(run => run.conversationId === conversation.id && activeStates.has(run.status))} onClick={() => void deleteConversation(conversation)}>{deletingId === conversation.id ? <span className="spinner" /> : <Icon name="trash" size={14} />}</button></div>)}
         {conversations.length === 0 && <p className="sidebar-empty">Your conversations will appear here.</p>}
       </div>
       <div className="sidebar-footer">
         <div className="host-card"><div className={`status-dot ${poolConnected ? 'ok' : ''}`} /><div><strong>{poolMode ? `${readyWorkers.length} workers ready` : connected ? 'Worker connected' : 'Worker disconnected'}</strong><span>{poolMode ? `${workers.length} registered · ${workers.filter(value => value.worker.enabled).length} enabled` : worker ? `${rootWorker ? 'Root mode' : 'Non-root mode'} · UID ${executionUid}` : 'Waiting for local worker'}</span></div><Icon name="terminal" size={17} /></div>
-        <button className="logout" onClick={() => void logout()}><span className="avatar">A</span><span>Administrator<small>Private workspace</small></span><Icon name="logout" size={17} /></button>
+        <button className="logout" disabled={Boolean(deletingId)} onClick={() => void logout()}><span className="avatar">A</span><span>Administrator<small>Private workspace</small></span><Icon name="logout" size={17} /></button>
       </div>
     </aside>
     <main className="main-shell">
@@ -291,10 +342,10 @@ export default function App() {
         </div>
         <div className="composer-wrap">
           {queue.length > 0 && <details className="queue-panel"><summary><Icon name="clock" size={15} /><strong>{queue.length} {queue.length === 1 ? 'task' : 'tasks'}{queuedCount === queue.length ? ' queued' : ''}</strong><span>{queueBlock ? 'Execution paused' : poolMode ? 'One task per worker' : 'One execution at a time'}</span><Icon name="chevron" size={13} /></summary><div>{queue.map((run, index) => <div className="queue-item" key={run.id}><span className="queue-number">{index + 1}</span><button onClick={() => selectConversation(run.conversationId)}>{run.prompt || (run.kind === 'improvement' ? 'Improvement pass' : 'Task')}</button><span className={`task-badge ${run.status}`}>{friendlyStatus(run.status)}</span></div>)}</div></details>}
-          <form className="composer" onSubmit={submitPrompt}><TaskExecutionFields value={executionOptions} onChange={setExecutionOptions} workers={workers} connectors={taskConnectors} disabled={busy} compact /><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
+          <form className="composer" onSubmit={submitPrompt}><TaskExecutionFields value={executionOptions} onChange={setExecutionOptions} workers={workers} connectors={taskConnectors} disabled={busy || Boolean(deletingId)} compact /><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} disabled={Boolean(deletingId)} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || Boolean(deletingId) || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
           <p className="composer-caption">Commands run as the worker’s actual user. <span>Enter to send · Shift + Enter for a new line</span></p>
         </div>
-      </> : view === 'projects' ? <ProjectsPanel workers={workers} navigationPending={busy} onBeforeNavigate={canNavigate} onUnsavedSourceChange={reportUnsavedSource} initialProjectId={projectId} workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id, true); }} onSelectConversation={selectConversation} /> : view === 'workers' ? <WorkersPanel onError={setError} onChanged={refreshStatus} /> : view === 'jobs' ? <JobsPanel onError={setError} onRun={openRun} /> : view === 'connections' ? <ConnectionsPanel initialConnectorId={connectorTarget} authorizationNotice={authorizationNotice} authorizationFailed={authorizationFailed} onError={setError} onProject={id => { setProjectId(id); setView('projects'); }} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
+      </> : view === 'projects' ? <ProjectsPanel workers={workers} navigationPending={busy || Boolean(deletingId)} onBeforeNavigate={canNavigate} onUnsavedSourceChange={reportUnsavedSource} initialProjectId={projectId} workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { if (removedConversations.current.has(conversation.id)) { setError('This conversation has been deleted from the workspace.'); return; } conversationListRequest.current++; conversationRows.current = appendUnique(conversationRows.current, conversation); setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id, true); void refreshConversations().catch(() => {}); }} onSelectConversation={selectConversation} /> : view === 'workers' ? <WorkersPanel onError={setError} onChanged={refreshStatus} /> : view === 'jobs' ? <JobsPanel onError={setError} onRun={openRun} /> : view === 'connections' ? <ConnectionsPanel initialConnectorId={connectorTarget} authorizationNotice={authorizationNotice} authorizationFailed={authorizationFailed} onError={setError} onProject={id => { if (!canNavigate()) return; setProjectId(id); setView('projects'); }} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
     </main>
     <AgentConnection open={agentOpen} onClose={() => setAgentOpen(false)} worker={worker} onStatusChanged={refreshStatus} />
   </div>;

@@ -24,6 +24,7 @@ import { JobService } from './jobs/service.ts';
 import { TaskService } from './tasks/service.ts';
 import { createPlatformTools } from './tasks/tools.ts';
 import { ownWorkerConfig } from './workers/config.ts';
+import { WorkerModelCatalogService } from './workers/models.ts';
 import { registerProjectEnvironmentRoutes } from './projects/environment.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
@@ -36,8 +37,10 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const knownSecrets=[config.ipcToken,config.adminPassword,...Object.entries(process.env).filter(([key])=>/(?:KEY|TOKEN|PASSWORD|SECRET)$/.test(key)).map(([,value])=>value)].filter((value):value is string=>Boolean(value&&value.length>=6));
   const store=new Store(config.stateDir),vault=new CredentialVault(config.stateDir,store.db,knownSecrets),brain=new Brain(store.db,config.stateDir);
   store.setRedactor(value=>vault.redact(value));brain.setSecretGuard(value=>vault.assertSafe(value));
+  brain.setTaskContext(()=>store.recentWork());
   try{await brain.initialize();}catch(error){store.close();await app.close();throw error;}
   const queue=new Queue(config,store,brain,options.client);
+  const workerModels=new WorkerModelCatalogService(config,queue.registry);
   const agentConnection=new AgentConnectionService(config,queue,options.agentClient??options.client);
   const projects=new ProjectService(config,store,queue.client,()=>Boolean(queue.health));
   const receipts=new RuntimeReceipts(store.db,queue.client,config.projectsDir??join(config.stateDir,'projects'),queue.registry);
@@ -61,6 +64,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const toolCalls=new Set<Promise<void>>();
   let closing=false;
   let pendingTools=0;
+  const pendingToolRuns=new Map<string,number>();
   const resourceRequests=new Set<string>();
   const streams=new Set<()=>void>();
   const attempts=new Map<string,{count:number;until:number}>();
@@ -122,6 +126,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   });
   app.post('/api/logout',async(req,reply)=>{const current=session(req);if(current)store.deleteSession(current.hash);reply.header('set-cookie','operator_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0');return {ok:true};});
   app.get('/api/status',async()=>queue.status());
+  app.get('/api/worker-models',async()=>redacted(await workerModels.list()));
   app.get('/api/workers',async()=>{await queue.registry.refreshAll();return queue.workerStatuses();});
   app.post('/api/workers',async req=>{writable();const worker=queue.registry.register(req.body);return queue.registry.status(worker.id);});
   app.patch('/api/workers/:id',async(req:any)=>{writable();queue.registry.update(req.params.id,req.body);return queue.registry.status(req.params.id);});
@@ -181,6 +186,10 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.post('/api/connectors/:id/call',async(req:any)=>{writable();return redacted(await connectors.call(req.params.id,req.body));});
   app.get('/api/conversations',async()=>store.conversations());
   app.post('/api/conversations',async req=>{writable();const body=z.object({title:z.string().trim().min(1).max(150).optional()}).parse(req.body??{});return store.newConversation(body.title);});
+  app.delete('/api/conversations/:id',async(req:any)=>{
+    writable();z.object({}).strict().parse(req.body===undefined?{}:req.body);
+    return store.removeConversation(safeId(req.params.id),[...pendingToolRuns.keys()]);
+  });
   app.get('/api/conversations/:id',async(req:any)=>{
     const id=safeId(req.params.id),conversation=store.conversation(id);if(!conversation)throw fail('Conversation not found',404);
     // Full durable history is paginated internally; the event stream uses the same cursor.
@@ -288,7 +297,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
         if(params.name==='project_connectors'&&Array.isArray(args.connectorIds)&&args.connectorIds.some(id=>!granted.includes(String(id))))throw fail('Project assignments cannot expand the accepted task connection grant',403);
         const charged=store.db.prepare("UPDATE runs SET toolCalls=toolCalls+1 WHERE id=? AND toolCalls<maxToolCalls AND status IN ('running','waiting')").run(run.id);
         if(Number(charged.changes)!==1){void queue.interrupt(run.id).catch(()=>{});throw fail('The task operator-tool call limit was reached',409);}
-        writable();pendingTools++;
+        writable();pendingTools++;pendingToolRuns.set(run.id,(pendingToolRuns.get(run.id)??0)+1);
         try{
           const arguments_=params.name==='memory_write'?memoryInput(params.arguments??{}):params.arguments??{};
           const result=await queue.registry.withWorker(run.assignedWorkerId??'default',()=>brain.callTool(params.name,arguments_,{runId:run.id,conversationId:run.conversationId,workerId:run.assignedWorkerId??'default',attemptId:run.attemptId??undefined}));
@@ -299,7 +308,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
           const historyResult=params.name.startsWith('project_source_')&&result&&typeof result==='object'&&'files' in result?{...result,files:undefined}:result;
           store.addEvent('tool',redacted({name:params.name,result:historyResult}),run.id);
           if(!socket.destroyed)socket.write(JSON.stringify({id,result:redacted(result)})+'\n');
-        }finally{pendingTools--;}
+        }finally{pendingTools--;const remaining=(pendingToolRuns.get(run.id)??1)-1;if(remaining)pendingToolRuns.set(run.id,remaining);else pendingToolRuns.delete(run.id);}
       }catch(error){if(!socket.destroyed)socket.write(JSON.stringify(redacted({id,error:{message:String((error as Error).message)}}))+'\n');}}
     });
     await new Promise<void>((ok,no)=>{bridge!.once('error',no);bridge!.listen(config.bridgeSocket,ok);});

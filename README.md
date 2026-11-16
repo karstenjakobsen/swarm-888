@@ -35,10 +35,12 @@ npm run dev
 
 Open **http://127.0.0.1:5173** (or localhost) and log in with `ADMIN_PASSWORD`.
 
-1. Open **Workers**, register a worker with an ID/name, model ID, optional reasoning effort, and **User** mode.
+1. Open **Workers**, register a worker with an ID/name, choose a model from the dropdown, optionally choose one of its supported reasoning efforts, and select **User** mode.
 2. Choose **Start worker**, or copy its generated command into a terminal. A normal worker requires no sudo. The pinned runtime checks the requested model and effort before becoming ready.
 3. Choose **Sign in**, open the displayed device-code link, and finish ChatGPT authentication. Each named worker has its own profile under `APP_STATE_DIR/workers/<id>/runtime`.
 4. Select a worker in the conversation's execution options, or set a project's default worker. Independent projects can run concurrently; edits to the same project wait for its execution and source commit to finish.
+
+The model dropdown loads public model names and IDs from a connected worker, with its saved Codex catalog available offline. Use **Reload models** to refresh the list. On a fresh installation with no catalog, start the default worker from its card first, then return to registration and reload. New workers confirm model/effort availability when started; each profile may require its own sign-in.
 
 ChatGPT sign-in uses the pinned app-server's supported [device-code authentication](https://developers.openai.com/codex/app-server#auth-endpoints). Device login must be enabled for your account/workspace. The UI receives the transient verification code/link; these are not persisted in history or memory. Named workers are independent; their native conversation threads cannot be resumed through another worker's profile.
 
@@ -177,6 +179,8 @@ The agent has model-callable project registration, preparation, update, and refr
 Only registered resources are inspected. New continuous processes and schedules can use system services/timers or cron; shared host services are not automatically adopted. Existing cron entries can be registered using their project-relative script, five-field expression, and optional timezone. Only exact supported entries are verified; complex shell commands and unavailable cron history/next-run times remain explicitly unknown. Project work can include host-level package installation and reverse-proxy/public-port setup when requested. Operator releases remain the owner’s responsibility under the prompt guardrail. Managed source deployments provide Deploy, Stop and logs; other adopted components retain their observation-only controls. Host-wide discovery and general Run-now/Restart controls remain deferred.
 
 ## Queue, reconnect and interruption
+
+Use the trash button beside a conversation to remove it from the workspace after confirmation. Queued, active or uncertain work, related task-tree work, pending tools, source commits and execution leases must finish or be reconciled first. Removed conversations disappear from the sidebar, project conversation history and future task context. Execution/chat records and native runtime files remain stored for recovery and job deduplication. Saved memory, projects, source/runtime files, artifacts and running services are kept.
 
 One durable queue assigns runs across registered workers. Each worker executes one task at a time; a conversation and project remain serialized, while independent projects may run concurrently. States are queued, running, waiting for input, completed, failed, interrupted and uncertain. Browser disconnects do not stop work. Events commit before broadcasting; SSE event IDs support ordered replay, cursor catch-up and browser deduplication. Worker run IDs make submission idempotent. Each worker's outbox retains unacknowledged events up to 10,000 events/32 MiB, with reserved failure reporting space; saturation stops work instead of dropping execution history. Reconnect drains bounded replay pages before acknowledging durable history. A single structured event is limited to 1 MiB; oversized events fail the run explicitly. Generate large outputs as artifact files.
 

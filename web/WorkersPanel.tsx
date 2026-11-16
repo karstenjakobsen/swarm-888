@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AgentConnection } from '../src/agent-connection-schema';
 import type { WorkerRecord, WorkerStatus } from '../src/workers/schemas';
-import { workerEffort } from '../src/workers/schemas';
+import type { WorkerModelCatalog } from '../src/workers/models-schema';
 import { api, post } from './api';
 import { Icon } from './icons';
 import { managementError } from './management';
 import { workerState } from './workers';
+
+type WorkerDraft = Pick<WorkerRecord, 'id' | 'name' | 'mode' | 'enabled'> & { model: string; effort: NonNullable<WorkerRecord['effort']> | '' };
 
 export function WorkersPanel({ onError, onChanged }: { onError: (message: string) => void; onChanged: () => Promise<void> }) {
   const [workers, setWorkers] = useState<WorkerStatus[]>([]), [selectedId, setSelectedId] = useState<string | null>(null);
@@ -32,16 +34,66 @@ export function WorkersPanel({ onError, onChanged }: { onError: (message: string
 }
 
 function WorkerEditor({ worker, onSave, onCancel, onError }: { worker?: WorkerRecord; onSave: (value: WorkerStatus) => void; onCancel: () => void; onError: (message: string) => void }) {
-  const [draft, setDraft] = useState({ id: worker?.id ?? '', name: worker?.name ?? '', model: worker?.model ?? '', effort: worker?.effort ?? '', mode: worker?.mode ?? 'user', enabled: worker?.enabled ?? true });
+  const [draft, setDraft] = useState<WorkerDraft>({ id: worker?.id ?? '', name: worker?.name ?? '', model: worker?.model ?? '', effort: worker?.effort ?? '', mode: worker?.mode ?? 'user', enabled: worker?.enabled ?? true });
+  const [catalog, setCatalog] = useState<WorkerModelCatalog | null>(null), [loadingModels, setLoadingModels] = useState(!worker), [modelError, setModelError] = useState('');
   const [saving, setSaving] = useState(false); const mounted = useRef(true), pending = useRef(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const modelGeneration = useRef(0);
+  const loadModels = useCallback(async () => {
+    const request = ++modelGeneration.current; setLoadingModels(true); setModelError('');
+    try {
+      const value = await api<WorkerModelCatalog>('/worker-models');
+      if (!mounted.current || request !== modelGeneration.current) return;
+      setCatalog(value);
+      setDraft(previous => {
+        const model = value.models.find(item => item.id === previous.model);
+        return { ...previous, model: model?.id ?? '', effort: model && previous.effort && model.supportedEfforts.includes(previous.effort) ? previous.effort : '' };
+      });
+    } catch (error) { if (mounted.current && request === modelGeneration.current) { setCatalog(null); setModelError(managementError(error)); } }
+    finally { if (mounted.current && request === modelGeneration.current) setLoadingModels(false); }
+  }, []);
+  useEffect(() => { mounted.current = true; if (!worker) void loadModels(); return () => { mounted.current = false; modelGeneration.current++; }; }, [worker, loadModels]);
+  const selectedModel = catalog?.models.find(model => model.id === draft.model);
+  const canSave = Boolean(worker || !loadingModels && selectedModel);
+  const chooseModel = (id: string) => {
+    const model = catalog?.models.find(item => item.id === id);
+    setDraft(previous => ({ ...previous, model: id, effort: model && previous.effort && model.supportedEfforts.includes(previous.effort) ? previous.effort : '' }));
+  };
   const save = async (event: React.FormEvent) => {
-    event.preventDefault(); if (pending.current) return; pending.current = true; setSaving(true);
+    event.preventDefault(); if (pending.current || !canSave) return; pending.current = true; setSaving(true);
     try { const value = worker ? await api<WorkerStatus>(`/workers/${encodeURIComponent(worker.id)}`, { method: 'PATCH', body: JSON.stringify({ name: draft.name, enabled: draft.enabled }) }) : await post<WorkerStatus>('/workers', { id: draft.id, name: draft.name, model: draft.model, mode: draft.mode, enabled: draft.enabled, ...(draft.effort ? { effort: draft.effort } : {}) }); if (mounted.current) onSave(value); }
     catch (error) { if (mounted.current) onError(managementError(error)); }
     finally { pending.current = false; if (mounted.current) setSaving(false); }
   };
-  return <form className="project-editor platform-editor" onSubmit={save}><div className="project-detail-heading"><h2>{worker ? 'Edit worker' : 'Register a worker'}</h2><button className="icon-button" type="button" aria-label="Close worker editor" onClick={onCancel}><Icon name="close" size={16} /></button></div><fieldset disabled={saving} className="plain-fieldset"><label>Worker name<input aria-label="Worker name" value={draft.name} onChange={event => setDraft(previous => ({ ...previous, name: event.target.value }))} required maxLength={120} /></label>{!worker && <><label>Worker ID<input aria-label="Worker ID" value={draft.id} onChange={event => setDraft(previous => ({ ...previous, id: event.target.value }))} required maxLength={64} pattern="[a-z0-9][a-z0-9_-]*" placeholder="research" /></label><label>Model<input aria-label="Worker model" value={draft.model} onChange={event => setDraft(previous => ({ ...previous, model: event.target.value }))} required placeholder="Enter the model ID" /></label><div className="form-row"><label>Reasoning effort<select aria-label="Worker effort" value={draft.effort} onChange={event => setDraft(previous => ({ ...previous, effort: event.target.value as typeof previous.effort }))}><option value="">Model default</option>{workerEffort.options.map(effort => <option key={effort} value={effort}>{effort}</option>)}</select></label><label>Execution mode<select aria-label="Worker mode" value={draft.mode} onChange={event => setDraft(previous => ({ ...previous, mode: event.target.value as 'user' | 'root' }))}><option value="user">User · default</option><option value="root">Root · explicit task grants</option></select></label></div><p className="small-note">Model, effort, and execution mode are pinned to this worker ID. Register another worker to change its startup configuration.</p></>}{worker && <p className="small-note">Startup configuration is pinned: {worker.model || 'runtime default'} · {worker.effort || 'model default effort'} · {worker.mode}. Register another worker to change it.</p>}<label className="checkbox-label"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft(previous => ({ ...previous, enabled: event.target.checked }))} /><span>Worker enabled for task admission</span></label><div className="editor-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : worker ? 'Save worker' : 'Register worker'}</button></div></fieldset></form>;
+  return <form className="project-editor platform-editor" onSubmit={save}>
+    <div className="project-detail-heading"><h2>{worker ? 'Edit worker' : 'Register a worker'}</h2><button className="icon-button" type="button" aria-label="Close worker editor" onClick={onCancel}><Icon name="close" size={16} /></button></div>
+    <fieldset disabled={saving} className="plain-fieldset">
+      <label>Worker name<input aria-label="Worker name" value={draft.name} onChange={event => setDraft(previous => ({ ...previous, name: event.target.value }))} required maxLength={120} /></label>
+      {!worker && <>
+        <label>Worker ID<input aria-label="Worker ID" value={draft.id} onChange={event => setDraft(previous => ({ ...previous, id: event.target.value }))} required maxLength={64} pattern="[a-z0-9][a-z0-9_-]*" placeholder="research" /></label>
+        <label>Model<select aria-label="Worker model" value={draft.model} onChange={event => chooseModel(event.target.value)} disabled={loadingModels || !catalog?.models.length} required>
+          <option value="">{loadingModels ? 'Loading available models…' : catalog?.models.length ? 'Choose a model' : 'No models available'}</option>
+          {catalog?.models.map(model => <option value={model.id} key={model.id}>{model.name} · {model.id}{model.isDefault ? ' · default' : ''}</option>)}
+        </select></label>
+        {loadingModels && <p className="small-note" role="status">Loading available Codex models…</p>}
+        {modelError && <div className="inline-error" role="alert">{modelError}</div>}
+        {!loadingModels && !modelError && !catalog?.models.length && <p className="management-warning" role="status">{catalog?.detail || 'No models are available yet. Start and sign in to a worker, then reload the model list.'}</p>}
+        {!loadingModels && Boolean(catalog?.models.length) && catalog?.detail && <p className="small-note">{catalog.detail}</p>}
+        {selectedModel?.description && <p className="small-note worker-model-description">{selectedModel.description}</p>}
+        <div className="source-actions"><button className="secondary-button" type="button" disabled={loadingModels} onClick={() => void loadModels()}>{loadingModels ? 'Loading models…' : 'Reload models'}</button></div>
+        <div className="form-row">
+          <label>Reasoning effort<select aria-label="Worker effort" value={draft.effort} disabled={loadingModels || !selectedModel} onChange={event => setDraft(previous => ({ ...previous, effort: event.target.value as typeof previous.effort }))}>
+            <option value="">Model default{selectedModel?.defaultEffort ? ` (${selectedModel.defaultEffort})` : ''}</option>
+            {selectedModel?.supportedEfforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+          </select></label>
+          <label>Execution mode<select aria-label="Worker mode" value={draft.mode} onChange={event => setDraft(previous => ({ ...previous, mode: event.target.value as 'user' | 'root' }))}><option value="user">User · default</option><option value="root">Root · explicit task grants</option></select></label>
+        </div>
+        <p className="small-note">Model, effort, and execution mode are pinned to this worker ID. Register another worker to change its startup configuration.</p>
+      </>}
+      {worker && <p className="small-note">Startup configuration is pinned: {worker.model || 'runtime default'} · {worker.effort || 'model default effort'} · {worker.mode}. Register another worker to change it.</p>}
+      <label className="checkbox-label"><input type="checkbox" checked={draft.enabled} onChange={event => setDraft(previous => ({ ...previous, enabled: event.target.checked }))} /><span>Worker enabled for task admission</span></label>
+      <div className="editor-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving || !canSave}>{saving ? 'Saving…' : worker ? 'Save worker' : 'Register worker'}</button></div>
+    </fieldset>
+  </form>;
 }
 
 function WorkerAccess({ status, onChanged, onError }: { status: WorkerStatus; onChanged: () => Promise<void>; onError: (message: string) => void }) {
