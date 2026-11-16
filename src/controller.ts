@@ -45,6 +45,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const toolCalls=new Set<Promise<void>>();
   let closing=false;
   let pendingTools=0;
+  const resourceRequests=new Set<string>();
   const streams=new Set<()=>void>();
   const attempts=new Map<string,{count:number;until:number}>();
   function redacted(value:unknown):any {
@@ -78,6 +79,14 @@ export async function createController(config:Config, options:{client?:WorkerCli
     const current=session(req);if(!current)throw fail('Administrator login required',401);
     if(!['GET','HEAD'].includes(req.method)&&!equal(String(req.headers['x-csrf-token']??''),current.csrf))throw fail('CSRF token is missing or invalid',403);
   });
+  app.addHook('onRoute',route=>{
+    if(!/^\/api\/(projects|connectors)(?:\/|$)/.test(route.url))return;
+    const handler=route.handler;
+    route.handler=async function(req,reply){
+      resourceRequests.add(req.id);
+      try{return await handler.call(this,req,reply);}finally{resourceRequests.delete(req.id);}
+    };
+  });
   app.setErrorHandler((error:any,_req,reply)=>{
     const status=error instanceof z.ZodError?400:(error.statusCode??400);
     reply.code(status).send({error:redacted(error instanceof z.ZodError?error.issues.map(i=>`${i.path.join('.')}: ${i.message}`).join('; '):String(error.message??'Operation failed'))});
@@ -109,6 +118,12 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.post('/api/projects',async req=>{writable();return managed.createProject(req.body);});
   app.get('/api/projects/:id',async(req:any)=>projects.get(req.params.id));
   app.patch('/api/projects/:id',async(req:any)=>{writable();return projects.update(req.params.id,req.body);});
+  app.delete('/api/projects/:id',async(req:any)=>{
+    writable();z.object({}).strict().parse(req.body===undefined?{}:req.body);
+    if([...resourceRequests].some(id=>id!==req.id))throw fail('Wait for other project and connection requests to finish before removing a project.',409);
+    if(pendingTools||store.active()||queue.health?.activeRunId||queue.health?.uncertainRuns?.length||queue.health?.runtimeOperations?.length)throw fail('Finish or reconcile active execution and tool operations before removing a project.',409);
+    return projects.remove(req.params.id);
+  });
   app.post('/api/projects/:id/components',async(req:any)=>{writable();return projects.addComponent(req.params.id,req.body);});
   app.patch('/api/projects/:id/components/:componentId',async(req:any)=>{writable();return projects.updateComponent(req.params.id,req.params.componentId,req.body);});
   app.post('/api/projects/:id/refresh',async(req:any)=>{z.object({}).strict().parse(req.body??{});return managed.refreshProject(req.params.id);});

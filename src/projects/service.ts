@@ -35,6 +35,7 @@ export class ProjectService {
     return this.store.transaction(()=>{const project=this.create(raw);this.store.projects.linkConversation(project.id,conversationId);return this.get(project.id);});
   }
   update(id:string,raw:unknown){this.get(id);return this.store.projects.update(id,projectUpdateInput.parse(raw));}
+  remove(id:string){projectId.parse(id);this.store.projects.remove(id);return {ok:true};}
   addComponent(id:string,raw:unknown){this.get(id);return this.store.projects.writeComponent(id,randomUUID(),componentInput.parse(raw));}
   updateComponent(id:string,componentId:string,raw:unknown){
     this.get(id);projectId.parse(componentId);

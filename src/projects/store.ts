@@ -31,6 +31,24 @@ export class ProjectStore {
     this.db.prepare('UPDATE projects SET name=?,description=?,updatedAt=? WHERE id=?').run(input.name??project.name,input.description??project.description,new Date().toISOString(),id);
     return this.get(id)!;
   }
+  remove(id:string):void {
+    this.transaction(()=>{
+      if(!this.db.prepare('SELECT id FROM projects WHERE id=?').get(id))throw failure('Project not found',404);
+      const affected=`WITH affected_projects(id) AS (
+        SELECT ? UNION SELECT pc.projectId FROM project_connectors pc JOIN connectors c ON c.id=pc.connectorId WHERE c.projectId=?
+      )`;
+      if(this.db.prepare(`${affected} SELECT r.id FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId JOIN affected_projects a ON a.id=pc.projectId WHERE r.status IN ('queued','running','waiting','uncertain') LIMIT 1`).get(id,id))throw failure('Finish or reconcile tasks for this project and projects using its connections before removing it.',409);
+      if(this.db.prepare(`${affected} SELECT sf.runId FROM source_finalizations sf JOIN affected_projects a ON a.id=sf.projectId WHERE sf.state='pending' LIMIT 1`).get(id,id))throw failure('Finish pending source commits before removing this project.',409);
+      // Connector receipts may have no project ID, so every unacknowledged result
+      // must be recovered before registrations can be removed.
+      if(this.db.prepare('SELECT operationId FROM runtime_receipts WHERE acknowledgedAt IS NULL LIMIT 1').get())throw failure('Acknowledge pending runtime result receipts before removing project registrations.',409);
+      this.db.prepare('DELETE FROM project_connectors WHERE projectId=? OR connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id,id);
+      this.db.prepare('DELETE FROM connector_checks WHERE connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id);
+      this.db.prepare('DELETE FROM connectors WHERE projectId=?').run(id);
+      for(const table of ['project_components','project_conversations','project_sources','project_deployments','source_finalizations'])this.db.prepare(`DELETE FROM ${table} WHERE projectId=?`).run(id);
+      this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
+    });
+  }
   component(projectId:string,id:string):ProjectComponent {
     const project=this.get(projectId);if(!project)throw failure('Project not found',404);
     const component=project.components.find(item=>item.id===id);if(!component)throw failure('Project component not found',404);return component;

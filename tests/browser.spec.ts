@@ -724,3 +724,134 @@ test('running runtime operations show queue waiting without offering reconciliat
   await expect(page.getByRole('region', { name: 'Execution recovery' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Reconcile operation/ })).toHaveCount(0);
 });
+
+async function removableProjectsFixture(page: Page) {
+  const base = { description: 'Obsolete registration from an earlier projects directory.', origin: 'adopted', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'running', lastCheckedAt: null, conversationIds: [], runs: [], components: [] };
+  const fixture = { projects: [
+    { ...base, id: '782d9856-df9f-447f-8bb9-b059bb445b12', name: 'Obsolete website', directory: '/srv/previous-projects/obsolete-website' },
+    { ...base, id: '2c8346b6-9dbb-4f86-a80d-d2c7ca1cadbc', name: 'Retained website', directory: '/home/legacy-projects/retained-website' },
+  ], reads: 0 };
+  const status = { worker: null, workerError: 'No worker fixture', maintenance: false, queue: [] };
+  await page.route('**/api/status', route => route.fulfill({ json: status }));
+  await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(status)}\n\n` }));
+  await page.route('**/api/projects', route => { fixture.reads++; return route.fulfill({ json: fixture.projects }); });
+  await page.route('**/api/connectors', route => route.fulfill({ json: [] }));
+  return fixture;
+}
+
+test('project removal confirms metadata-only cleanup outside the current root without a worker', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const fixture = await removableProjectsFixture(page);
+  const removed = fixture.projects[0]!, retained = fixture.projects[1]!;
+  const pending = deferred(); let deletes = 0, confirmation = '';
+  await page.route(`**/api/projects/${removed.id}`, async route => {
+    expect(route.request().method()).toBe('DELETE');
+    deletes++; await pending.promise;
+    fixture.projects = fixture.projects.filter(project => project.id !== removed.id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  try {
+    await login(page);
+    await page.getByRole('button', { name: 'Open navigation' }).click();
+    await page.getByRole('button', { name: 'Projects', exact: true }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Live status is unknown' })).toBeVisible();
+    const remove = page.getByRole('button', { name: 'Remove project', exact: true });
+    await expect(remove).toBeEnabled();
+    page.once('dialog', async dialog => { confirmation = dialog.message(); await dialog.dismiss(); });
+    await remove.click();
+    expect(confirmation).toContain(removed.name); expect(confirmation).toContain(removed.directory);
+    expect(confirmation).toContain('Source and runtime files, Git history, and conversations are kept.');
+    expect(confirmation).toContain('project-owned connection registrations');
+    expect(confirmation).toContain('Their assignments to other projects are also removed.');
+    expect(confirmation).toContain('Existing services keep running.');
+    expect(deletes).toBe(0);
+    await expect(page.locator('.project-list-item')).toHaveCount(2);
+    await expect(page.getByRole('heading', { name: removed.name, exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('remove-project-phone.png'), animations: 'disabled' });
+    const readsBeforeRemoval = fixture.reads;
+    page.once('dialog', dialog => dialog.accept());
+    await remove.click();
+    await expect.poll(() => deletes).toBe(1);
+    await expect(page.getByRole('button', { name: 'Removing project…', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Create project', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Ask operator', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Add source', exact: true })).toBeDisabled();
+    for (const item of await page.locator('.project-list-item').all()) await expect(item).toBeDisabled();
+    pending.resolve();
+    await expect(page.locator('.project-list-item').filter({ hasText: removed.name })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: retained.name, exact: true })).toBeVisible();
+    await expect(page.locator('.project-list-item.selected')).toContainText(retained.name);
+    await expect(page.getByRole('button', { name: 'Remove project', exact: true })).toBeEnabled();
+    await expect.poll(() => fixture.reads).toBeGreaterThan(readsBeforeRemoval);
+    expect(deletes).toBe(1);
+  } finally { pending.resolve(); }
+});
+
+test('project removal protects unsaved source and retains the registration after a backend error', async ({ page }) => {
+  const fixture = await sourceReviewFixture(page);
+  fixture.project.directory = '/srv/previous-projects/source-review';
+  let deletes = 0;
+  await page.route(`**/api/projects/${fixture.project.id}`, route => {
+    expect(route.request().method()).toBe('DELETE'); deletes++;
+    return route.fulfill({ status: 409, json: { error: 'This project has pending work. Resolve it before removing the registration.' } });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const workspace = page.getByRole('region', { name: 'Source and deployment' });
+  await workspace.getByLabel('Source file', { exact: true }).selectOption('server.mjs');
+  await workspace.getByLabel('Source code').fill('export const value = "keep my draft";\n');
+  let warning = '';
+  page.once('dialog', async dialog => { warning = dialog.message(); await dialog.dismiss(); });
+  await page.getByRole('button', { name: 'Remove project', exact: true }).click();
+  expect(warning).toContain('Discard unsaved source edits'); expect(deletes).toBe(0);
+  const confirmations: string[] = [];
+  const accept = async (dialog: import('@playwright/test').Dialog) => { confirmations.push(dialog.message()); await dialog.accept(); };
+  page.on('dialog', accept);
+  await page.getByRole('button', { name: 'Remove project', exact: true }).click();
+  page.off('dialog', accept);
+  await expect(page.getByRole('alert')).toContainText('This project has pending work.');
+  expect(confirmations).toHaveLength(2);
+  expect(confirmations[0]).toContain('Discard unsaved source edits');
+  expect(confirmations[1]).toContain('Existing services keep running.');
+  expect(deletes).toBe(1);
+  await expect(page.locator('.project-list-item.selected')).toContainText(fixture.project.name);
+  await expect(page.getByRole('heading', { name: fixture.project.name, exact: true })).toBeVisible();
+  await expect(workspace.getByLabel('Source code')).toHaveValue('export const value = "keep my draft";\n');
+  await expect(workspace.getByLabel('Source code')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Remove project', exact: true })).toBeEnabled();
+});
+
+test('project removal ignores a stale list response that arrives after deletion', async ({ page }) => {
+  await page.clock.install();
+  const fixture = await removableProjectsFixture(page);
+  const removed = fixture.projects[0]!, retained = fixture.projects[1]!;
+  const stale = deferred(); let captureStale = false, staleStarted = false;
+  await page.route('**/api/projects', async route => {
+    if (captureStale && !staleStarted) {
+      const oldProjects = [...fixture.projects]; staleStarted = true; await stale.promise;
+      return route.fulfill({ json: oldProjects, headers: { 'x-removal-fixture': 'stale' } });
+    }
+    return route.fulfill({ json: fixture.projects });
+  });
+  await page.route(`**/api/projects/${removed.id}`, route => {
+    expect(route.request().method()).toBe('DELETE');
+    fixture.projects = fixture.projects.filter(project => project.id !== removed.id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  try {
+    await login(page);
+    await page.getByRole('button', { name: 'Projects', exact: true }).click();
+    await expect(page.getByRole('heading', { name: removed.name, exact: true })).toBeVisible();
+    captureStale = true;
+    await page.clock.fastForward(15_100);
+    await expect.poll(() => staleStarted).toBe(true);
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: 'Remove project', exact: true }).click();
+    await expect(page.getByRole('heading', { name: retained.name, exact: true })).toBeVisible();
+    const lateResponse = page.waitForResponse(response => response.headers()['x-removal-fixture'] === 'stale');
+    stale.resolve(); await lateResponse; await nextPaint(page);
+    await expect(page.locator('.project-list-item').filter({ hasText: removed.name })).toHaveCount(0);
+    await expect(page.locator('.project-list-item.selected')).toContainText(retained.name);
+  } finally { stale.resolve(); }
+});
