@@ -28,9 +28,9 @@ Generated projects, connectors, and skills belong to this repository for the POC
 
 ## Verification and handoff
 
-Verified on 2026-11-15:
+Verified on 2026-11-16:
 
-- Final review verification: 191 unit/integration tests passed, one optional live-auth test skipped; TypeScript and production build passed; all 26 browser tests passed. No separate lint task is configured. Checks reported no warnings.
+- Final review verification: 198 unit/integration tests passed, one optional live-auth test skipped; TypeScript and production build passed; all 29 browser tests passed. No separate lint task is configured. Checks reported no warnings.
 - Real temporary Git repositories verify automatic scoped commits, preserving owner HEAD/index/staged/unstaged changes, immutable exports, known-credential rejection, and restart-safe source finalization.
 - Real stdio and local HTTP MCP fixtures verify initialization, discovery, calls, response limits, cleanup, and failed requests. The actual pinned Codex app-server discovers and calls a dynamically registered tool without receiving controller/model/bridge credentials in its connector subprocess.
 - Desktop and phone browser checks cover source edits/commits, distinct deployed revisions, deployment/log/stop controls, connector registration/testing/calls, project assignments, and stale/offline status.
@@ -49,6 +49,7 @@ Verified on 2026-11-15:
 - [x] **Receipt gap** — confirmed external outcomes persist in the controller before worker acknowledgement; lost ACK recovery sends only ACK, never the original action; authenticated bounded receipt inspection is available.
 - [x] **Adversarial verification** — real temporary worker SIGKILL during local helpers, stdio and HTTP; failed identity capture cannot execute code; independent processes survive reconciliation; missing/reused identities fail closed; completed-result receipt recovery does not repeat mutations.
 - [x] **Project-root configuration drift** — worker health advertises its projects directory; runtime requests reject root mismatches before effects; connected root workers expose fresh restart commands in the UI. `npm run worker:root` captures normal-user configuration before sudo. Verified idle worker replacement checks process identity and reserves execution; busy or uncertain workers stay running. Existing project paths and source commits are preserved.
+- [x] **Obsolete project removal** — owner-confirmed registry cleanup works offline for missing or outside-root directories, removes project-owned connections and assignments, and preserves conversations, files, Git history, runtime receipts, and running services. Pending work and in-flight resource operations block removal.
 - [x] **Verified-kill cleanup race** — after SIGKILL, cleanup waits for group disappearance without sending another signal after its leader has exited. Persistent survivors still require inspection; timeout errors remain predictable during normal teardown.
 
 The managed Git lock remains deliberately fail-closed after a controller dies while holding it. Verify no source operation is running before the documented lock cleanup; no automatic lock stealing is implemented. No real root service/provider operation was performed by the test suite.
