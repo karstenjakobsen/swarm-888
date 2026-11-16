@@ -1,6 +1,6 @@
 # VPS AI Operator
 
-A development MVP for one administrator on one Linux host. React/Vite talks to a normal-user Fastify controller; a separately launched root worker runs Codex and host commands with actual UID 0. A prompt guardrail reserves operator core source, build, dependencies, configuration, and launch definitions for the owner. Generated packages are explicitly editable in a controller-managed worktree of this same repository. This is an instruction, not filesystem isolation: root retains host access.
+A development MVP for one administrator on one Linux host. React/Vite talks to a normal-user Fastify controller that schedules durable tasks across registered Codex workers. Workers default to the launching user; root is an explicit option. Each named worker has its own startup-selected model, reasoning effort, profile, socket, and journal. A prompt guardrail reserves operator core source, build, dependencies, configuration, and launch definitions for the owner. Generated packages are explicitly editable in a controller-managed worktree of this same repository. This is an instruction, not filesystem isolation: root retains host access.
 
 ## Prerequisites and first start
 
@@ -35,38 +35,38 @@ npm run dev
 
 Open **http://127.0.0.1:5173** (or localhost) and log in with `ADMIN_PASSWORD`.
 
-1. Click **Connect agent** in the top bar.
-2. Click **Start root worker**. The controller attempts a noninteractive sudo launch. If the OS requires your password, run `npm run worker:root` as your normal user in the operator directory, or copy the exact command shown in the panel into your VPS terminal. The UI displays the actual agent execution UID and requires root before sign-in and task dispatch. An older broker that launches a non-root agent must first be stopped and replaced.
-3. Click **Continue with ChatGPT**, copy the displayed one-time code, and open the linked OpenAI sign-in page.
-4. Finish signing in. The panel verifies the account, switches to **Agent connected**, and resumes saved tasks automatically. Refreshing or closing the panel does not cancel sign-in. Cancel, expiry and retry are supported in the same UI.
+1. Open **Workers**, register a worker with an ID/name, model ID, optional reasoning effort, and **User** mode.
+2. Choose **Start worker**, or copy its generated command into a terminal. A normal worker requires no sudo. The pinned runtime checks the requested model and effort before becoming ready.
+3. Choose **Sign in**, open the displayed device-code link, and finish ChatGPT authentication. Each named worker has its own profile under `APP_STATE_DIR/workers/<id>/runtime`.
+4. Select a worker in the conversation's execution options, or set a project's default worker. Independent projects can run concurrently; edits to the same project wait for its execution and source commit to finish.
 
-ChatGPT sign-in uses the pinned app-server's supported [device-code authentication](https://developers.openai.com/codex/app-server#auth-endpoints). Device login must be enabled for your account/workspace. Credentials remain in the application’s dedicated profile at `APP_STATE_DIR/runtime`; the UI receives only the transient verification code/link. Neither credentials nor login codes enter task history or searchable memory. A controller restart can recover a pending login from the surviving worker. The root worker stays running throughout UI sign-in; no terminal authentication or restart is needed.
+ChatGPT sign-in uses the pinned app-server's supported [device-code authentication](https://developers.openai.com/codex/app-server#auth-endpoints). Device login must be enabled for your account/workspace. The UI receives the transient verification code/link; these are not persisted in history or memory. Named workers are independent; their native conversation threads cannot be resumed through another worker's profile.
 
 The web controller and frontend remain normal-user processes. The worker has no public TCP listener. A private, per-session MCP proxy exposes authorized operator tools to the agent without unnecessarily forwarding the master IPC token, administrator password, or controller environment. This credential filtering is not isolation against the root agent. Memory, skills, project registration, and artifact publication go through these tools.
 
-Browser sign-in is the ordinary authentication path. For optional CLI login, stop the worker first and use `npm run auth -- --device-auth`, or pipe an OpenAI API key into `npm run auth`. Authentication uses only `APP_STATE_DIR/runtime`; it does not overwrite `~/.codex`. The key is read from stdin, not command arguments. `npm run auth -- status` checks that dedicated profile. Restart the root worker after a CLI login.
+Browser sign-in in **Workers** is the ordinary authentication path. The legacy default profile remains at `APP_STATE_DIR/runtime`. Optional `npm run auth -- --device-auth`, stdin API-key login, and `npm run auth -- status` address that legacy profile only and do not overwrite `~/.codex`. Stop the default worker before a CLI login, then restart it.
 
 `npm run build` checks TypeScript and builds the frontend into `dist/web`. For a built frontend, set `APP_ORIGINS=http://localhost:3001,http://127.0.0.1:3001` and run `npm run controller`; it serves both the built UI and authenticated API on port 3001.
 
-## Root worker and prompt guardrail
+## Worker identities, startup models, and prompt guardrail
 
-No separate OS account, execution UID/GID, `setpriv`, user-manager configuration, or read-only release setup is required. The worker, Codex, and helper scripts execute as the worker’s actual user: root in the production configuration. The web controller and Vite continue to reject root execution.
+No separate OS account, execution UID/GID, `setpriv`, or user-manager configuration is required. Worker processes, Codex, and helper scripts execute as the launching user. A named worker defaults to **User** mode; choose **Root** explicitly for host operations that require it. The web controller and Vite reject root execution.
 
-Start the controller/UI with `npm run dev` as your normal user. In another terminal in the operator directory, run:
+Start the controller/UI with `npm run dev` as your normal user. **Workers** generates exact user/root launch commands with the pinned Node/loader and registered model. A named worker can also register itself through CLI options (`--id`, `--name`, `--model`, `--effort`). For an explicitly privileged worker, run:
 
 ```sh
 npm run worker:root
 ```
 
-Run this without a `sudo` prefix: it reads your current `.env` and normal-user configuration before requesting sudo itself. Enter your password in that terminal when required. **Connect agent** also provides an exact command containing the current controller's `APP_STATE_DIR`, `APP_CONTROLLER_UID`, `APP_PROJECTS_DIR`, pinned Node/loader, and checkout path. Avoid plain `sudo npm run worker`, which can select root’s home and a different state directory.
+Run this without a `sudo` prefix: it reads your current `.env` and normal-user configuration before requesting sudo itself. Enter your password in that terminal when required. **Workers** provides an exact command containing the current controller's `APP_STATE_DIR`, `APP_CONTROLLER_UID`, `APP_PROJECTS_DIR`, pinned Node/loader, and checkout path. The legacy **Connect agent** dialog remains available for the default worker. Avoid plain `sudo npm run worker`, which can select root’s home and a different state directory.
 
 The bootstrap and project context instruct the agent to leave operator core source, installed build, dependencies, configuration, startup definitions, and update mechanisms alone; requests to change the operator should be reported to the owner for an external release. Assigned generated package source is the explicit exception, edited and committed through source tools. Memory and skills remain editable through their application tools. This is a prompt-only guardrail. No OS protection claim is made, and root can override the instruction.
 
-The UI requires actual agent UID 0, including when an older broker reports a distinct execution UID. Stop an older dedicated-account worker in its terminal and run a fresh root-worker command. Existing `APP_PROTECT_OPERATOR` and `APP_EXECUTION_*` settings are obsolete and ignored; they do not block startup. No existing OS accounts or systemd configuration are removed automatically.
+Root-required tasks and host deployment/stop require actual execution UID 0. Automatic user tasks exclude root workers; selecting a root worker requires a visible root-access grant. Stop an older broker that launches a different execution account before replacing it. Existing `APP_PROTECT_OPERATOR` and `APP_EXECUTION_*` settings are obsolete and ignored; they do not block startup. No existing OS accounts or systemd configuration are removed automatically.
 
-Projects default to `APP_STATE_DIR/projects`, and Codex state remains at `APP_STATE_DIR/runtime`. `APP_PROJECTS_DIR` can select another absolute persistent directory. Explicit directory overrides are retained; existing projects continue to require their registered paths. The root worker prepares new project workspaces, so the default layout needs no separate directory provisioning.
+Projects default to `APP_STATE_DIR/projects`. Legacy Codex state remains at `APP_STATE_DIR/runtime`; named state lives under `APP_STATE_DIR/workers/<id>`. `APP_PROJECTS_DIR` can select another absolute persistent directory. Explicit directory overrides are retained; existing projects continue to require their registered paths. The assigned worker prepares project workspaces using its actual permissions.
 
-After changing `APP_PROJECTS_DIR`, restart `npm run dev`, then run `npm run worker:root` or use **Restart root worker** in **Connect agent**. The running worker retains its startup configuration, and Node's explicit launch environment takes precedence over `.env`. A fresh launcher can replace a mismatched idle worker after verifying its process identity and reserving execution; busy or uncertain workers must finish or be reconciled first. Older workers without replacement support require stopping in their terminal. Matching workers are reused, and saved ChatGPT sign-in is retained. Registered project paths are retained rather than moved automatically.
+After changing `APP_PROJECTS_DIR`, restart `npm run dev`, stop each old worker, and use its current command from **Workers**. The running worker retains its startup configuration, and Node's explicit launch environment takes precedence over `.env`. For the legacy root worker, `npm run worker:root` can replace a mismatched idle process after verifying its identity and reserving execution; busy or uncertain workers must finish or be reconciled first. Older workers without replacement support require stopping in their terminal. Matching workers are reused, and saved ChatGPT sign-in is retained. Registered project paths are retained rather than moved automatically.
 
 From your laptop, forward the loopback Vite port:
 
@@ -78,12 +78,43 @@ Then open http://localhost:5173 or http://127.0.0.1:5173 locally. Vite proxies `
 
 ## Durable state, memory and skills
 
+### Worker pool, delegation, and recurring jobs
+
+Register multiple named workers in **Workers**. Model/effort/mode are pinned to that worker ID; register a new ID to change its startup configuration. Rename, disable, and drain are metadata changes. Draining finishes accepted work while refusing new tasks. Launch commands preserve the controller state/project paths before sudo; user-mode commands contain no sudo. The legacy default worker remains available for existing installations.
+
+Tasks record requested and assigned worker, effective model, effort, attempt ID, execution limits, blocked reason, token usage when reported, and parent lineage. Initial prompt/context characters, assistant output, observed tool calls and elapsed execution time have configurable limits; these are not a hard monetary or total cached-context token cap. Prompts reserve 1,000 characters for bootstrap context; intrinsically oversized manual/delegated/job/event inputs reject before creating queued work. Scheduled/delegated tasks use fresh conversations and bounded context. Automatic improvement tasks retain the accepted connection/privilege grant and stay within the parent limits. Actual provider/account limits still apply.
+
+Worker events, receipt ACKs, clarifications, interruptions and native threads are scoped to their worker/journal owner. A lost heartbeat or changed journal leaves execution uncertain; work is not automatically duplicated elsewhere. Same-project write leases last through source finalization. Other projects may continue independently. Git commits remain serialized in the controller-owned worktree.
+
+The operator tools include `worker_list`, `task_create/get/list/cancel`, and `job_list/create/update/trigger`. Children inherit only the accepted connections/root grant and bounded execution limits; task trees have depth and count limits. Assigning same-project children is asynchronous: finish the parent so its project lease can be released. Child results remain visible in their own linked conversations.
+
+**Jobs** stores interval/cron schedules, worker choice, project, task template, connection scope and execution limits. Pause/resume, run once and history are available. Cron uses five fields and an IANA timezone. A delayed controller admits one due occurrence, skips an overlapping prior queued/running/uncertain run, and records the reason. Schedule errors disable only the affected job. Repeated event IDs do not create duplicate analysis runs.
+
+An owner can generate a job-specific event token in **Jobs**. The value is shown once and is also saved as an encrypted credential for use by a deployed collector. POST `{eventId,input}` to the displayed `/api/job-events/<id>` endpoint with `Authorization: Bearer <token>`; the token grants only that job's fixed template, not administrator access. Regeneration revokes the previous token. Event data is bounded, stored as reference data, and cannot change worker/privilege grants. Keep tokens out of source and prompts.
+
+### Credentials and project services
+
+**Connections → Credentials** accepts write-only secret values and shows metadata/revisions afterward. Secrets are AES-GCM encrypted beneath `APP_STATE_DIR/secrets` with a private local key; this is application-level protection, not isolation against the same OS user or root. Bind only the needed fields to HTTP headers/bearer auth or a selected stdio child's environment. Owner grants are specific to a connection or project; model tools cannot attach an existing credential to another destination.
+
+Generic OAuth uses authorization-code flow with PKCE, one-use state and a separate session-bound callback nonce. Configure standard POST or provider-specific GET token exchange and token response field mappings. Credentials refresh before dispatch; automatic token rotation preserves tested configuration. Failed/expired authorization blocks dependent tasks until repaired. Token expiry during an already running native MCP session can still require the next task/snapshot. Configure a public callback origin/URI accepted by the provider for hosted use.
+
+Required connections must be enabled, successfully tested at their current configuration, and authorized before a task is dispatched. **Inherit project connections** captures the enabled assignment at acceptance; **Select connections** is explicit, and an empty selection grants none. Later project changes do not broaden an active task. Jobs can switch back to inheritance by clearing their explicit selection.
+
+Managed projects have a **Runtime credentials** form. It stores credential/field references only. Selected values are injected into the deployed service, never build/check commands or the model's environment. Private launch descriptors contain references and literal arguments; a supervisor redacts selected credentials from service stdout/stderr before journal delivery. Saving/clearing bindings does not restart a service; explicitly redeploy/restart to apply changes. Managed systemd installation and stop remain privileged host operations using a root worker.
+
+Known credential values are rejected from new task inputs, source and owner instructions and redacted from stored execution context/results. Source-created skills commit `SKILL.md`, helpers and checks under `generated/skills/<id>` and pin each validated immutable runtime version to its exact source revision.
+
+Legacy `brain:export/restore` intentionally rejects named-worker/project layouts. For the expanded platform, stop the controller/workers and back up complete operator state (including encrypted credentials and their local key), the source repository/worktrees, and project runtime roots together. No provider-specific trading code, brokerage connection or real order execution is included in this platform release.
+
+For a later analysis application, use a stronger worker to create the project, connector and checked skill through the operator. Keep market-data collection, candle aggregation, indicators and freshness checks in ordinary project code. A collector can trigger one bounded job when new data is ready; the selected small-model worker receives a prepared snapshot and returns a validated observation such as LONG, SHORT or WAIT with supporting data. Store those observations in the project and inspect task/job history in the UI. Evaluate model quality and token usage before selecting a cheaper model. Order execution, position sizing and risk limits belong in separately tested project code with their own authorization; an analysis connector need not expose order tools.
+
 Durable data and project files live beneath `APP_STATE_DIR` by default. Set `APP_PROJECTS_DIR` to keep projects elsewhere:
 
 | Path | Contents |
 | --- | --- |
-| `operator.sqlite` | Projects/components, linked conversations, messages, queue, events, web sessions, memory/revisions, skill metadata/evidence |
+| `operator.sqlite` | Projects/components, workers, task attempts/leases, jobs/history, credential metadata, conversations, events, web sessions, memory and skill metadata/evidence |
 | `runtime/` | Dedicated Codex profile and native thread/session files |
+| `workers/<id>/` | Named worker manifest, private socket, lock, journal and native runtime profile |
 | `skills/staging/` | Candidate revisions and declared deterministic checks |
 | `skills/packages/NAME/vN/` | Published immutable version contents |
 | `skills/active/` | Recoverable active-version symlinks |
@@ -92,12 +123,13 @@ Durable data and project files live beneath `APP_STATE_DIR` by default. Set `APP
 | `artifacts/` | Generated files available through authenticated download routes |
 | `worker/journal.sqlite` | Worker acceptance ledger and bounded unacknowledged event outbox |
 | `secrets/ipc-token` | Local IPC credential, excluded from searchable memory |
+| `secrets/` | Private credential encryption key and encrypted secret material; never commit or publish |
 
 Rebuilding the frontend preserves controller state and project workspaces. The worker repairs ownership of its normal in-state runtime/workspace/artifact/journal/project data for controller maintenance. The root agent can access and modify host data; filesystem permissions here protect against unrelated normal users, not the agent itself.
 
 The agent receives a bounded bootstrap with purpose, explicit owner instructions, recent checkpoints, memory procedures and a small skill catalogue. Detailed memory and skill bodies load on demand. Memory records retain stable IDs, provenance, fact/observation/inference kind, tags/project/category, checked timestamps, links, revisions and supersession. SQLite FTS5 indexes update transactionally. The Memory screen can search, inspect revisions, edit entries and set standing instructions.
 
-The configured `operator` **stdio MCP server** exposes real `memory_*`, `progress_checkpoint`, `skill_*`, `project_*`, and `artifact_publish` tools. The MCP process forwards authenticated calls to the controller; it does not open the application database as root. Tool results return to the same calling turn. The browser's skill controls act on the same service.
+The configured `operator` **stdio MCP server** exposes real `memory_*`, `progress_checkpoint`, `skill_*`, `project_*`, `connector_*`, `worker_list`, `task_*`, `job_*`, and `artifact_publish` tools. The MCP process forwards authenticated calls to the controller; it does not open the application database as root. Tool results return to the same calling turn. The browser's skill controls act on the same service.
 
 Skill creation requires `SKILL.md` metadata, declared files, and deterministic checks asserting stdout or output files. The controller validates structure; the worker executes helpers against fresh temporary fixtures and records UID, output, duration and pass/fail evidence. Validation must succeed and the package digest must still match before publication. Versions are preserved; activation, disable, retirement and rollback update the active pointer. A crash between rename and metadata update is reconciled on startup. Per-run `.agents/skills` links point to immutable versions; the adapter verifies actual Codex `skills/list` discovery before the turn. Availability records and reported outcomes are separate from claims that a skill caused a result.
 
@@ -117,11 +149,11 @@ Creating source and saving files commits immediately. Editor saves carry their l
 
 **Source & deployment** in Projects displays source and deployed commits separately. **Deploy committed source** exports that exact revision into `<project-runtime>/releases/<commit>`, runs declared checks/builds, and asks the root worker to install and enable `vps-ai-project-<id>.service`. Deployment requires systemd. Failed checks leave the previous service unchanged; failures after a service-manager mutation require inspecting status/logs before retrying. **Stop service** disables and stops that unit; source, release files, and application data are retained. Services run independently of the chat and worker process. Source files are checked against the committed snapshot after checks/builds; write build output into separate output files rather than modifying committed inputs.
 
-**Connections** registers stdio commands or HTTP MCP endpoints, tests initialization/tool discovery, enables/disables them, and offers a JSON tool-call form. **Create local example** generates and commits a deterministic echo connector. Managed stdio connectors execute from a checked committed runtime snapshot; source changes invalidate the previous tool test. HTTP connections support JSON/SSE Streamable HTTP with bounded requests, responses and deadlines. This slice supports unauthenticated endpoints; URLs cannot include credentials, query parameters or fragments. Provider credential forms/OAuth and Git-backed application skill publication are slices 5–6, not part of this delivery.
+**Connections** registers stdio commands or HTTP MCP endpoints, tests initialization/tool discovery, enables/disables them, and offers a JSON tool-call form. **Create local example** generates and commits a deterministic echo connector. Managed stdio connectors execute from a checked committed runtime snapshot; source changes invalidate the previous tool test. HTTP connections support JSON/SSE Streamable HTTP with bounded requests, responses and deadlines. Connections support owner-configured bearer/custom headers, selected stdio environment fields, and generic OAuth authorization/refresh. URLs cannot include credentials, query parameters or fragments. Secret values belong in the credential forms, never source, command arguments or chat.
 
 Assign up to 20 enabled connections in a project's **Connections** section. Their tools receive unique MCP namespaces at the next model task start; active tasks keep their original configuration. The original operator MCP bridge retains its per-run authorization. Generic chat can create/register connectors using `project_source_*` and `connector_*` tools. Connection tests report last-tested results; they do not imply an always-open connection. A timed-out tool may have caused side effects and is never automatically repeated.
 
-To test locally after restarting the controller and root worker:
+To test locally after restarting the controller and the chosen worker:
 
 1. Open **Connections → Create local example → Test connection**. Select `echo`, enter `{"text":"hello from the operator"}`, and call it. The result should contain that text, and the connector's source should show a Git commit.
 2. Open **Projects → Create project**, use the Node service template, edit a source file, and **Save & commit**. Confirm the new source revision while the deployed revision remains unchanged.
@@ -146,9 +178,9 @@ Only registered resources are inspected. New continuous processes and schedules 
 
 ## Queue, reconnect and interruption
 
-One durable queue serializes runs across all conversations. States are queued, running, waiting for input, completed, failed, interrupted and uncertain. Browser disconnects do not stop work. Events commit before broadcasting; SSE event IDs support ordered replay, cursor catch-up and browser deduplication. Worker run IDs make submission idempotent. Its outbox retains unacknowledged events up to 10,000 events/32 MiB, with reserved failure reporting space; saturation stops work instead of dropping execution history. Reconnect drains bounded replay pages before acknowledging durable history. A single structured event is limited to 1 MiB; oversized events fail the run explicitly. Generate large outputs as artifact files.
+One durable queue assigns runs across registered workers. Each worker executes one task at a time; a conversation and project remain serialized, while independent projects may run concurrently. States are queued, running, waiting for input, completed, failed, interrupted and uncertain. Browser disconnects do not stop work. Events commit before broadcasting; SSE event IDs support ordered replay, cursor catch-up and browser deduplication. Worker run IDs make submission idempotent. Each worker's outbox retains unacknowledged events up to 10,000 events/32 MiB, with reserved failure reporting space; saturation stops work instead of dropping execution history. Reconnect drains bounded replay pages before acknowledging durable history. A single structured event is limited to 1 MiB; oversized events fail the run explicitly. Generate large outputs as artifact files.
 
-A controller restart reconciles the ledger and reattaches to the surviving worker. A **worker** crash loses its stdio connection to Codex, so that run is marked uncertain rather than restarted. New work stays blocked until owned orphan execution is resolved. Inspect the host and affected external services, then use the UI's reconciliation control; it verifies/terminates recorded owned process groups before admitting another run. A run that never reached worker acceptance can also be explicitly acknowledged as reconciled. No uncertain shell action is automatically repeated.
+A controller restart reconciles each worker's ledger and reattaches to surviving workers. A **worker** crash loses its stdio connection to Codex, so that run is marked uncertain rather than restarted. Its worker and project stay blocked until owned orphan execution is resolved; independent workers/projects may continue. Inspect the host and affected external services, then use the UI's reconciliation control; it verifies/terminates recorded owned process groups before admitting another run. A run that never reached worker acceptance can also be explicitly acknowledged as reconciled. No uncertain shell action is automatically repeated.
 
 Interrupt requests reach `turn/interrupt`; the UI waits for the observed outcome. Worker shutdown terminates its owned runtime group. Deliberately detached applications/services with their own process session can continue independently; the agent is instructed to identify these. Browser, agent and application lifetimes are separate.
 
@@ -156,7 +188,7 @@ Artifact downloads require an administrator session and stay within the canonica
 
 ## Snapshot and restore
 
-The existing brain snapshot format supports only the legacy in-state layout. Custom external runtime profiles, external project workspaces, and registered-project snapshots are rejected explicitly: the old archive cannot safely capture and restore those directories. Back up those deployments through an owner-controlled procedure; this release does not silently omit them.
+The existing brain snapshot format supports only the legacy in-state layout. Named-worker layouts, custom external runtime profiles, external project workspaces, and registered-project snapshots are rejected explicitly: the old archive cannot safely capture and restore those directories. Back up expanded deployments through the complete stopped-state procedure described above; this release does not silently omit them.
 
 For compatible legacy/test state, snapshots use an explicit **offline maintenance window**. Finish or interrupt active work, reconcile uncertain runs, then stop both the controller/frontend and worker. Export refuses live process locks or unresolved execution. Do not copy a live `.sqlite` file with `cp`.
 
@@ -191,7 +223,7 @@ Automated checks cover SQLite durability, serialized transitions, idempotency, u
 
 Run `npm run check` for unit/integration tests, TypeScript, production build, and browser flows. Regression coverage includes durable project registration/context, honest observations, cron/timer references, actual root identity, prompt guardrails, run-bound tool proxy calls, credential redaction, atomic history, IPC/replay recovery, and responsive UI workflows. No separate lint task is configured.
 
-The implementation environment runs as a non-root user and requires an interactive sudo password. **A live root worker, authenticated model completion, and model-driven deployment have not been demonstrated here.** They require the root-worker terminal launch and ChatGPT/API authentication. Production model processes are expected to report UID 0; fixtures use their real test-runner identity. The exact model-backed acceptance procedure is supplied in `scripts/live-smoke.ts`; see its invocation below once authenticated. Independently tested helper execution, MCP transport, skill discovery and backup restoration do not substitute for that live model check.
+Automated verification makes no paid inference calls, broker requests or real systemd changes. It covers the creation/connection/job/result/restart workflow with a simulated small-model worker, real temporary Git repositories and real credential-bound local MCP processes. Native MCP discovery/calls also run against the pinned app-server without inference. Normal workers execute as their launching user; privileged host operations require an explicitly selected root worker. Live model authentication/completion and systemd deployment remain host acceptance steps. The legacy model-backed acceptance procedure is supplied in `scripts/live-smoke.ts`; see its invocation below once authenticated.
 
 ```sh
 # With authenticated controller + worker already running; creates only fixture workspaces/artifacts/memories/skills.
@@ -208,10 +240,10 @@ npm run smoke:live -- --verify-restore
 
 - **Missing password:** set `ADMIN_PASSWORD` (12+ characters) in `.env`. No default administrator credential exists.
 - **Worker disconnected:** use the generated worker command with the same `APP_STATE_DIR`, controller UID, and execution settings. Check controller ownership and `0700` state/`0600` private socket permissions.
-- **Worker tries to create `/root/.local/share/vps-ai-operator`:** plain `sudo npm run worker` can select root's home instead of the controller's state. Run `npm run init` as your normal user, then use the complete command shown by **Connect agent**, which supplies the shared `APP_STATE_DIR` and controller UID. A writable state directory does not grant UID 0; root mode still requires host permission to launch the separate privileged worker.
-- **Worker connected but tasks stay queued:** the actual agent must run as UID 0 and be authenticated. Stop older dedicated-account workers, launch the root worker, and sign in using **Connect agent**. Saved tasks resume after verified authentication.
+- **Worker tries to create `/root/.local/share/vps-ai-operator`:** plain `sudo npm run worker` can select root's home instead of the controller's state. Run `npm run init` as your normal user, then use the complete command shown by **Workers**, which supplies the shared `APP_STATE_DIR` and controller UID. A writable state directory does not grant UID 0; root mode still requires host permission to launch the separate privileged worker.
+- **Worker connected but tasks stay queued:** inspect the task's blocked reason and **Workers** status. The chosen worker must be authenticated, enabled, idle, have matching user/root permissions, and be free of uncertain execution. Required connections must be configured and tested. Same-project children wait for the parent's source finalization. Ordinary tasks do not require root.
 - **Policy narrowed:** managed host/Codex requirements may override full-access requests. The adapter fails before the turn and reports this instead of claiming root access.
-- **Old execution-account settings:** remove obsolete `APP_PROTECT_OPERATOR` and `APP_EXECUTION_*` entries from `.env` for clarity; the application ignores them. Restart `npm run dev` and copy a fresh root-worker command.
+- **Old execution-account settings:** remove obsolete `APP_PROTECT_OPERATOR` and `APP_EXECUTION_*` entries from `.env` for clarity; the application ignores them. Restart `npm run dev` and copy a fresh worker command. `APP_REQUIRE_ROOT_WORKER=true` retains legacy default-worker behavior; new named workers default to user mode.
 - **Origin/CSRF errors:** use the configured URL and reload after login expiry. For development at either loopback address, set `APP_ORIGINS=http://localhost:5173,http://127.0.0.1:5173` in `.env` and restart `npm run dev`. If the scheme or port changes, include that exact origin too. `APP_ORIGINS` overrides `APP_ORIGIN`; changing the latter has no effect while the former is set.
 - **Uncertain task:** inspect task events and the host, reconnect the worker, then reconcile. Reinstalling dependencies or refreshing the browser must not be used to retry it.
 - **Node cannot load libatomic:** run `sudo apt-get install -y libatomic1` in your host terminal and retry the npm command. Installation may require your sudo password; the application cannot supply it. For this execution environment only, checks used a privately unpacked library through `LD_LIBRARY_PATH`; this is not an application dependency installer.
@@ -223,6 +255,6 @@ To regenerate the adapter's transitive protocol types from **the pinned binary**
 npm run protocol:generate
 ```
 
-Experimental app-server support is confined to the adapter, principally user clarification/elicitation handling. There is no general runtime-plugin abstraction beyond the small Codex adapter yet. No OS installer, systemd installation, deployment pipeline, marketplace, vector database or production hosting configuration is included.
+Experimental app-server support is confined to the adapter, principally user clarification/elicitation handling. Model workers use the Codex adapter; application integrations use pluggable MCP connections. There is no OS installer, operator release pipeline, plugin marketplace, vector database or public hosting configuration included. Managed project deployment can install its own systemd unit through an explicitly authorized root worker.
 
 Official implementation references: [Codex app-server](https://developers.openai.com/codex/app-server), [skill format and discovery](https://developers.openai.com/codex/skills/), [Node release schedule](https://nodejs.org/en/about/previous-releases), [node:sqlite](https://nodejs.org/api/sqlite.html), [SQLite FTS5](https://www.sqlite.org/fts5.html), [WAL](https://www.sqlite.org/wal.html), and [online backup](https://www.sqlite.org/backup.html). The generated 0.166.0 types and real-binary tests define compatibility when current documentation describes a newer API.

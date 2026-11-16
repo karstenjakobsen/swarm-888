@@ -16,14 +16,16 @@ import { projectInspectInput, projectLogsInput, projectReferenceSchema } from '.
 import { inspectProject, projectLogs, validateProjectReference } from './runtime/projects.ts';
 import { publishArtifact } from './runtime/artifacts.ts';
 import { ManagedRuntime } from './runtime/managed.ts';
-import { managedLifecycleInput, managedPrepareInput } from './runtime/managed.ts';
+import { managedDeployInput,managedLifecycleInput, managedPrepareInput } from './runtime/managed.ts';
 import { inRuntimeOperation, type RuntimeOperationContext } from './runtime/operations.ts';
 import { callConnector, testConnector } from './connectors/client.ts';
 import { connectorCallInput, connectorTestInput, type ConnectorSnapshot } from './connectors/schemas.ts';
+import { prepareWorkerDirectory, workerDirectory } from './workers/config.ts';
+import { loadWorkerConfig } from './workers/startup.ts';
 
 const runIdInput = z.object({ runId: z.string().min(1) });
 const emptyInput = z.object({}).strict();
-type Active = { submission: Submission; adapter: CodexAdapter; completed: boolean; interruptRequested: boolean; timer?: NodeJS.Timeout; delta?: { text: string; itemId: string }; deltaTimer?: NodeJS.Timeout };
+type Active = { submission: Submission; adapter: CodexAdapter; completed: boolean; interruptRequested: boolean; outputChars:number;timer?: NodeJS.Timeout; delta?: { text: string; itemId: string }; deltaTimer?: NodeJS.Timeout };
 
 export class WorkerServer {
   private server?: Server;
@@ -47,7 +49,7 @@ export class WorkerServer {
   private runtimeUncertain=new Set<string>();
   constructor(private config: Config, private adapterFactory: (config: Config, runId?: string,connectors?:ConnectorSnapshot[]) => CodexAdapter = (config, runId,connectors) => new CodexAdapter(config, runId,connectors), options: { authTimeoutMs?: number } = {}) {
     this.managed=new ManagedRuntime(config);
-    this.lockPath = resolve(config.stateDir, 'worker/lock.json');
+    this.lockPath = resolve(workerDirectory(config),'lock.json');
     this.authenticator = new AgentAuthenticator(() => this.adapterFactory(this.config), {
       timeoutMs: options.authTimeoutMs,
       beforeStart: async () => { if (this.probing) await this.probing; if (this.closing) throw new Error('Worker is stopping'); },
@@ -62,8 +64,10 @@ export class WorkerServer {
   }
   async listen(): Promise<void> {
     if (this.config.requireRootWorker === true && process.getuid?.() !== 0) throw new Error('Root worker required. Use the root-worker command shown by Connect agent; it includes the controller state directory and UID.');
+    if(this.config.workerMode==='user'&&process.getuid?.()===0)throw new Error('This worker is registered in user mode. Start it as the controller user, without sudo.');
+    if(this.config.workerId)prepareWorkerDirectory(this.config);
     this.acquireLock();
-    this.journal = new WorkerJournal(this.config.stateDir);
+    this.journal = new WorkerJournal(this.config.stateDir,undefined,{directory:workerDirectory(this.config),workerId:this.config.workerId??'default'});
     // A different stdio client cannot reattach after a worker crash. Keep uncertain runs
     // blocked until their owned process group has been resolved; never resubmit them.
     for (const run of this.journal.active()) this.journal.status(run.id, 'uncertain');
@@ -103,7 +107,7 @@ export class WorkerServer {
   }
   health(): WorkerHealth {
     const runtimeOperations=this.journal.runtimeOperations().map(({id,method,status,requiresExternalInspection})=>({id,method,status:this.runtimeUncertain.has(id)?'uncertain' as const:status,requiresExternalInspection}));
-    return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0, executionUid:process.getuid?.(),sourceProtected:false,runtime: this.runtime, replacementReserved: this.replacementReserved,
+    return { connected: true, uid: process.getuid?.() ?? -1, pid: process.pid, root: process.getuid?.() === 0,workerId:this.config.workerId??'default',journalId:this.journal.journalId,model:this.config.model??null,...(this.config.effort?{effort:this.config.effort}:{}),workerMode:this.config.workerMode??(this.config.requireRootWorker?'root':'user'),executionUid:process.getuid?.(),sourceProtected:false,runtime: this.runtime, replacementReserved: this.replacementReserved,
       projectsDir:resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects')),
       runtimeOperations,activeRunId: this.active?.submission.runId ?? null, uncertainRuns: [...new Set([...this.journal.active().filter(run => run.status === 'uncertain').map(run => run.id), ...this.journal.checks().filter(check => check.status === 'uncertain').map(check => check.run_id ?? check.id),...runtimeOperations.filter(operation=>operation.status==='uncertain').map(operation=>operation.id)])] };
   }
@@ -155,7 +159,7 @@ export class WorkerServer {
     if(method.startsWith('managed/')||method==='connectors/test'||method==='connectors/call'){
       if(this.replacementReserved)throw new Error('Worker replacement is reserved. Wait before starting runtime operations.');
       let effect:(()=>Promise<unknown>)|undefined,observation:(()=>Promise<unknown>)|undefined;
-      if(method==='managed/prepare'||method==='managed/deploy'){const input=managedPrepareInput.parse(raw);effect=()=>method==='managed/prepare'?this.managed.prepare(input):this.managed.deploy(input);}
+      if(method==='managed/prepare'||method==='managed/deploy'){const input=(method==='managed/deploy'?managedDeployInput:managedPrepareInput).parse(raw);effect=()=>method==='managed/prepare'?this.managed.prepare(input):this.managed.deploy(input);}
       else if(method==='managed/stop'){const input=managedLifecycleInput.parse(raw);effect=()=>this.managed.stop(input);}
       else if(method==='managed/status'||method==='managed/logs'){const input=managedLifecycleInput.parse(raw);observation=()=>method==='managed/status'?this.managed.status(input):this.managed.logs(input);}
       else if(method==='connectors/test'){const input=connectorTestInput.parse(raw);effect=()=>testConnector(this.config,input.connector,{signal:this.runtimeController.signal});}
@@ -202,6 +206,9 @@ export class WorkerServer {
     if (method === 'acknowledge') { const { cursor } = z.object({ cursor: z.number().int().nonnegative() }).parse(raw); this.journal.acknowledge(cursor); return { acknowledged: cursor }; }
     if (method === 'submit') {
       const submission = submitSchema.parse(raw);
+      if(submission.workerId&&submission.workerId!==(this.config.workerId??'default'))throw new Error('The task is assigned to a different worker.');
+      if(submission.journalId&&submission.journalId!==this.journal.journalId)throw new Error('The worker journal identity changed; reconcile task ownership before retrying.');
+      if(submission.maxContextChars&&submission.prompt.length+submission.bootstrap.length>submission.maxContextChars)throw new Error('Submitted prompt and bootstrap exceed the configured context character limit.');
       const known = this.journal.get(submission.runId);
       if (known) {
         if (known.submission !== JSON.stringify(submission)) throw new Error('Run ID already accepted with different input');
@@ -220,8 +227,9 @@ export class WorkerServer {
       if (this.replacementReserved) throw new Error('Worker replacement is reserved. Wait for the root worker before submitting tasks.');
       this.journal.accept(submission);
       const adapter = this.adapterFactory(this.config, submission.runId,submission.connectors);
-      const active: Active = { submission, adapter, completed: false, interruptRequested: false }; this.active = active;
+      const active: Active = { submission, adapter, completed: false, interruptRequested: false,outputChars:0 }; this.active = active;
       this.record(active, 'status', { status: 'running', accepted: true });
+      if(submission.timeoutMs)active.timer=setTimeout(()=>void this.abort(active,'Configured task timeout exceeded'),submission.timeoutMs);
       setImmediate(() => void this.execute(active));
       return { accepted: true, duplicate: false, status: 'accepted' };
     }
@@ -301,6 +309,7 @@ export class WorkerServer {
     return submission;
   }
   private async execute(active: Active): Promise<void> {
+    if(active.completed)return;
     const adapter = active.adapter;
     adapter.on('spawn', ({ pid,start,boot }: { pid: number;start?:string;boot?:string }) => {
       const identity=start??processStamp(pid),kernel=boot??bootId();if(!identity||kernel==='unsupported')throw new Error('Cannot durably capture the Codex process identity.');
@@ -319,16 +328,18 @@ export class WorkerServer {
     try {
       const prepared=this.prepareSkills(active.submission); this.journal.status(active.submission.runId, 'running');
       await adapter.start();
-      const health = await adapter.health(); if (!health.authenticated) throw new Error(health.detail);
+      if(active.completed)return;
+      const health = await adapter.health(); if(active.completed)return;if (!health.authenticated) throw new Error(health.detail);
       await adapter.run(prepared);
       if (active.interruptRequested && !active.completed) await adapter.interrupt();
-      if (active.submission.timeoutMs && !active.completed) active.timer = setTimeout(() => void this.abort(active, 'Configured run timeout exceeded'), active.submission.timeoutMs);
     } catch (error) { await this.abort(active, error instanceof Error ? error.message : String(error)); }
   }
   private record(active: Active, type: string, data: unknown): void {
     if (active.completed) return;
     if (type === 'delta') {
       const delta = z.object({ text: z.string(), itemId: z.string() }).parse(data);
+      active.outputChars+=delta.text.length;
+      if(active.submission.maxOutputChars&&active.outputChars>active.submission.maxOutputChars)throw new Error('Configured assistant output character limit exceeded; execution was interrupted.');
       if (active.delta && active.delta.itemId !== delta.itemId) this.flush(active, true);
       if (active.delta) active.delta.text += delta.text; else active.delta = delta;
       if (!active.deltaTimer) active.deltaTimer = setTimeout(() => { try { this.flush(active); } catch (error) { void this.abort(active, error instanceof Error ? error.message : String(error)); } }, 50);
@@ -389,7 +400,7 @@ export class WorkerServer {
   }
   private secretVariants(): string[] {
     const variants = new Set<string>();
-    for (const secret of [this.config.ipcToken, this.config.adminPassword, ...Object.entries(process.env).filter(([key]) => /(?:KEY|TOKEN|PASSWORD|SECRET)$/.test(key)).map(([, value]) => value)]) {
+    for (const secret of [this.config.ipcToken, this.config.adminPassword,this.active?.submission.leaseToken, ...Object.entries(process.env).filter(([key]) => /(?:KEY|TOKEN|PASSWORD|SECRET)$/.test(key)).map(([, value]) => value)]) {
       if (secret && secret.length >= 6) { variants.add(JSON.stringify(secret).slice(1, -1)); variants.add(secret); }
     }
     return [...variants].sort((a, b) => b.length - a.length);
@@ -410,7 +421,8 @@ export class WorkerServer {
     };
     // Controller remains the owner of durable data so maintenance-window snapshots work.
     // Agent-created paths outside these roots intentionally retain host semantics.
-    for (const path of ['runtime', 'workspaces', 'artifacts', 'worker']) visit(resolve(this.config.stateDir, path));
+    for (const path of this.config.workerId?['workspaces','artifacts']:['runtime', 'workspaces', 'artifacts', 'worker']) visit(resolve(this.config.stateDir, path));
+    if(this.config.workerId)visit(workerDirectory(this.config));
     const projects=resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects'));
     if(inside(this.config.stateDir,projects))visit(projects);
   }
@@ -434,7 +446,7 @@ export class WorkerServer {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const config = loadConfig(); const worker = new WorkerServer(config);
+  const config = loadWorkerConfig(); const worker = new WorkerServer(config);
   try {
     await worker.listen();
     const health=worker.health();

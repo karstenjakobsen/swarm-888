@@ -264,3 +264,90 @@
 .runtime-operations-notice small{display:block;font-size:9px;margin-top:5px;color:var(--text-secondary)}
 @media(max-width:570px){.runtime-operations-notice{margin-left:15px;margin-right:15px;padding:10px 12px}.orphan-identity>strong,.runtime-recovery-item>p,.external-inspection{font-size:9px}.orphan-identity>code{font-size:8px}}
 @media(max-width:570px){.execution-recovery{max-height:min(350px,45dvh)}}
+
+/* Worker routing, schedules, and account setup use the established workspace layers. */
+.plain-fieldset{border:0;padding:0;margin:0;min-width:0}
+.platform-editor input,.platform-editor select,.platform-editor textarea{width:100%;font-size:11px;margin-bottom:17px}
+.platform-editor label{font-size:10px}
+.platform-editor .form-row>label{flex:1;min-width:0}
+.platform-editor .form-row{flex-wrap:wrap}
+.checkbox-label{display:flex;align-items:flex-start;gap:9px;line-height:1.7;cursor:pointer}
+.checkbox-label input[type=checkbox]{width:14px;height:14px;margin:2px 0 0;accent-color:var(--accent);flex-shrink:0}
+.platform-section{border-top:1px solid var(--line);margin-top:25px;padding-top:22px;min-width:0}
+.platform-section>h3{font-size:10px;margin-bottom:15px}
+.platform-facts{margin:23px 0}
+.worker-state-line{display:flex;align-items:center;justify-content:space-between;gap:15px;flex-wrap:wrap}
+.worker-state-line .connection-status{font-size:11px}
+.worker-state-line button{font-size:10px}
+.startup-command{display:block;max-width:100%;padding:14px;margin:15px 0;background:var(--field);border:1px solid var(--line-strong);border-radius:7px;font:10px/1.8 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}
+.worker-access .connection-actions{margin-bottom:17px}
+.worker-access .connection-actions>button,.worker-access>.primary-button{font-size:10px}
+.worker-signin{margin-top:20px;min-width:0}
+.worker-signin>h4{font-size:12px;margin:0 0 12px}
+.worker-signin>.primary-button,.worker-signin>.secondary-button{font-size:10px;text-decoration:none;margin:10px 8px 10px 0}
+.worker-signin .agent-device-code>code{font-size:20px}
+.project-worker{margin:0 0 25px;padding:18px 20px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.project-worker>.project-section-heading{margin-top:0}
+.project-worker>.small-note{font-size:10px;margin-bottom:14px}
+.project-worker .source-actions>select{max-width:100%;min-width:0}
+.task-execution-fields{margin-top:18px;min-width:0}
+.task-execution-fields>label{font-size:10px}
+.task-execution-fields select,.task-execution-fields input{width:100%;font-size:11px}
+.task-execution-fields>.small-note{font-size:9px;margin:7px 0}
+.task-constraints{font-size:10px;color:var(--muted);margin:12px 0 18px}
+.task-constraints>summary{cursor:pointer;color:var(--accent);margin-bottom:10px}
+.task-constraints .checkbox-label{font-size:10px;margin:10px 0}
+.task-constraints .small-note{font-size:9px;margin-bottom:14px}
+.task-budget-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 15px;margin-top:16px}
+.task-budget-grid>label{font-size:9px;min-width:0}
+.task-budget-grid input{margin-top:7px}
+.connection-requirements{border:1px solid var(--line);border-radius:7px;padding:10px 13px;margin:16px 0;min-width:0}
+.connection-requirements>legend{font-size:9px;padding:0 6px}
+.composer>.task-execution-fields{margin:0 0 9px;padding:0 0 8px;border-bottom:1px solid var(--line)}
+.task-execution-fields.compact>label{display:flex;align-items:center;gap:10px;font-size:9px;margin:0;color:var(--muted)}
+.task-execution-fields.compact>label>select{flex:1;min-width:0;padding:7px 10px;font-size:10px}
+.task-execution-fields.compact .task-constraints{margin:7px 0 0;font-size:9px}
+.task-execution-fields.compact .task-constraints>summary{margin-bottom:0}
+.task-execution-fields.compact .task-constraints[open]{max-height:240px;overflow:auto;padding:5px 2px 10px}
+.task-execution-fields.compact>.small-note{margin:5px 0 0}
+.budget-summary{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}
+.budget-summary>span{font-size:9px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:4px 6px}
+.task-template{background:var(--field);border:1px solid var(--line);border-radius:7px;padding:14px;font-size:11px;color:var(--text-secondary);margin-top:13px}
+.platform-history{margin-top:15px}
+.platform-history>button{width:100%;display:flex;align-items:center;gap:12px;border:0;border-bottom:1px solid var(--line);padding:13px 0;background:none;text-align:left;font-size:10px;color:var(--text-secondary)}
+.platform-history>button>span:first-child{flex:1;min-width:0}
+.platform-history strong{font-weight:500}
+.platform-history small{display:block;font-size:9px;color:var(--muted);margin-top:5px}
+.run-execution-metadata{padding:10px 0 7px}
+.run-execution-tags{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;font-size:9px;color:var(--muted)}
+.run-execution-tags .root-grant{color:var(--warning)}
+.run-execution-tags>button{font-size:9px}
+.run-execution-metadata>.management-warning{margin:10px 0}
+.run-usage{font-size:9px;color:var(--subtle);margin:9px 0}
+.run-usage>summary{cursor:pointer;line-height:1.7}
+.run-usage pre{padding:10px;background:var(--field);border:1px solid var(--line);border-radius:6px;font-size:9px;max-height:250px;overflow:auto}
+.credential-setup>fieldset{margin-top:17px}
+.credential-setup label{font-size:10px;margin-top:14px}
+.credential-setup input,.credential-setup select,.credential-setup textarea{display:block;width:100%;font-size:11px;margin:8px 0 16px}
+.credential-setup .project-section-heading{margin-top:0}
+.credential-setup .project-section-heading>h3{font-size:10px}
+.credential-setup .primary-button,.credential-setup .secondary-button{font-size:10px;margin:10px 8px 0 0}
+.secret-field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.secret-field-row>label{min-width:0}
+.credential-setup .subtle-button{font-size:10px}
+.oauth-configuration{margin-top:20px;padding:13px;border:1px solid var(--line);border-radius:7px;background:var(--field)}
+.oauth-configuration>summary{font-size:10px;color:var(--accent);cursor:pointer}
+.oauth-advanced{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:6px}
+.oauth-advanced>summary{font-size:10px;color:var(--muted);cursor:pointer}
+.oauth-pending{padding:13px;margin-top:17px;border:1px solid var(--info-line);background:var(--info-bg);border-radius:7px;color:var(--info);font-size:10px;line-height:1.8}
+.oauth-pending>a{text-decoration:none}
+@media(max-width:680px){.platform-editor .form-row{flex-direction:column;gap:0}.task-budget-grid{gap:10px}.task-budget-grid>label{font-size:9px}.task-execution-fields.compact>label>select{font-size:9px}.project-worker{padding:14px}.project-worker .source-actions>select{width:100%;flex-basis:100%}.workers-panel .project-list-item,.jobs-panel .project-list-item{flex-wrap:wrap}.workers-panel .project-list-copy,.jobs-panel .project-list-copy{flex-basis:calc(100% - 40px)}.workers-panel .project-list-item>.connection-status,.jobs-panel .project-list-item>.connection-status{margin-left:34px}.credential-setup input,.credential-setup select,.credential-setup textarea{font-size:12px}.secret-field-row{grid-template-columns:1fr;gap:0}.secret-field-row>label{margin-top:0}.run-execution-tags{font-size:8px}.startup-command{font-size:9px}}
+.project-environment label{font-size:10px;margin-top:15px}
+.project-environment input,.project-environment select,.project-environment textarea{display:block;width:100%;font-size:11px;margin:8px 0 16px}
+.project-environment .project-section-heading{margin-top:0}
+.project-environment .inline-error>.text-button{display:block;margin-top:8px}
+.event-token-setup{margin-top:15px}
+.event-token-setup>p{font-size:10px;line-height:1.8;margin:10px 0}
+.event-token-setup input{display:block;width:100%;font-size:11px;margin:10px 0}
+.event-token-setup .source-actions{margin:12px 0}
+@media(max-width:680px){.project-environment select,.project-environment textarea{font-size:12px}}

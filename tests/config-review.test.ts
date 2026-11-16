@@ -38,3 +38,11 @@ test('root execution ignores obsolete dedicated-account and protection settings'
     process.env.APP_PROTECT_OPERATOR='false';assert.equal(loadConfig().requireRootWorker,true);
   }finally{process.env=previous;rmSync(stateDir,{recursive:true,force:true});}
 });
+
+test('worker execution defaults to the normal user unless root is explicitly configured',()=>{
+  const previous=process.env,stateDir=mkdtempSync(join(tmpdir(),'operator-user-config-'));
+  try{
+    process.env={...previous,APP_STATE_DIR:stateDir,APP_ALLOW_TEMP_STATE:'true',APP_CONTROLLER_UID:String(process.getuid!()),APP_WORKER_ID:'',APP_REQUIRE_ROOT_WORKER:''};delete process.env.APP_PROJECTS_DIR;
+    assert.equal(loadConfig().requireRootWorker,false);process.env.APP_REQUIRE_ROOT_WORKER='true';assert.equal(loadConfig().requireRootWorker,true);
+  }finally{process.env=previous;rmSync(stateDir,{recursive:true,force:true});}
+});

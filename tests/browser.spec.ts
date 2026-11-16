@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { randomUUID } from 'node:crypto';
 
 async function login(page: Page) {
   await page.goto('/');
@@ -36,8 +37,8 @@ test('authenticated workspace persists queued work, memory revisions, and owner 
   await expect(page.getByTestId('message-user')).toHaveCount(1);
   await expect(page.getByTestId('message-user')).toContainText('Browser smoke task');
   await expect(page.getByText('Queued', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('status').filter({ hasText: 'Queue paused: worker disconnected' })).toContainText('Your queued tasks are saved.');
-  await expect(page.getByRole('status').filter({ hasText: 'Queue paused: worker disconnected' }).getByRole('button', { name: 'Connect agent' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: /Queue paused: worker disconnected|Queue waiting for task requirements/ })).toContainText('Your queued tasks are saved.');
+  await expect(page.getByRole('status').filter({ hasText: /Queue paused: worker disconnected|Queue waiting for task requirements/ }).getByRole('button', { name: 'Connect agent' })).toBeVisible();
   await expect(page.locator('.queue-panel > summary > strong')).toHaveText(/\d+ tasks? queued/);
 
   await page.getByRole('button', { name: 'Memory', exact: true }).click();
@@ -302,6 +303,7 @@ test('managed source saves a commit before deployment and distinguishes the runn
   await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(state)}\n\n` }));
   await page.route('**/api/projects', route => route.fulfill({ json: [project] }));
   await page.route('**/api/connectors', route => route.fulfill({ json: [connector] }));
+  await page.route(`**/api/projects/${id}/environment`, route => route.fulfill({ json: { environment: null, readiness: { ready: true } } }));
   await page.route(`**/api/projects/${id}/source`, route => {
     if (route.request().method() === 'PUT') {
       const body = route.request().postDataJSON();
@@ -420,7 +422,7 @@ test('Connections registers an HTTP server without credential fields', async ({ 
   await editor.getByLabel('Connection name').fill(connector.name);
   await editor.getByLabel('Transport', { exact: true }).selectOption('http');
   await expect(editor.getByLabel('Command', { exact: true })).toHaveCount(0);
-  await expect(editor).toContainText('Credentials are not supported here yet.');
+  await expect(editor).toContainText('configure credentials in Authentication.');
   await editor.getByLabel('MCP server URL').fill(connector.url);
   await editor.getByRole('button', { name: 'Add connection', exact: true }).click();
   await expect(page.getByRole('heading', { name: connector.name, exact: true })).toBeVisible();
@@ -440,6 +442,7 @@ async function sourceReviewFixture(page: Page) {
   await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(state)}\n\n` }));
   await page.route('**/api/projects', route => route.fulfill({ json: projects }));
   await page.route('**/api/connectors', route => route.fulfill({ json: connectors }));
+  await page.route(`**/api/projects/${id}/environment`, route => route.fulfill({ json: { environment: null, readiness: { ready: true } } }));
   await page.route(`**/api/projects/${id}/source`, route => route.fulfill({ json: { source, manifest, files } }));
   return { project, projects, source, files, manifest, connectors };
 }
@@ -854,4 +857,353 @@ test('project removal ignores a stale list response that arrives after deletion'
     await expect(page.locator('.project-list-item').filter({ hasText: removed.name })).toHaveCount(0);
     await expect(page.locator('.project-list-item.selected')).toContainText(retained.name);
   } finally { stale.resolve(); }
+});
+
+function platformWorker(id: string, mode: 'user' | 'root' = 'user'): import('../src/workers/schemas').WorkerStatus {
+  const now = new Date().toISOString();
+  return { worker: { id, name: id === 'research' ? 'Research worker' : id === 'deploy' ? 'Deploy worker' : id, model: 'fixture-model', effort: 'low', mode, enabled: true, draining: false, createdAt: now, updatedAt: now }, connected: true, health: { connected: true, uid: mode === 'root' ? 0 : 1000, executionUid: mode === 'root' ? 0 : 1000, root: mode === 'root', pid: 42, activeRunId: null, uncertainRuns: [], runtimeOperations: [], workerId: id, journalId: randomUUID(), model: 'fixture-model', effort: 'low', workerMode: mode, runtime: { available: true, authenticated: true, version: 'fixture', detail: 'Observed HTTP fixture. No worker process or model is running.' } }, error: null, command: `fixture-start-worker ${id}` };
+}
+
+async function workerPlatformFixture(page: Page) {
+  type Run = import('../src/shared').Run;
+  type Connector = import('../src/connectors/schemas').Connector;
+  const conversation = { id: 'platform_conversation', title: 'Platform fixture conversation', threadId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const project = { id: '6307ae41-578b-4fa3-8859-8fb33c242bfd', name: 'Automation workspace', description: 'Generic project fixture', origin: 'created', directory: '/tmp/platform-fixture/project', status: 'ready', components: [], runs: [], conversationIds: [conversation.id], connectorIds: ['4a8b2937-295e-4be7-92e7-ddb06c5a6917'], defaultWorkerId: 'research' as string | null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastCheckedAt: null };
+  const connector: Connector = { id: project.connectorIds[0]!, name: 'Provider tools', description: 'Credential-aware fixture', transport: 'http', url: 'https://provider.example/mcp', enabled: true, projectId: project.id, tools: [{ name: 'echo', description: 'Fixture echo', inputSchema: { type: 'object' } }], status: 'connected', detail: 'Discovered fixture tool.', checkedAt: new Date().toISOString(), readiness: { ready: true }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const fixture = { workers: [platformWorker('research'), platformWorker('deploy', 'root')], project, connectors: [connector], runs: [] as Run[], jobs: [] as import('../src/jobs/schemas').Job[], credentials: [] as import('../src/credentials/schemas').CredentialMetadata[], connections: {} as Record<string, import('../src/agent-connection-schema').AgentConnection>, submitted: [] as Record<string, any>[] };
+  for (const value of fixture.workers) fixture.connections[value.worker.id] = { state: 'connected', workerConnected: true, workerUid: value.health!.uid, executionUid: value.health!.uid };
+  const status = () => ({ worker: fixture.workers[0]?.health ?? null, workers: fixture.workers, workerError: null, maintenance: false, queue: fixture.runs.filter(run => !['completed', 'failed', 'interrupted'].includes(run.status)) });
+  const makeRun = (body: Record<string, any>, taskType: Run['taskType'] = 'interactive'): Run => ({ id: `platform_run_${fixture.runs.length + 1}`, conversationId: conversation.id, prompt: body.prompt, requestId: body.requestId || `scheduled_${fixture.runs.length + 1}`, kind: 'user', status: 'queued', summary: '', error: null, parentRunId: null, createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, ...body, taskType });
+  await page.route('**/api/status', route => route.fulfill({ json: status() }));
+  await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(status())}\n\n` }));
+  await page.route('**/api/workers', route => {
+    if (route.request().method() === 'POST') { const input = route.request().postDataJSON(); const value = platformWorker(input.id, input.mode); value.worker = { ...value.worker, ...input }; value.connected = false; value.health = null; fixture.workers.push(value); fixture.connections[input.id] = { state: 'disconnected', workerConnected: false, workerUid: null }; return route.fulfill({ json: value }); }
+    return route.fulfill({ json: fixture.workers });
+  });
+  await page.route('**/api/workers/*', route => { const id = new URL(route.request().url()).pathname.split('/').at(-1)!; const value = fixture.workers.find(item => item.worker.id === id)!; Object.assign(value.worker, route.request().postDataJSON()); return route.fulfill({ json: value }); });
+  await page.route('**/api/workers/*/*', route => {
+    const [, , , id, action] = new URL(route.request().url()).pathname.split('/');
+    const value = fixture.workers.find(item => item.worker.id === id)!;
+    if (action === 'commands') return route.fulfill({ json: { command: value.command } });
+    if (action === 'drain') { value.worker.draining = route.request().postDataJSON().draining; return route.fulfill({ json: value }); }
+    if (action === 'start') { value.connected = true; value.health = platformWorker(id!, value.worker.mode).health; value.health!.model = value.worker.model; value.health!.effort = value.worker.effort; value.health!.runtime.model = value.worker.model ?? undefined; value.health!.runtime.authenticated = false; fixture.connections[id!] = { state: 'disconnected', workerConnected: true, workerUid: value.health!.uid, executionUid: value.health!.uid }; }
+    if (action === 'connect') fixture.connections[id!] = { state: 'connecting', workerConnected: true, workerUid: value.health!.uid, verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'WORKER-FIXTURE', expiresAt: new Date(Date.now() + 600_000).toISOString() };
+    if (action === 'cancel') fixture.connections[id!] = { state: 'disconnected', workerConnected: true, workerUid: value.health!.uid };
+    return route.fulfill({ json: fixture.connections[id!] });
+  });
+  await page.route('**/api/projects', route => route.fulfill({ json: [fixture.project] }));
+  await page.route(`**/api/projects/${project.id}`, route => { Object.assign(fixture.project, route.request().postDataJSON()); return route.fulfill({ json: fixture.project }); });
+  await page.route('**/api/connectors', route => route.fulfill({ json: fixture.connectors }));
+  await page.route('**/api/credentials', route => {
+    if (route.request().method() === 'POST') { const input = route.request().postDataJSON(); const value = { id: '4d936743-2a84-4bc5-b235-105f55db3c0e', name: input.name, kind: 'secret' as const, fields: Object.keys(input.values), revision: 1, ready: true, expiresAt: null, updatedAt: new Date().toISOString() }; fixture.credentials.push(value); return route.fulfill({ json: value }); }
+    return route.fulfill({ json: fixture.credentials });
+  });
+  await page.route('**/api/connectors/*/auth', route => { const id = new URL(route.request().url()).pathname.split('/').at(-2)!; const value = fixture.connectors.find(item => item.id === id)!; value.auth = route.request().postDataJSON().auth ?? undefined; value.readiness = { ready: true }; return route.fulfill({ json: value }); });
+  await page.route('**/api/conversations', route => route.fulfill({ json: [conversation] }));
+  await page.route(`**/api/conversations/${conversation.id}`, route => route.fulfill({ json: { conversation, messages: [], runs: fixture.runs, events: [] } }));
+  await page.route(`**/api/conversations/${conversation.id}/runs`, route => { const body = route.request().postDataJSON(); fixture.submitted.push(body); const run = makeRun(body); fixture.runs.push(run); return route.fulfill({ json: run }); });
+  await page.route('**/api/runs/*', route => { const id = new URL(route.request().url()).pathname.split('/').at(-1)!; return route.fulfill({ json: fixture.runs.find(run => run.id === id) }); });
+  await page.route('**/api/jobs', route => {
+    if (route.request().method() === 'POST') { const input = route.request().postDataJSON(); const job = { ...input, id: '96059f81-bda8-47b4-9ec5-fb675b05dca3', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nextRunAt: new Date(Date.now() + 300_000).toISOString(), lastRunAt: null, blockedReason: null, history: [] }; fixture.jobs.push(job); return route.fulfill({ json: job }); }
+    return route.fulfill({ json: fixture.jobs });
+  });
+  await page.route('**/api/jobs/*', route => { const id = new URL(route.request().url()).pathname.split('/').at(-1)!; const job = fixture.jobs.find(item => item.id === id)!; const patch = route.request().postDataJSON(); Object.assign(job, patch); if (patch.requiredConnectorIds === null) delete job.requiredConnectorIds; return route.fulfill({ json: job }); });
+  await page.route('**/api/jobs/*/*', route => {
+    const [, , , id, action] = new URL(route.request().url()).pathname.split('/'); const job = fixture.jobs.find(item => item.id === id)!;
+    if (action === 'pause') job.enabled = false;
+    if (action === 'resume') job.enabled = true;
+    if (action === 'run') { const run = makeRun({ ...job, id: `platform_scheduled_${fixture.runs.length + 1}`, prompt: job.prompt, workerId: job.workerId || fixture.project.defaultWorkerId }, 'scheduled'); fixture.runs.push(run); job.history.push({ runId: run.id, scheduledFor: `manual:${randomUUID()}`, status: run.status, workerId: run.workerId ?? null, model: null }); }
+    return route.fulfill({ json: job });
+  });
+  return { fixture, makeRun, conversation };
+}
+
+test('Workers registers user-mode profiles, signs in independently, and drains admission', async ({ page, context }, testInfo) => {
+  await page.clock.install(); await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const { fixture } = await workerPlatformFixture(page);
+  await login(page); await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  await page.getByRole('button', { name: 'Register worker', exact: true }).click();
+  await expect(page.getByLabel('Worker mode', { exact: true })).toHaveValue('user');
+  await page.getByLabel('Worker name', { exact: true }).fill('Analysis worker');
+  await page.getByLabel('Worker ID', { exact: true }).fill('analysis');
+  await page.getByLabel('Worker model', { exact: true }).fill('fixture-analysis-model');
+  await page.getByLabel('Worker effort', { exact: true }).selectOption('high');
+  await page.locator('.platform-editor').getByRole('button', { name: 'Register worker', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Analysis worker', exact: true })).toBeVisible();
+  expect(fixture.workers.find(value => value.worker.id === 'analysis')!.worker.mode).toBe('user');
+  await page.getByRole('button', { name: 'Copy startup command' }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('fixture-start-worker analysis');
+  await page.getByRole('button', { name: 'Start worker', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect ChatGPT', exact: true }).click();
+  await expect(page.getByLabel('Worker sign-in code')).toHaveText('WORKER-FIXTURE');
+  await page.getByRole('button', { name: 'Cancel sign-in', exact: true }).click();
+  await page.getByRole('button', { name: 'Connect ChatGPT', exact: true }).click();
+  const value = fixture.workers.find(item => item.worker.id === 'analysis')!; value.health!.runtime.authenticated = true;
+  fixture.connections.analysis = { state: 'connected', workerConnected: true, workerUid: 1000, executionUid: 1000 };
+  await page.clock.fastForward(5100);
+  await expect(page.getByRole('status').filter({ hasText: 'ChatGPT sign-in is ready for this worker.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Drain worker', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'New tasks wait while this worker drains.' })).toBeVisible();
+  expect(value.worker.draining).toBe(true);
+  await page.getByRole('button', { name: 'Resume admission', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit worker', exact: true }).click();
+  await expect(page.getByLabel('Worker model', { exact: true })).toHaveCount(0);
+  await page.getByLabel('Worker name', { exact: true }).fill('Renamed analysis worker');
+  await page.getByRole('button', { name: 'Save worker', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Renamed analysis worker', exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('workers-phone.png'), animations: 'disabled' });
+});
+
+test('task routing captures worker/root grants, project defaults, provenance, usage, and blocked reasons', async ({ page }) => {
+  const { fixture, makeRun } = await workerPlatformFixture(page);
+  fixture.runs.push({ ...makeRun({ prompt: 'Completed delegated fixture', requestId: 'completed_fixture' }), id: 'platform_completed_child', status: 'completed', assignedWorkerId: 'research', model: 'fixture-model', effort: 'low', taskType: 'delegated', parentRunId: 'platform_parent', usage: { total: { inputTokens: 12, outputTokens: 8, totalTokens: 20 } }, finishedAt: new Date().toISOString() });
+  fixture.runs.push({ ...makeRun({ prompt: 'Parent fixture task', requestId: 'parent_fixture' }), id: 'platform_parent', status: 'completed' });
+  await login(page);
+  await expect(page.locator('.topbar').getByRole('button', { name: 'Manage workers' })).toBeVisible();
+  await expect(page.locator('.run-execution-metadata').filter({ hasText: 'Worker research' })).toContainText('fixture-model · low');
+  await expect(page.getByText('12 input · 8 output · 20 total tokens', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const projectWorker = page.getByRole('region', { name: 'Project default worker', exact: true });
+  await projectWorker.getByLabel('Project default worker', { exact: true }).selectOption('deploy');
+  await projectWorker.getByRole('button', { name: 'Save default worker' }).click();
+  await expect(projectWorker.getByRole('button', { name: 'Default worker saved' })).toBeVisible();
+  expect(fixture.project.defaultWorkerId).toBe('deploy');
+  await page.getByRole('navigation', { name: 'Workspace' }).getByRole('button', { name: /^Conversations/ }).click();
+  await page.getByLabel('Task worker', { exact: true }).selectOption('deploy');
+  await expect(page.locator('.composer .task-constraints')).toHaveAttribute('open', '');
+  await expect(page.locator('.composer').getByRole('checkbox', { name: 'Requires root access' })).toBeChecked();
+  await page.getByLabel('Maximum tool calls', { exact: true }).fill('4');
+  await page.getByLabel('Task connection scope', { exact: true }).selectOption('explicit');
+  await page.getByLabel('Message your operator').fill('Explicit root task fixture');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect.poll(() => fixture.submitted.length).toBe(1);
+  expect(fixture.submitted[0]).toMatchObject({ workerId: 'deploy', requiredRoot: true, maxToolCalls: 4, requiredConnectorIds: [] });
+  fixture.runs.at(-1)!.blockedReason = 'Assigned worker is draining. Task remains queued.';
+  fixture.workers[1]!.worker.draining = true;
+  await page.getByRole('button', { name: /^Parent task/ }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Assigned worker is draining.' }).first()).toBeVisible();
+  expect(fixture.submitted).toHaveLength(1);
+});
+
+test('worker readiness excludes unresolved runtime operations, sign-in transitions and reserved replacement', async ({ page }) => {
+  await page.clock.install();
+  const { fixture } = await workerPlatformFixture(page);
+  fixture.workers[0]!.health!.runtimeOperations = [{ id: 'runtime_fixture_uncertain', method: 'connectors/call', status: 'uncertain', requiresExternalInspection: true }];
+  fixture.workers[1]!.health!.runtimeOperations = [{ id: 'runtime_fixture_running', method: 'managed/deploy', status: 'running', requiresExternalInspection: false }];
+  await login(page); await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  await expect(page.locator('.privilege-pill')).toHaveText('0/2 ready');
+  await expect(page.locator('.workers-panel .project-list-item').filter({ hasText: 'Research worker' })).toContainText('Needs inspection');
+  await expect(page.locator('.workers-panel .project-list-item').filter({ hasText: 'Deploy worker' })).toContainText('Busy');
+  fixture.workers[0]!.health!.runtimeOperations = []; fixture.workers[0]!.health!.runtime.authenticating = true;
+  fixture.workers[1]!.health!.runtimeOperations = []; fixture.workers[1]!.health!.replacementReserved = true;
+  await page.clock.fastForward(5100);
+  await expect(page.locator('.privilege-pill')).toHaveText('0/2 ready');
+  await expect(page.locator('.workers-panel .project-list-item').filter({ hasText: 'Research worker' })).toContainText('Signing in');
+  await expect(page.locator('.workers-panel .project-list-item').filter({ hasText: 'Deploy worker' })).toContainText('Restart reserved');
+  fixture.workers[0]!.health!.runtime.authenticating = false; fixture.workers[1]!.health!.replacementReserved = false;
+  await page.clock.fastForward(5100);
+  await expect(page.locator('.privilege-pill')).toHaveText('2/2 ready');
+});
+
+test('Jobs saves interval and cron templates, pauses/resumes, queues once, and opens history', async ({ page }, testInfo) => {
+  const { fixture } = await workerPlatformFixture(page);
+  await login(page); await page.getByRole('button', { name: 'Jobs', exact: true }).click();
+  await page.getByRole('button', { name: 'Create job', exact: true }).click();
+  await page.getByLabel('Job name', { exact: true }).fill('Scheduled analysis');
+  await page.getByLabel('Job project', { exact: true }).selectOption(fixture.project.id);
+  await page.getByLabel('Job task prompt', { exact: true }).fill('Read the required tools and write a bounded report.');
+  await page.getByLabel('Job interval seconds', { exact: true }).fill('60');
+  await page.getByLabel('Task worker', { exact: true }).selectOption('research');
+  await page.locator('.platform-editor').getByText('Execution options', { exact: true }).click();
+  await page.getByLabel('Task connection scope', { exact: true }).selectOption('explicit');
+  await page.getByRole('checkbox', { name: 'Provider tools', exact: true }).check();
+  await page.getByLabel('Maximum tool calls', { exact: true }).fill('5');
+  await page.locator('.platform-editor').getByRole('button', { name: 'Create job', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Scheduled analysis', exact: true })).toBeVisible();
+  expect(fixture.jobs[0]).toMatchObject({ projectId: fixture.project.id, workerId: 'research', requiredRoot: false, maxToolCalls: 5, schedule: { type: 'interval', seconds: 60 }, requiredConnectorIds: fixture.project.connectorIds });
+  await page.getByRole('button', { name: 'Pause job', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Resume job', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Resume job', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit job', exact: true }).click();
+  await page.getByLabel('Job schedule type', { exact: true }).selectOption('cron');
+  await page.getByLabel('Job cron expression', { exact: true }).fill('0 9 * * 1-5');
+  await page.getByLabel('Job timezone', { exact: true }).fill('Europe/Paris');
+  await page.locator('.platform-editor').getByText('Execution options', { exact: true }).click();
+  await page.getByLabel('Task connection scope', { exact: true }).selectOption('project');
+  await page.getByRole('button', { name: 'Save job', exact: true }).click();
+  await expect(page.getByText('0 9 * * 1-5 · Europe/Paris', { exact: true }).last()).toBeVisible();
+  expect(fixture.jobs[0]!.requiredConnectorIds).toBeUndefined();
+  await expect(page.getByText('Inherit project connections', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Run once', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Job history' })).toContainText('queued');
+  await expect(page.getByRole('region', { name: 'Job history' })).toContainText('Manual run');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('jobs-phone.png'), animations: 'disabled' });
+  await page.getByRole('region', { name: 'Job history' }).getByRole('button').click();
+  await expect(page.getByText('scheduled', { exact: true })).toBeVisible();
+});
+
+test('job history labels manual and event triggers without treating their keys as dates', async ({ page }) => {
+  const { fixture, makeRun } = await workerPlatformFixture(page);
+  const now = new Date().toISOString();
+  const runs = [makeRun({ prompt: 'Scheduled fixture' }), makeRun({ prompt: 'Manual fixture' }), makeRun({ prompt: 'Event fixture' })].map((run, index) => ({ ...run, id: `history_${index}`, status: 'completed' as const }));
+  fixture.runs.push(...runs);
+  fixture.jobs.push({ id: randomUUID(), projectId: fixture.project.id, name: 'Trigger history', prompt: 'Produce a bounded report.', enabled: true, schedule: { type: 'interval', seconds: 300 }, createdAt: now, updatedAt: now, nextRunAt: now, lastRunAt: now, blockedReason: null, history: runs.map((run, index) => ({ runId: run.id, scheduledFor: [now, `manual:${randomUUID()}`, 'event:bar-42'][index]!, status: run.status, workerId: 'research', model: 'fixture-model' })) });
+  await login(page); await page.getByRole('button', { name: 'Jobs', exact: true }).click();
+  const history = page.getByRole('region', { name: 'Job history' });
+  await expect(history).toContainText('Manual run'); await expect(history).toContainText('Event: bar-42');
+  await expect(history).not.toContainText('Invalid Date');
+  await expect(history.getByRole('button')).toHaveCount(3);
+});
+
+test('Connections stores and rotates write-only credentials without reading secret values back', async ({ page }) => {
+  const { fixture } = await workerPlatformFixture(page);
+  fixture.connectors[0]!.readiness = { ready: false, reason: 'Configure credentials in Connections.' };
+  let created: Record<string, any> | undefined, rotated: Record<string, any> | undefined;
+  await page.route('**/api/credentials', route => {
+    if (route.request().method() === 'POST') { created = route.request().postDataJSON(); const value = { id: '8fc16773-9015-44fd-a9c9-c14ff376a395', name: created!.name, kind: 'secret' as const, fields: ['token'], revision: 1, ready: true, expiresAt: null, updatedAt: new Date().toISOString() }; fixture.credentials.push(value); return route.fulfill({ json: value }); }
+    return route.fulfill({ json: fixture.credentials });
+  });
+  await page.route('**/api/credentials/*', route => { expect(route.request().method()).toBe('PUT'); rotated = route.request().postDataJSON(); fixture.credentials[0]!.revision++; return route.fulfill({ json: fixture.credentials[0] }); });
+  await login(page); await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Test connection', exact: true })).toBeDisabled();
+  const setup = page.getByRole('region', { name: 'Connection credentials' });
+  await setup.getByLabel('Connection authentication method').selectOption('bearer');
+  await setup.getByLabel('Credential name', { exact: true }).fill('Provider account key');
+  await setup.getByLabel('Credential field 1 value', { exact: true }).fill('fixture-write-only-token');
+  await setup.getByRole('button', { name: 'Save credentials & binding', exact: true }).click();
+  await expect(setup.getByRole('status').filter({ hasText: 'Credential saved and granted' })).toBeVisible();
+  expect(created).toMatchObject({ name: 'Provider account key', values: { token: 'fixture-write-only-token' } });
+  expect(fixture.connectors[0]!.auth).toEqual({ type: 'bearer', credentialId: fixture.credentials[0]!.id, field: 'token' });
+  await expect(setup.getByLabel('Credential field 1 value', { exact: true })).toHaveValue('');
+  await expect(page.locator('body')).not.toContainText('fixture-write-only-token');
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('fixture-write-only-token');
+  await setup.getByLabel('Credential field 1 value', { exact: true }).fill('fixture-rotated-token');
+  await setup.getByRole('button', { name: 'Save credentials & binding', exact: true }).click();
+  await expect.poll(() => rotated).toEqual({ values: { token: 'fixture-rotated-token' } });
+  await expect(setup.getByLabel('Credential field 1 value', { exact: true })).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Test connection', exact: true })).toBeEnabled();
+});
+
+test('Connections OAuth setup opens a provider flow, supports cancellation, and observes readiness', async ({ page }, testInfo) => {
+  await page.clock.install();
+  const { fixture } = await workerPlatformFixture(page);
+  const id = fixture.connectors[0]!.id; let authorized = false, starts = 0, cancellations = 0;
+  const credential = { id: 'ee1b2fcb-2a52-4990-9dd4-27368ab1dbd8', name: 'Provider OAuth', kind: 'oauth2' as const, fields: [] as string[], revision: 1, ready: false, expiresAt: null, updatedAt: new Date().toISOString() };
+  await page.route(`**/api/connectors/${id}/oauth/start`, route => { const body = route.request().postDataJSON(); expect(body.clientSecret).toBe('fixture-client-secret'); expect(body.tokenMethod).toBe('GET'); expect(body.tokenFields).toEqual({ accessToken: 'access_token_value', refreshToken: 'refresh_token_value', expiresIn: 'expires_in' }); starts++; fixture.connectors[0]!.auth = { type: 'oauth2', credentialId: credential.id }; fixture.connectors[0]!.readiness = { ready: false, reason: 'Authorization pending.' }; if (!fixture.credentials.length) fixture.credentials.push(credential); return route.fulfill({ json: { authorizationUrl: 'https://provider.example/authorize?state=fixture', expiresAt: new Date(Date.now() + 600_000).toISOString(), credential } }); });
+  await page.route(`**/api/connectors/${id}/oauth/status`, route => route.fulfill({ json: { readiness: { ready: authorized, ...(authorized ? {} : { reason: 'Authorization pending.' }) }, credential: { ...credential, ready: authorized } } }));
+  await page.route(`**/api/connectors/${id}/oauth/cancel`, route => { cancellations++; return route.fulfill({ json: { ok: true } }); });
+  await login(page); await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const setup = page.getByRole('region', { name: 'Connection credentials' });
+  await setup.getByLabel('Connection authentication method').selectOption('oauth2');
+  await setup.getByLabel('OAuth authorization URL').fill('https://provider.example/authorize');
+  await setup.getByLabel('OAuth token URL').fill('https://provider.example/token');
+  await setup.getByLabel('OAuth client ID').fill('fixture-public-client');
+  await setup.getByLabel('OAuth client authentication').selectOption('client_secret_post');
+  await setup.getByLabel('OAuth client secret').fill('fixture-client-secret');
+  await setup.getByLabel('OAuth scopes').fill('read:data write:reports');
+  await setup.getByText('Advanced token settings', { exact: true }).click();
+  await setup.getByLabel('OAuth token request method', { exact: true }).selectOption('GET');
+  await setup.getByLabel('OAuth access token response field', { exact: true }).fill('access_token_value');
+  await setup.getByLabel('OAuth refresh token response field', { exact: true }).fill('refresh_token_value');
+  await setup.getByRole('button', { name: 'Start account authorization' }).click();
+  await expect(setup.getByRole('link', { name: 'Open provider authorization' })).toHaveAttribute('href', 'https://provider.example/authorize?state=fixture');
+  await expect(setup.getByLabel('OAuth client secret')).toHaveValue('');
+  await setup.getByRole('button', { name: 'Cancel authorization', exact: true }).click();
+  expect(cancellations).toBe(1);
+  await setup.getByLabel('OAuth client secret').fill('fixture-client-secret');
+  await setup.getByRole('button', { name: 'Start account authorization' }).click();
+  authorized = true; fixture.connectors[0]!.readiness = { ready: true }; credential.ready = true;
+  await page.clock.fastForward(2100);
+  await expect(setup.getByRole('status').filter({ hasText: 'Account authorization is ready.' })).toBeVisible();
+  expect(starts).toBe(2);
+  await expect(page.locator('body')).not.toContainText('fixture-client-secret');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('connection-auth-phone.png'), animations: 'disabled' });
+});
+
+test('project runtime credentials save references, reject duplicate bindings, and clear without restarting services', async ({ page }, testInfo) => {
+  const fixture = await sourceReviewFixture(page);
+  const credential = { id: 'a9a5fae9-2760-43f5-8b81-cd5c0f7c0091', name: 'Runtime provider account', kind: 'secret', fields: ['key', 'secret'], revision: 1, ready: true, expiresAt: null, updatedAt: new Date().toISOString() };
+  let environment: import('../src/credentials/schemas').ProjectEnvironment | null = null;
+  const writes: unknown[] = [], serviceActions: string[] = [];
+  await page.route('**/api/credentials', route => { expect(route.request().method()).toBe('GET'); return route.fulfill({ json: [credential] }); });
+  await page.route(`**/api/projects/${fixture.project.id}/environment`, route => {
+    if (route.request().method() === 'PUT') { const input = route.request().postDataJSON(); writes.push(input); environment = input.environment; }
+    return route.fulfill({ json: { environment, readiness: { ready: true } } });
+  });
+  await page.route(`**/api/projects/${fixture.project.id}/deploy`, route => { serviceActions.push('deploy'); return route.fulfill({ status: 500, json: { error: 'Services must not be changed by credential setup.' } }); });
+  await page.route(`**/api/projects/${fixture.project.id}/deployment/stop`, route => { serviceActions.push('stop'); return route.fulfill({ status: 500, json: { error: 'Services must not be changed by credential setup.' } }); });
+  await login(page); await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const setup = page.getByRole('region', { name: 'Runtime credentials', exact: true });
+  await setup.getByLabel('Runtime saved credential', { exact: true }).selectOption(credential.id);
+  await expect(setup).toContainText('Available fields: key, secret');
+  await setup.getByLabel('Runtime environment bindings', { exact: true }).fill('API_KEY=key\nAPI_KEY=secret');
+  await setup.getByRole('button', { name: 'Save runtime credentials', exact: true }).click();
+  await expect(setup.getByRole('alert')).toHaveText('Each environment variable can be bound only once.');
+  expect(writes).toEqual([]);
+  await setup.getByLabel('Runtime environment bindings', { exact: true }).fill('API_KEY=key\nAPI_SECRET=secret');
+  await setup.getByRole('button', { name: 'Save runtime credentials', exact: true }).click();
+  await expect(setup.getByRole('status')).toContainText('Redeploy to apply it before restarting the old unit.');
+  expect(writes).toEqual([{ environment: { credentialId: credential.id, bindings: { API_KEY: 'key', API_SECRET: 'secret' } } }]);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await setup.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('runtime-credentials-phone.png'), animations: 'disabled' });
+  await setup.getByRole('button', { name: 'Clear runtime credentials', exact: true }).click();
+  await expect(setup.getByRole('status')).toContainText('Runtime credential binding cleared.');
+  await expect(setup.getByLabel('Runtime saved credential', { exact: true })).toHaveValue('');
+  await expect(setup.getByLabel('Runtime environment bindings', { exact: true })).toHaveValue('');
+  await expect(setup.getByRole('button', { name: 'Clear runtime credentials', exact: true })).toBeDisabled();
+  expect(writes[1]).toEqual({ environment: null });
+  expect(serviceActions).toEqual([]);
+});
+
+test('Jobs returns event tokens once, clears them after copy or close, and discards late responses', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  const { fixture } = await workerPlatformFixture(page);
+  const id = '4ab46725-98e1-43c9-89e6-28b7f75da455';
+  fixture.jobs.push({ id, name: 'Provider event template', projectId: fixture.project.id, prompt: 'Process the supplied event once.', schedule: { type: 'interval', seconds: 300 }, enabled: false, workerId: 'research', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), nextRunAt: null, lastRunAt: null, blockedReason: null, history: [] });
+  const late = deferred(); let generated = 0;
+  await page.route(`**/api/jobs/${id}/trigger-token`, async route => {
+    expect(route.request().method()).toBe('POST'); generated++;
+    if (generated === 3) await late.promise;
+    const credential = { id: 'f779dd19-f648-4e8e-8904-4365c4831a34', name: 'Provider event template event token', kind: 'secret' as const, fields: ['token'], revision: generated, ready: true, expiresAt: null, updatedAt: new Date().toISOString() };
+    return route.fulfill({ json: { token: `fixture-once-only-token-${generated}`, endpoint: `/api/job-events/${id}`, credential } });
+  });
+  try {
+    await login(page); await page.getByRole('button', { name: 'Jobs', exact: true }).click();
+    const section = page.locator('details').filter({ has: page.locator('summary', { hasText: 'Event-triggered execution' }) });
+    await section.locator('summary').click();
+    await section.getByRole('button', { name: 'Generate event token', exact: true }).click();
+    const token = section.getByLabel('One-time job event token', { exact: true });
+    await expect(token).toHaveValue('fixture-once-only-token-1');
+    await expect(token).toHaveAttribute('type', 'password');
+    await expect(section.getByLabel('Job event endpoint')).toHaveText(`/api/job-events/${id}`);
+    await expect(section).toContainText('Saved credential: Provider event template event token');
+    await section.getByRole('button', { name: 'Show event token', exact: true }).click();
+    await expect(token).toHaveAttribute('type', 'text');
+    await section.getByRole('button', { name: 'Hide event token', exact: true }).click();
+    await section.getByRole('button', { name: 'Copy event token', exact: true }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('fixture-once-only-token-1');
+    await expect(token).toHaveCount(0);
+    await expect(section.getByRole('status')).toContainText('Token copied.');
+    expect(await page.evaluate(() => JSON.stringify({ local: localStorage, session: sessionStorage }))).not.toContain('fixture-once-only-token');
+    await section.getByRole('button', { name: 'Generate event token', exact: true }).click();
+    await expect(token).toHaveValue('fixture-once-only-token-2');
+    await section.locator('summary').click(); await section.locator('summary').click();
+    await expect(token).toHaveCount(0);
+    await section.getByRole('button', { name: 'Generate event token', exact: true }).click();
+    await expect.poll(() => generated).toBe(3);
+    await section.locator('summary').click();
+    const response = page.waitForResponse(`**/api/jobs/${id}/trigger-token`);
+    late.resolve(); await response; await nextPaint(page);
+    await section.locator('summary').click();
+    await expect(token).toHaveCount(0);
+    expect(fixture.runs).toEqual([]);
+  } finally { late.resolve(); }
 });

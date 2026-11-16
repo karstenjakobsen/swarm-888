@@ -18,7 +18,7 @@ function fixture(){
 test('browser and terminal launch arguments carry explicit controller settings safely through sudo',()=>{
   const f=fixture();
   try{
-    const config={stateDir:join(f.directory,"state 'quoted' $USER `pwd`"),controllerUid:1234,codexBin:'/fixture/codex',allowTempState:true,model:'test-model'} as Config;
+    const config={stateDir:join(f.directory,"state 'quoted' $USER `pwd`"),controllerUid:1234,codexBin:'/fixture/codex',allowTempState:true,model:'test-model',requireRootWorker:true} as Config;
     const fallback=workerLaunch(config);assert(fallback.args.includes(`APP_PROJECTS_DIR=${join(config.stateDir,'projects')}`));
     config.projectsDir=join(f.directory,"projects 'quoted' $USER `pwd`");
     const launch=workerLaunch(config),result=spawnSync('/bin/sh',['-c',launch.command],{env:f.env,encoding:'utf8'});

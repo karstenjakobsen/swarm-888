@@ -34,12 +34,17 @@ export function runtimeEnvironment(config: Config, runId?: string): NodeJS.Proce
     OPERATOR_RUN_ID: runId ?? '', CODEX_DISABLE_UPDATE_CHECK: '1' };
 }
 
-export function connectorConfiguration(raw:ConnectorSnapshot[]):string[] {
+export function connectorConfiguration(raw:ConnectorSnapshot[],config?:Pick<Config,'stateDir'>):string[] {
   const connectors=z.array(connectorSnapshotSchema).max(20).parse(raw),seen=new Set<string>();const args:string[]=[];
   const option=(name:string,key:string,value:unknown)=>args.push('-c',`mcp_servers.${name}.${key}=${JSON.stringify(value)}`);
   for(const connector of connectors){
     const name=connectorServerName(connector);if(seen.has(name))throw new Error('A connector may appear only once in a task snapshot.');seen.add(name);
-    if(connector.transport==='stdio'){
+    if('auth' in connector&&connector.auth){
+      if(!config)throw new Error('Credential-bound connectors require their worker configuration.');
+      const loader=createRequire(import.meta.url).resolve('tsx');option(name,'command',process.execPath);option(name,'args',['--import',loader,resolve(import.meta.dirname,'../connectors/proxy.ts')]);
+      option(name,'env.OPERATOR_CONNECTOR_CONFIG',JSON.stringify(connector));option(name,'env.APP_STATE_DIR',config.stateDir);
+      for(const [key,value] of Object.entries(connectorEnvironment()))option(name,`env.${key}`,value);option(name,'env_vars',[]);
+    }else if(connector.transport==='stdio'){
       option(name,'command',connector.command);option(name,'args',connector.args);if(connector.cwd)option(name,'cwd',connector.cwd);
       for(const [key,value] of Object.entries(connectorEnvironment()))option(name,`env.${key}`,value);option(name,'env_vars',[]);
     }else option(name,'url',connector.url);
@@ -58,7 +63,7 @@ export class CodexAdapter extends EventEmitter {
   private shuttingDown = false;
   private closing?:Promise<void>;
   private toolProxy?:Awaited<ReturnType<typeof createToolProxy>>;
-  private improvement?: { limit: number; observed: Set<string>; interrupted: boolean; interruptSent: boolean };
+  private improvement?: { limit: number; observed: Set<string>; interrupted: boolean; interruptSent: boolean;source:'improvement'|'task' };
   threadId?: string;
   turnId?: string;
   version = '';
@@ -76,10 +81,11 @@ export class CodexAdapter extends EventEmitter {
     const loader = require.resolve('tsx');
     const args = ['app-server', '--listen', 'stdio://',
       '-c', 'approval_policy="never"', '-c', 'sandbox_mode="danger-full-access"',
+      ...(this.config.model?['-c',`model=${JSON.stringify(this.config.model)}`]:[]),...(this.config.effort?['-c',`model_reasoning_effort=${JSON.stringify(this.config.effort)}`]:[]),
       '-c', `mcp_servers.operator.command=${JSON.stringify(process.execPath)}`,
       '-c', `mcp_servers.operator.args=${JSON.stringify(['--import', loader, mcpScript])}`,
       '-c', `mcp_servers.operator.env_vars=${JSON.stringify(['APP_BRIDGE_SOCKET', 'APP_BRIDGE_TOKEN', 'OPERATOR_RUN_ID', ...(process.env.LD_LIBRARY_PATH ? ['LD_LIBRARY_PATH'] : [])])}`,
-      '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',...connectorConfiguration(this.connectors),
+      '-c', 'mcp_servers.operator.startup_timeout_sec=20', '-c', 'mcp_servers.operator.tool_timeout_sec=600',...connectorConfiguration(this.connectors,this.config),
     ];
     this.toolProxy=await createToolProxy(this.config,this.runId);
     const invocation=executionCommand(this.config,this.config.codexBin,args);
@@ -102,6 +108,16 @@ export class CodexAdapter extends EventEmitter {
 
   async health(refreshToken = false): Promise<{ authenticated: boolean; detail: string }> {
     const result = z.object({ account: z.unknown().nullable(), requiresOpenaiAuth: z.boolean() }).parse(await this.request('account/read', { refreshToken }));
+    if(this.config.model){
+      let cursor:string|undefined,found:{id:string;model:string;supportedReasoningEfforts:Array<{reasoningEffort:string}>}|undefined;const seen=new Set<string>();
+      for(let page=0;page<20;page++){
+        const models=z.object({data:z.array(z.object({id:z.string(),model:z.string(),supportedReasoningEfforts:z.array(z.object({reasoningEffort:z.string()}).passthrough())}).passthrough()).max(1000),nextCursor:z.string().nullable().optional()}).parse(await this.request('model/list',{includeHidden:true,limit:100,...(cursor?{cursor}:{})}));
+        found=models.data.find(model=>model.id===this.config.model||model.model===this.config.model);if(found)break;
+        if(!models.nextCursor)break;if(seen.has(models.nextCursor))throw new Error('Codex model catalog repeated its pagination cursor.');seen.add(models.nextCursor);cursor=models.nextCursor;
+      }
+      if(!found)throw new Error(`Configured model ${this.config.model} is not available in this worker's Codex model catalog.`);
+      if(this.config.effort&&!found.supportedReasoningEfforts.some(effort=>effort.reasoningEffort===this.config.effort))throw new Error(`Configured effort ${this.config.effort} is not supported by model ${this.config.model}.`);
+    }
     const authenticated = result.account !== null || !result.requiresOpenaiAuth;
     return { authenticated, detail: authenticated ? 'Codex authentication configured' : 'Model authentication missing. Connect the agent in the web interface to sign in with ChatGPT.' };
   }
@@ -117,7 +133,8 @@ export class CodexAdapter extends EventEmitter {
 
   async run(submission: Submission): Promise<void> {
     this.turnId = undefined;
-    this.improvement = submission.kind === 'improvement' ? { limit: this.config.improvementMaxTurns, observed: new Set(), interrupted: false, interruptSent: false } : undefined;
+    const toolLimit=submission.maxToolCalls??(submission.kind==='improvement'?this.config.improvementMaxTurns:undefined);
+    this.improvement = toolLimit ? { limit: toolLimit, observed: new Set(), interrupted: false, interruptSent: false,source:submission.kind==='improvement'?'improvement':'task' } : undefined;
     const shared: ThreadStartParams = { cwd: submission.cwd, approvalPolicy: 'never', sandbox: 'danger-full-access', developerInstructions: submission.bootstrap, ...(this.config.model ? { model: this.config.model } : {}) };
     const response = threadResponse.parse(await this.request(submission.threadId ? 'thread/resume' : 'thread/start', submission.threadId ? { ...shared, threadId: submission.threadId } satisfies ThreadResumeParams : shared));
     if (response.approvalPolicy !== 'never' || response.sandbox.type !== 'dangerFullAccess') throw new Error('Runtime policy did not grant requested never/danger-full-access execution; no turn was started');
@@ -131,7 +148,7 @@ export class CodexAdapter extends EventEmitter {
       return { ...skill, runtimePath: match.path };
     });
     this.emit('event', 'skills', { loaded, errors: discovered.data.flatMap(entry => entry.errors) });
-    const params: TurnStartParams = { threadId: this.threadId, input: [{ type: 'text', text: submission.prompt, text_elements: [] }], approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } };
+    const params: TurnStartParams = { threadId: this.threadId, input: [{ type: 'text', text: submission.prompt, text_elements: [] }], approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' },...(this.config.effort?{effort:this.config.effort}:{}) };
     const turn = z.object({ turn: z.object({ id: z.string() }) }).parse(await this.request('turn/start', params));
     this.turnId = turn.turn.id;
     this.emit('event', 'status', { status: 'running', turnId: this.turnId });
@@ -202,7 +219,7 @@ export class CodexAdapter extends EventEmitter {
         this.improvement.observed.add(params.item.id);
         if (this.improvement.observed.size >= this.improvement.limit) {
           this.improvement.interrupted = true;
-          this.emit('event', 'activity', { method: 'operator/improvementBudget', limit: this.improvement.limit, observed: this.improvement.observed.size, reason: 'Observed tool-call budget reached; interrupting the separate improvement turn' });
+          this.emit('event', 'activity', { method: this.improvement.source==='improvement'?'operator/improvementBudget':'operator/toolBudget', limit: this.improvement.limit, observed: this.improvement.observed.size, reason: 'Observed tool-call budget reached; interrupting the turn' });
           if (this.turnId) { this.improvement.interruptSent = true; void this.interrupt().catch(error => this.emit('fault', error)); }
         }
       }

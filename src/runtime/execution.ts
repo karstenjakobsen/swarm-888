@@ -1,6 +1,7 @@
 import { lchownSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Config } from '../config.ts';
+import { prepareWorkerDirectory, workerDirectory } from '../workers/config.ts';
 
 export function inside(root:string,path:string):boolean {
   const rel=relative(resolve(root),resolve(path));
@@ -40,13 +41,14 @@ export function prepareExecutionDirectory(config:Config,directory:string):void {
 }
 
 export function prepareExecutionProfile(config:Config):void {
+  if(config.workerId)prepareWorkerDirectory(config);
   mkdirSync(config.runtimeHome,{recursive:true,mode:0o700});
   if(realpathSync(config.runtimeHome)!==resolve(config.runtimeHome))throw new Error('Codex profile must be a canonical directory.');
 }
 
 export function trustedExecutionDirectory(config:Config,name:string):string {
   if(!/^[a-z][a-z-]*$/.test(name))throw new Error('Invalid worker runtime directory.');
-  const path=join(config.stateDir,'worker',name);
+  const path=join(workerDirectory(config),name);
   mkdirSync(path,{recursive:true,mode:0o700});
   if(realpathSync(path)!==resolve(path))throw new Error('Worker runtime directory must be canonical.');
   return path;

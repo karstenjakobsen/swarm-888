@@ -109,6 +109,23 @@ test('a separate improvement run is interrupted at its observed tool-call budget
     assert.equal((await completed).status, 'interrupted'); assert(events.some(event => event.data.method === 'operator/improvementBudget' && event.data.observed === 1));
   } finally { await adapter.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('user tasks are interrupted at their explicit observed tool-call budget',async()=>{
+  const {config,directory}=setup(),adapter=new CodexAdapter(config,'bounded-user');
+  try{
+    await adapter.start();const events:Array<{type:string;data:any}>=[];adapter.on('event',(type,data)=>events.push({type,data}));
+    const completed=new Promise<any>(ok=>adapter.on('event',(type,data)=>{if(type==='completed')ok(data);}));
+    await adapter.run({runId:'bounded-user',conversationId:'fixture',prompt:'budget',cwd:directory,bootstrap:'',skills:[],maxToolCalls:1});assert.equal((await completed).status,'interrupted');
+    assert(events.some(event=>event.data.method==='operator/toolBudget'&&event.data.limit===1));
+  }finally{await adapter.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+test('configured models and effort must be advertised by the worker runtime before it becomes ready',async()=>{
+  const config={model:'fixture-model',effort:'high'} as Config,adapter=new CodexAdapter(config);const calls:Array<{method:string;params:any}>=[];
+  adapter.request=async(method,params)=>{calls.push({method,params});if(method==='account/read')return {account:null,requiresOpenaiAuth:false};return (params as {cursor?:string}).cursor?{data:[{id:'fixture-model',model:'fixture-model',supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null}:{data:[],nextCursor:'second'};};
+  assert.equal((await adapter.health()).authenticated,true);assert.equal(calls.filter(call=>call.method==='model/list').length,2);
+  config.model='unknown-model';await assert.rejects(adapter.health(),/not available/);config.model='fixture-model';config.effort='ultra';await assert.rejects(adapter.health(),/not supported/);await adapter.close();
+});
 test('real app-server discovers the stdio MCP bridge and returns durable application tool results', { timeout: 30_000 }, async () => {
   const { config, directory } = setup(); config.codexBin = join(process.cwd(), 'node_modules/.bin/codex');
   for (const name of ['skills', 'workspaces', 'artifacts', 'worker']) mkdirSync(join(directory, name));

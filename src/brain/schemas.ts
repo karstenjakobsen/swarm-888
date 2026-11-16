@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { delegatedTaskInput } from '../tasks/schemas.ts';
+import { jobInput,jobPatch } from '../jobs/schemas.ts';
 import { projectCreateInput, projectUpdateInput, componentInput, componentUpdateInput, projectId } from '../projects/schemas.ts';
 import { sourceCreateInput, sourceWriteInput, sourceCommitInput } from '../managed/schemas.ts';
 import { connectorInput, connectorPatchInput, connectorAssignmentInput, connectorCall } from '../connectors/schemas.ts';
@@ -33,6 +35,15 @@ export type CheckSpec = { candidatePath: string; checks: SkillCheck[] };
 export type CheckEvidence = { passed: boolean; checks: Array<{ name: string; exitCode: number | null; stdout: string; stderr: string; passed: boolean; error?: string; durationMs: number }> };
 
 export const toolSchemas = {
+  worker_list:z.object({}).strict(),
+  task_create:delegatedTaskInput,
+  task_get:z.object({id:z.string().uuid()}).strict(),
+  task_list:z.object({}).strict(),
+  task_cancel:z.object({id:z.string().uuid()}).strict(),
+  job_list:z.object({projectId:z.string().uuid().optional()}).strict(),
+  job_create:jobInput,
+  job_update:jobPatch.extend({id:z.string().uuid()}),
+  job_trigger:z.object({id:z.string().uuid()}).strict(),
   project_list:z.object({}).strict(),
   project_get:z.object({id:projectId}).strict(),
   project_create:projectCreateInput,
@@ -74,6 +85,15 @@ export const toolSchemas = {
 } as const;
 
 export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
+  worker_list:'List registered worker availability, selected model and actual OS identity. Model choice does not grant OS privileges.',
+  task_create:'Create a durable delegated task from the current task with an explicit request ID and bounded worker, root, connector, context and output requirements. Parent grants and budgets apply.',
+  task_get:'Read a durable task, its attempt ownership and observed outcome.',
+  task_list:'List durable tasks visible to the current operator context.',
+  task_cancel:'Cancel queued work or request interruption of an owned running task; external deployed services can continue.',
+  job_list:'List durable scheduled operator jobs and observed run history, optionally for a project.',
+  job_create:'Create a project job with an interval or timezone-aware cron schedule and explicit worker/connector/budget requirements. Missing connections block work rather than obtaining secrets through chat.',
+  job_update:'Update a durable scheduled job. Changes affect future scheduled tasks.',
+  job_trigger:'Queue a manual occurrence of a registered job, restricted to the current parent task connection, privilege and execution limits.',
   project_list:'List durable projects and their observed website, service, schedule and script state. Unknown or stale status is not proof of failure or success.',
   project_get:'Read a project, registered components, observations and linked tasks.',
   project_create:'Create a project before building or deploying it. For new code set managed:true to create committed generated source in this Git repository; template service creates a tested local HTTP example, empty creates a source package. Source and runtime directories are separate. Adopted directories stay within the projects root. Links the current conversation.',
@@ -92,7 +112,7 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   project_deployment_logs:'Read bounded logs for this project’s managed service.',
   project_connectors:'Select registered MCP connections for subsequent project tasks. Enabled selected connections become namespaced tools at the next task start.',
   connector_list:'List registered MCP connections, discovered tools and last observed connection health.',
-  connector_register:'Register a local stdio MCP command or an unauthenticated HTTP endpoint. Credentials are configured in a later slice; never put secrets in URL, arguments or chat.',
+  connector_register:'Register a local stdio MCP command or HTTP endpoint. The owner configures scoped credentials and OAuth through Connections; never put secret values in URLs, arguments, source or chat.',
   connector_register_project:'Register the MCP configuration declared in a managed project source manifest. Local package code is prepared from its committed revision outside the authoring worktree.',
   connector_update:'Rename, describe, enable or disable a registered MCP connection.',
   connector_test:'Initialize a registered MCP server and discover its actual tools. Reports failure honestly.',
@@ -107,7 +127,7 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   progress_checkpoint: 'Persist a concise milestone and resumable summary for the current task immediately.',
   skill_search: 'Search existing application skills before creating duplicates. Includes disabled and candidate packages.',
   skill_read: 'Read an application skill package, immutable versions and actual validation evidence on demand.',
-  skill_create: 'Create a candidate revision from files including SKILL.md, with real deterministic fixture checks. Does not activate it.',
+  skill_create: 'Commit reusable skill source and deterministic checks in the managed Git repository, then create a candidate runtime revision. Does not activate it.',
   skill_validate: 'Validate metadata, declared package files, helpers and execute representative fixture checks on the worker. Records actual evidence.',
   skill_publish: 'Atomically publish a validated candidate as an immutable version and optionally activate for future runs.',
   skill_action: 'Activate, disable, retire or roll back a published skill. Active runs retain their immutable version.',

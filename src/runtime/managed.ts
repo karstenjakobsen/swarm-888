@@ -1,6 +1,8 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { managedFilesSchema, managedManifestSchema, managedPath, managedStatusResult } from '../managed/schemas.ts';
@@ -8,11 +10,15 @@ import { projectReferenceSchema } from '../projects/schemas.ts';
 import { executionEnvironment, inside, prepareExecutionDirectory } from './execution.ts';
 import { validateProjectReference } from './projects.ts';
 import { markCleanupUncertain, markExternalEffects, signalOwned, spawnOwned, terminateOwned } from './operations.ts';
+import { projectEnvironmentSchema } from '../credentials/schemas.ts';
+import { resolveProjectSecrets } from '../credentials/runtime.ts';
+import { serviceConfiguration,serviceDescriptorPath,serviceLaunchSchema,type ServiceLaunch } from './service-launch.ts';
 
 export const managedPrepareInput=z.object({
   project:projectReferenceSchema,source:z.object({commit:z.string().regex(/^[0-9a-f]{40,64}$/),path:z.string().max(2000)}).strict(),
   manifest:managedManifestSchema,files:managedFilesSchema,
 }).strict();
+export const managedDeployInput=managedPrepareInput.extend({environment:projectEnvironmentSchema.nullable().optional()});
 export const managedLifecycleInput=z.object({project:projectReferenceSchema}).strict();
 type PrepareInput=z.infer<typeof managedPrepareInput>;
 type LifecycleInput=z.infer<typeof managedLifecycleInput>;
@@ -136,32 +142,49 @@ export class ManagedRuntime {
     });
   }
   deploy(raw:unknown):Promise<Status&{releaseDirectory:string;commit:string}> {
-    const input=managedPrepareInput.parse(raw);
+    const input=managedDeployInput.parse(raw);
     return this.exclusive(input.project.id,async()=>{
       if(!['project','connector'].includes(input.manifest.kind)||!input.manifest.run)throw new Error('Deployment requires a project or connector manifest with a run command.');
       const release=this.prepareSnapshot(input);
-      const run=[executable(input.manifest.run.command,release.releaseDirectory),...input.manifest.run.args].map(value=>quoteUnit(value,true)).join(' ');
+      const executablePath=executable(input.manifest.run.command,release.releaseDirectory),literal=[executablePath,...input.manifest.run.args];
+      let run=literal.map(value=>quoteUnit(value,true)).join(' ');
       if(!this.host.isRoot())throw new Error('Managed deployment requires a root worker to install and enable its systemd service.');
+      const environment=input.environment?{...input.environment,bindings:Object.fromEntries(Object.entries(input.environment.bindings).sort(([a],[b])=>a.localeCompare(b)))}:null;
+      const credentials=environment?resolveProjectSecrets(this.config,input.project.id,environment):undefined;
+      const configuration=environment?serviceConfiguration(environment,credentials!.materialRevision):undefined;
       // Check the real manager before touching the previous independently running service.
       try{await this.execute('/usr/bin/systemctl',['show','--property=Version','--no-pager']);}
       catch{throw new Error('Systemd is unavailable; the committed release was prepared, but no service was deployed.');}
-      const existing=await this.observe(input);
-      if(existing.status==='running'&&existing.commit===input.source.commit&&existing.releaseDirectory===release.releaseDirectory)return {...release,...existing,releaseDirectory:release.releaseDirectory,commit:release.commit};
+      const previousConfiguration:{value?:string}={},existing=await this.observe(input,previousConfiguration);
+      if(existing.status==='running'&&existing.commit===input.source.commit&&existing.releaseDirectory===release.releaseDirectory&&previousConfiguration.value===configuration)return {...release,...existing,releaseDirectory:release.releaseDirectory,commit:release.commit};
       for(const [name,timeout] of [['check',30_000],['build',60_000]] as const){const operation=input.manifest[name];if(operation)await this.execute(operation.command,operation.args,release.releaseDirectory,timeout);}
       this.prepareSnapshot(input);
-      markExternalEffects();this.host.writeUnit(unitName(input),`[Unit]\nDescription=VPS AI project ${input.project.id}\nAfter=network.target\n\n[Service]\nType=exec\nWorkingDirectory=${quoteUnit(release.releaseDirectory)}\nExecStart=${run}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n`);
+      if(environment){
+        const descriptor=this.writeServiceDescriptor(serviceLaunchSchema.parse({schemaVersion:1,projectId:input.project.id,controllerUid:this.config.controllerUid,stateDir:resolve(this.config.stateDir),projectDirectory:input.project.directory,releaseDirectory:release.releaseDirectory,command:executablePath,args:input.manifest.run.args,environment,materialRevision:credentials!.materialRevision}));
+        run=[process.execPath,'--import',createRequire(import.meta.url).resolve('tsx'),fileURLToPath(new URL('./service-launch.ts',import.meta.url)),descriptor].map(value=>quoteUnit(value,true)).join(' ');
+      }
+      markExternalEffects();this.host.writeUnit(unitName(input),`[Unit]\nDescription=VPS AI project ${input.project.id}${configuration?` configuration ${configuration}`:''}\nAfter=network.target\n\n[Service]\nType=exec\nWorkingDirectory=${quoteUnit(release.releaseDirectory)}\nExecStart=${run}\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=multi-user.target\n`);
       await this.execute('/usr/bin/systemctl',['daemon-reload']);
       await this.execute('/usr/bin/systemctl',['enable','--',unitName(input)]);
       await this.execute('/usr/bin/systemctl',['restart','--',unitName(input)]);
-      const status=await this.observe(input);
-      if(status.status!=='running'||status.commit!==release.commit||status.releaseDirectory!==release.releaseDirectory)throw new Error(`Systemd did not confirm the requested committed release running. ${status.detail}`);
+      const activeConfiguration:{value?:string}={},status=await this.observe(input,activeConfiguration);
+      if(status.status!=='running'||status.commit!==release.commit||status.releaseDirectory!==release.releaseDirectory||activeConfiguration.value!==configuration)throw new Error(`Systemd did not confirm the requested committed release and environment configuration running. ${status.detail}`);
       return {...release,...status,releaseDirectory:release.releaseDirectory,commit:release.commit};
     });
   }
-  private async observe(input:LifecycleInput):Promise<Status> {
+  private writeServiceDescriptor(input:ServiceLaunch):string {
+    const path=serviceDescriptorPath(input);prepareExecutionDirectory(this.config,dirname(path));const content=JSON.stringify(input);
+    if(existsSync(path)){
+      const stat=lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||(stat.mode&0o077)!==0||readReleaseFile(path,100_000)!==content)throw new Error('Existing project service descriptor differs from its immutable configuration.');return path;
+    }
+    const temporary=`${path}.${randomUUID()}`;
+    try{writeFileSync(temporary,content,{flag:'wx',mode:0o600,flush:true});renameSync(temporary,path);}finally{rmSync(temporary,{force:true});}return path;
+  }
+  private async observe(input:LifecycleInput,configuration?:{value?:string}):Promise<Status> {
     validateProjectReference(this.config,input.project);const base={unitName:unitName(input),checkedAt:new Date().toISOString()};
-    const result=await this.command('/usr/bin/systemctl',['show','--no-pager','--property=LoadState,ActiveState,SubState,WorkingDirectory,Result','--',base.unitName],{timeoutMs:5000,signal:this.controller.signal});
+    const result=await this.command('/usr/bin/systemctl',['show','--no-pager','--property=LoadState,ActiveState,SubState,WorkingDirectory,Result,Description','--',base.unitName],{timeoutMs:5000,signal:this.controller.signal});
     const state=properties(result.stdout);
+    if(configuration)configuration.value=state.Description?.match(new RegExp(`^VPS AI project ${input.project.id} configuration ([0-9a-f]{64})$`))?.[1];
     if(state.LoadState==='not-found')return {...base,status:'unknown',detail:'No managed systemd service is registered.'};
     if(result.exitCode!==0||!state.ActiveState)throw new Error('Systemd service state is unavailable.');
     const directory=state.WorkingDirectory,releases=join(input.project.directory,'releases');

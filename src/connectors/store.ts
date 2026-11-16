@@ -19,6 +19,11 @@ export class ConnectorStore {
   update(id:string,input:Pick<Connector,'name'|'description'|'enabled'>){
     this.db.prepare('UPDATE connectors SET name=?,description=?,enabled=?,updatedAt=? WHERE id=?').run(input.name,input.description,input.enabled?1:0,new Date().toISOString(),id);
   }
+  setAuth(id:string,auth:Connector['auth']|null){
+    const row=this.db.prepare('SELECT definition FROM connectors WHERE id=?').get(id) as {definition:string}|undefined;if(!row)throw new Error('Connection not found');
+    const definition=JSON.parse(row.definition);if(auth)definition.auth=auth;else delete definition.auth;
+    this.db.prepare("UPDATE connectors SET definition=?,tools='[]',status='untested',detail='Connection authorization changed; test it again.',checkedAt=NULL,updatedAt=? WHERE id=?").run(JSON.stringify(definition),new Date().toISOString(),id);this.db.prepare('DELETE FROM connector_checks WHERE connectorId=?').run(id);
+  }
   observed(id:string,tools:ConnectorTool[],checkedAt:string,snapshot:string){
     connectorToolsResult.parse({tools,checkedAt});
     this.db.prepare("UPDATE connectors SET tools=?,status='connected',detail=?,checkedAt=? WHERE id=?").run(JSON.stringify(tools),`Discovered ${tools.length} MCP tools.`,checkedAt,id);

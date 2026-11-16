@@ -56,7 +56,12 @@ test('shutdown drains source recovery before its caller can close persistent sta
   let release!:()=>void,ready!:()=>void,accessed=false;
   const gate=new Promise<void>(resolve=>{release=resolve;}),entered=new Promise<void>(resolve=>{ready=resolve;});
   const queue=new Queue({stateDir,improvementEnabled:false} as Config,store,{ensureFoundation:async()=>{}} as Brain,client as unknown as WorkerClient);
-  queue.setManaged({recoverSource:async()=>{ready();await gate;store.setting('maintenance');accessed=true;}} as ManagedService,{} as ConnectorService);
+  const projectId='1bfc2c54-c7b9-4c0e-800a-6eaf33dc3401',now=new Date().toISOString();
+  store.projects.create({id:projectId,name:'Pending source fixture',description:'',directory:join(stateDir,'projects',projectId),origin:'created',createdAt:now,updatedAt:now});
+  const conversation=store.newConversation();store.projects.linkConversation(projectId,conversation.id);
+  store.managed.saveSource(projectId,'project',{repositoryPath:stateDir,branch:'fixture',path:`generated/projects/${projectId}`,workspacePath:join(stateDir,'source'),commit:'a'.repeat(40),dirty:false});
+  const run=store.enqueue(conversation.id,'Finalize source','source-drain-fixture');store.transition(run.id,'running');store.transition(run.id,'completed');
+  queue.setManaged({finishRun:async()=>{ready();await gate;store.setting('maintenance');accessed=true;}} as unknown as ManagedService,{} as ConnectorService);
   try{
     const ticking=queue.tick();await entered;queue.close();let drained=false;
     const draining=queue.drainSource().then(()=>{drained=true;});await Promise.resolve();assert.equal(drained,false);

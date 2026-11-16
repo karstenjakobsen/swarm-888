@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync, writeFileSync, statSync, lstatSync, realpathSy
 import { homedir } from 'node:os';
 import { resolve, join, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { workerEffort, workerId as workerIdSchema, workerMode, type WorkerRecord } from './workers/schemas.ts';
+import { prepareWorkerDirectory } from './workers/config.ts';
 
 export const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 export interface Config {
@@ -15,6 +17,7 @@ export interface Config {
   projectsDir?: string;
   /** Git repository used for generated packages; runtime state remains outside it. */
   repositoryPath?: string;
+  workerId?:string;workerDir?:string;workerMode?:WorkerRecord['mode'];effort?:WorkerRecord['effort'];
 }
 
 function integer(value: string | undefined, fallback: number, min: number, max: number): number {
@@ -53,10 +56,13 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
     return url.origin;
   });
   const adminPassword = process.env.ADMIN_PASSWORD ?? '';
+  const workerId=process.env.APP_WORKER_ID&&process.env.APP_WORKER_ID!=='default'?workerIdSchema.parse(process.env.APP_WORKER_ID):undefined;
+  const mode=workerId?workerMode.parse(process.env.APP_WORKER_MODE??'user'):undefined;
+  const workerDir=workerId?join(normalized,'workers',workerId):undefined;
   if (options.requireAdmin && adminPassword.length < 12) throw new Error('Set ADMIN_PASSWORD to a unique credential of at least 12 characters in .env');
   const config: Config = {
-    stateDir: normalized, socketPath: join(normalized, 'worker.sock'), bridgeSocket: join(normalized, 'bridge.sock'), ipcToken: '',
-    controllerUid, codexBin: process.env.CODEX_BIN ?? join(projectRoot, 'node_modules/.bin/codex'), runtimeHome: join(normalized,'runtime'),
+    stateDir: normalized, socketPath: workerDir?join(workerDir,'worker.sock'):join(normalized, 'worker.sock'), bridgeSocket: join(normalized, 'bridge.sock'), ipcToken: '',
+    controllerUid, codexBin: process.env.CODEX_BIN ?? join(projectRoot, 'node_modules/.bin/codex'), runtimeHome: workerDir?join(workerDir,'runtime'):join(normalized,'runtime'),workerId,workerDir,workerMode:mode,effort:process.env.CODEX_EFFORT?workerEffort.parse(process.env.CODEX_EFFORT):undefined,
     model: process.env.CODEX_MODEL || undefined, host: process.env.APP_HOST ?? '127.0.0.1',
     port: integer(process.env.APP_PORT, 3001, 1, 65535),
     origins,
@@ -64,7 +70,7 @@ export function loadConfig(options: {requireAdmin?: boolean} = {}): Config {
     improvementEnabled: process.env.APP_IMPROVEMENT_ENABLED !== 'false',
     improvementTimeoutMs: integer(process.env.APP_IMPROVEMENT_TIMEOUT_MS, 90_000, 1000, 600_000),
     improvementMaxTurns: integer(process.env.APP_IMPROVEMENT_MAX_TURNS, 3, 1, 10), allowTempState,
-    requireRootWorker:process.env.APP_REQUIRE_ROOT_WORKER!=='false',projectsDir,
+    requireRootWorker:mode?mode==='root':process.env.APP_REQUIRE_ROOT_WORKER==='true',projectsDir,
     repositoryPath:resolve(process.env.APP_REPOSITORY_PATH??projectRoot),
   };
   initState(config);
@@ -98,4 +104,5 @@ export function initState(config: Config): void {
   config.ipcToken = readFileSync(tokenPath, 'utf8').trim();
   if (!/^[0-9a-f]{64}$/.test(config.ipcToken)) throw new Error('Invalid IPC secret file');
   chmodSync(config.stateDir, 0o700);
+  if(config.workerId)prepareWorkerDirectory(config);
 }

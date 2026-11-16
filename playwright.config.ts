@@ -30,7 +30,7 @@ export default defineConfig({
       command: 'node --import tsx src/controller.ts',
       url: 'http://127.0.0.1:3101/api/session',
       reuseExistingServer: false,
-      env: { ...inherited, APP_STATE_DIR: stateDir, APP_PROJECTS_DIR: join(stateDir, 'projects'), APP_REPOSITORY_PATH: repositoryPath, APP_ALLOW_TEMP_STATE: 'true', ADMIN_PASSWORD: 'browser-test-password-only', APP_PORT: '3101', APP_ORIGINS: 'http://127.0.0.1:5181', APP_IMPROVEMENT_ENABLED: 'false' },
+      env: { ...inherited, APP_STATE_DIR: stateDir, APP_PROJECTS_DIR: join(stateDir, 'projects'), APP_REPOSITORY_PATH: repositoryPath, APP_ALLOW_TEMP_STATE: 'true', APP_REQUIRE_ROOT_WORKER: 'true', ADMIN_PASSWORD: 'browser-test-password-only', APP_PORT: '3101', APP_ORIGINS: 'http://127.0.0.1:5181', APP_IMPROVEMENT_ENABLED: 'false' },
     },
     {
       command: 'npm exec vite -- --host 127.0.0.1 --port 5181',

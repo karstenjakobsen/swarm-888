@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createController } from '../src/controller.ts';
@@ -301,7 +301,7 @@ test('root-only mode keeps tasks queued even when a normal-user worker already h
     await f.queue.tick();
     assert.equal(f.store.run(run.id)?.status, 'queued');
     assert.equal(f.worker.submissions.length, 0);
-    assert.match(f.queue.status().workerError ?? '', /root worker required/i);
+    assert.match(f.store.run(run.id)?.blockedReason??'', /root worker|permissions/i);
     assertNoAuthPersistence(f);
   } finally { await f.dispose(); }
 });
@@ -382,7 +382,7 @@ for(const mode of ['different','missing'] as const)test(`connection status expos
     f.worker.uid=0;f.worker.executionUid=0;f.worker.complete();
     const expected=join(f.config.stateDir,'projects'),reported=join(f.config.stateDir,'previous-projects');f.worker.projectsDir=mode==='different'?reported:undefined;
     const status=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});assert.equal(status.statusCode,200);assert.equal(status.json().state,'error');assert.equal(status.json().workerSetupRequired,true);assert.equal(status.json().workerUid,0);
-    assert(status.json().error.includes(expected));assert(status.json().error.includes(mode==='different'?reported:'unknown (older worker)'));assert(status.json().rootWorkerCommand.includes(`APP_PROJECTS_DIR=${expected}`));assert.match(status.json().error,/npm run worker:root/);
+    assert(status.json().error.includes(expected));assert(status.json().error.includes(mode==='different'?reported:'unknown (older worker)'));assert(status.json().rootWorkerCommand.includes(`APP_PROJECTS_DIR=${expected}`));assert.match(status.json().error,/current command from Workers/);
     const connect=await f.app.inject({method:'POST',url:'/api/agent/connect',headers:f.headers,payload:{}});assert.equal(connect.statusCode,409);assert.equal(f.worker.authenticated,true);assert.equal(f.worker.calls.some(call=>call.method==='agent/connect'),false);
     assert.equal(f.worker.online,true);assert.equal(f.worker.calls.some(call=>call.method==='worker/reserve-root-replacement'),false);
   }finally{await f.dispose();}
@@ -403,7 +403,17 @@ for(const busy of ['run','uncertain','operation','login'] as const)test(`the wor
 test('worker launch API reuses a matching root worker and emits an explicit fallback project root in generated commands',async()=>{
   const f=await fixture();
   try{
-    f.worker.uid=0;f.worker.executionUid=0;f.worker.complete();const started=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});assert.equal(started.statusCode,200,started.body);assert.equal(started.json().state,'connected');
+    f.config.requireRootWorker=true;f.worker.uid=0;f.worker.executionUid=0;f.worker.complete();const started=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});assert.equal(started.statusCode,200,started.body);assert.equal(started.json().state,'connected');
     f.worker.online=false;const unavailable=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});assert.equal(f.config.projectsDir,undefined);assert(unavailable.json().rootWorkerCommand.includes(`APP_PROJECTS_DIR=${join(f.config.stateDir,'projects')}`));
+  }finally{await f.dispose();}
+});
+
+test('worker launch API reuses the normal user worker without requesting root by default',async()=>{
+  const f=await fixture();
+  try{
+    f.worker.uid=f.config.controllerUid;f.worker.executionUid=f.config.controllerUid;f.worker.complete();
+    const started=await f.app.inject({method:'POST',url:'/api/agent/worker',headers:f.headers,payload:{}});assert.equal(started.statusCode,200,started.body);assert.equal(started.json().workerUid,f.config.controllerUid);assert.equal(started.json().state,'connected');
+    assert.equal(existsSync(f.config.socketPath),false,'A matching fixture worker must not launch a real process');assert(!f.worker.calls.some(call=>call.method==='worker/reserve-root-replacement'));
+    f.worker.online=false;const unavailable=await f.app.inject({method:'GET',url:'/api/agent/connection',headers:f.headers});assert(!unavailable.json().rootWorkerCommand.startsWith("'sudo'"));
   }finally{await f.dispose();}
 });

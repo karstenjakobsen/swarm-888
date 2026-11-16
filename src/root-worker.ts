@@ -5,6 +5,8 @@ import { loadConfig, projectRoot, type Config } from './config.ts';
 import { WorkerClient, type WorkerHealth } from './ipc.ts';
 import { WorkerServer } from './worker.ts';
 import { processStamp } from './runtime/processes.ts';
+import { workerDirectory } from './workers/config.ts';
+import { loadWorkerConfig } from './workers/startup.ts';
 
 export interface WorkerReplacementIdentity {
   lock:{pid:number;start:string|null};start:string|null;args:string[];cwd:string;
@@ -41,11 +43,12 @@ export async function replaceIdleWorker(config:Config):Promise<boolean>{
   try{
     let health;
     try{health=await client.connect();}catch(error){if((error as NodeJS.ErrnoException).code==='ECONNREFUSED')return true;throw error;}
+    if(health.workerId&&health.workerId!==(config.workerId??'default'))throw new Error('A different worker owns this socket; it has not been replaced.');
     const existingRoot=health.uid===0&&health.root;
     if(existingRoot){
       if(health.executionUid!==undefined&&health.executionUid!==0)throw new Error('The existing worker uses a separate non-root execution account. Stop it in its terminal, then run this root-worker command again.');
       const expected=resolve(config.projectsDir??join(config.stateDir,'projects'));
-      if(health.projectsDir===expected)return false;
+      if(health.projectsDir===expected&&(health.model??null)===(config.model??null)&&(health.effort??null)===(config.effort??null))return false;
     }
     if(health.activeRunId||health.uncertainRuns.length||health.runtimeOperations?.length||health.runtime.authenticating)throw new Error('The existing worker is busy or uncertain. Finish, interrupt, or reconcile its work before replacing it with the root worker.');
     if(existingRoot&&(process.getuid?.()!==0||process.geteuid?.()!==0))throw new Error(`Root access is required to replace the existing root worker (expected APP_PROJECTS_DIR=${resolve(config.projectsDir??join(config.stateDir,'projects'))}; reported ${health.projectsDir??'unknown (older worker)'}). Run the fresh root-worker launch command.`);
@@ -54,7 +57,7 @@ export async function replaceIdleWorker(config:Config):Promise<boolean>{
       if(!reservation?.reserved||reservation.pid!==health.pid||reservation.uid!==health.uid)throw new Error('Unexpected worker reservation identity');
       reserved=true;
     }catch{throw new Error('The existing worker could not reserve idle execution for replacement. Stop the older worker in its terminal, then run this root-worker command again.');}
-    const lockPath=join(config.stateDir,'worker/lock.json');
+    const lockPath=join(workerDirectory(config),'lock.json');
     const lockInfo=lstatSync(lockPath);if(!lockInfo.isFile()||lockInfo.isSymbolicLink())throw new Error('Cannot verify the existing worker lock file. It has not been stopped.');
     const lock=JSON.parse(readFileSync(lockPath,'utf8'));
     const args=readFileSync(`/proc/${health.pid}/cmdline`,'utf8').split('\0');
@@ -78,7 +81,7 @@ export const replaceIdleNonRootWorker=replaceIdleWorker;
 
 async function main(){
   if(process.getuid?.()!==0)throw new Error('Root worker launch requires sudo. Use the root-worker command shown by Connect agent.');
-  const config=loadConfig();config.requireRootWorker=true;
+  const config=loadWorkerConfig(process.argv.slice(2),{root:true});config.requireRootWorker=true;
   if(!await replaceIdleWorker(config)){console.log('The root worker is already running.');return;}
   const worker=new WorkerServer(config);await worker.listen();
   console.log(`Root worker connected on the private Unix socket; execution UID ${worker.health().executionUid}. Operator-source guardrail is prompt only.`);

@@ -12,7 +12,7 @@ import type { WorkerClient } from '../src/ipc.ts';
 const git=(cwd:string,...args:string[])=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8'}).trim();
 class RecoveryWorker extends EventEmitter {
   activeRunId:string|null=null;submissions:any[]=[];beforeSubmit?:(input:any)=>void;
-  health(){return {connected:true,uid:0,executionUid:0,root:true,pid:1234,activeRunId:this.activeRunId,uncertainRuns:[],runtime:{available:true,authenticated:true,version:'fixture',detail:'No model, service manager or provider actions'}};}
+  health(){return {connected:true,uid:0,executionUid:0,root:true,pid:1234,activeRunId:this.activeRunId,uncertainRuns:[],runtimeOperations:[],runtime:{available:true,authenticated:true,version:'fixture',detail:'No model, service manager or provider actions'}};}
   async connect(){return this.health();}
   async request(method:string,input:any={}){
     if(method==='health')return this.health();
@@ -28,7 +28,7 @@ async function fixture(){
   git(repositoryPath,'init','--quiet','-b','main');writeFileSync(join(repositoryPath,'owner.txt'),'Owner baseline\n');git(repositoryPath,'add','owner.txt');git(repositoryPath,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--quiet','-m','Owner baseline');
   writeFileSync(join(repositoryPath,'owner.txt'),'Owner staged work\n');git(repositoryPath,'add','owner.txt');writeFileSync(join(repositoryPath,'owner.txt'),'Owner unstaged work\n');writeFileSync(join(repositoryPath,'notes.txt'),'Owner untracked work\n');
   const owner={head:git(repositoryPath,'rev-parse','HEAD'),status:git(repositoryPath,'status','--porcelain=v1'),index:readFileSync(join(repositoryPath,'.git','index')),staged:git(repositoryPath,'diff','--cached')};
-  const config:Config={stateDir,repositoryPath,projectsDir:join(stateDir,'projects'),runtimeHome:join(stateDir,'runtime'),socketPath:join(stateDir,'worker.sock'),bridgeSocket:join(stateDir,'bridge.sock'),ipcToken:'',controllerUid:process.getuid!(),codexBin:'unused',host:'127.0.0.1',port:3001,origins:['http://localhost:5173'],adminPassword:'recovery-fixture-password',secureCookie:false,improvementEnabled:false,improvementTimeoutMs:1000,improvementMaxTurns:1,allowTempState:true};
+  const config:Config={stateDir,repositoryPath,projectsDir:join(stateDir,'projects'),runtimeHome:join(stateDir,'runtime'),socketPath:join(stateDir,'worker.sock'),bridgeSocket:join(stateDir,'bridge.sock'),ipcToken:'',controllerUid:process.getuid!(),codexBin:'unused',host:'127.0.0.1',port:3001,origins:['http://localhost:5173'],adminPassword:'recovery-fixture-password',secureCookie:false,improvementEnabled:false,improvementTimeoutMs:1000,improvementMaxTurns:1,allowTempState:true,requireRootWorker:true};
   initState(config);let worker=new RecoveryWorker();
   let ctl=await createController(config,{client:worker as unknown as WorkerClient,startQueue:false,startBridge:false});ctl.brain.skillAction('skill-maintenance','disable');
   return {root,config,owner,get ctl(){return ctl;},get worker(){return worker;},

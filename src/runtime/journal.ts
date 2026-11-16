@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Submission, WorkerEvent } from '../ipc.js';
+import { randomUUID } from 'node:crypto';
 
 export type JournalRun = { id: string; status: string; submission: string; child_pid: number | null; child_start: string | null; boot_id: string | null };
 export type JournalCheck = { id: string; run_id: string | null; status: string; candidate_path: string; child_pid: number | null; child_start: string | null; boot_id: string | null };
@@ -13,9 +14,12 @@ export const WORKER_REPLAY_PAGE_BYTES = 2 * 1024 * 1024;
 /** The worker's durable acceptance ledger and bounded replay outbox are independent of controller SQLite. */
 export class WorkerJournal {
   readonly db: DatabaseSync;
-  constructor(stateDir: string, readonly maxEvents = 10_000) {
-    mkdirSync(resolve(stateDir, 'worker'), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(resolve(stateDir, 'worker/journal.sqlite'));
+  readonly journalId:string;
+  readonly workerId:string;
+  constructor(stateDir: string, readonly maxEvents = 10_000,options:{directory?:string;workerId?:string}={}) {
+    const directory=options.directory??resolve(stateDir,'worker');this.workerId=options.workerId??'default';
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    this.db = new DatabaseSync(resolve(directory,'journal.sqlite'));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS worker_runs(id TEXT PRIMARY KEY,status TEXT NOT NULL,submission TEXT NOT NULL,child_pid INTEGER,child_start TEXT,boot_id TEXT);
       CREATE TABLE IF NOT EXISTS worker_events(cursor INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES worker_runs(id),type TEXT NOT NULL,data TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -23,8 +27,10 @@ export class WorkerJournal {
       CREATE TABLE IF NOT EXISTS worker_checks(id TEXT PRIMARY KEY,run_id TEXT,status TEXT NOT NULL,candidate_path TEXT NOT NULL,child_pid INTEGER,child_start TEXT,boot_id TEXT);
       CREATE TABLE IF NOT EXISTS worker_runtime_operations(id TEXT PRIMARY KEY,method TEXT NOT NULL,status TEXT NOT NULL,external_inspection INTEGER NOT NULL DEFAULT 0,completed INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS worker_runtime_processes(id TEXT PRIMARY KEY,operation_id TEXT NOT NULL REFERENCES worker_runtime_operations(id) ON DELETE CASCADE,pid INTEGER,start TEXT,boot TEXT,released INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS worker_identity(id INTEGER PRIMARY KEY CHECK(id=1),journal_id TEXT NOT NULL);
       INSERT OR IGNORE INTO worker_meta(key,value) VALUES('ack',0);`);
     if(!(this.db.prepare('PRAGMA table_info(worker_runtime_operations)').all() as {name:string}[]).some(column=>column.name==='completed'))this.db.exec('ALTER TABLE worker_runtime_operations ADD COLUMN completed INTEGER NOT NULL DEFAULT 0');
+    this.db.prepare('INSERT OR IGNORE INTO worker_identity(id,journal_id) VALUES(1,?)').run(randomUUID());this.journalId=String(this.db.prepare('SELECT journal_id FROM worker_identity WHERE id=1').get()!.journal_id);
   }
   accept(submission: Submission): boolean {
     if (this.get(submission.runId)) return false;
@@ -59,11 +65,11 @@ export class WorkerJournal {
   append(runId: string, type: string, data: unknown, terminal = false): WorkerEvent {
     const text = JSON.stringify(data);
     const createdAt = new Date().toISOString();
-    if (Buffer.byteLength(JSON.stringify({ cursor: Number.MAX_SAFE_INTEGER, runId, type, data, createdAt })) > MAX_WORKER_EVENT_BYTES) throw new Error('Worker execution event exceeded 1 MiB; use artifact files for large outputs. Execution was stopped instead of truncating its history.');
+    if (Buffer.byteLength(JSON.stringify({ cursor: Number.MAX_SAFE_INTEGER, runId, type, data, createdAt,workerId:this.workerId,journalId:this.journalId })) > MAX_WORKER_EVENT_BYTES) throw new Error('Worker execution event exceeded 1 MiB; use artifact files for large outputs. Execution was stopped instead of truncating its history.');
     // Reserve room to describe interruption/failure when the normal event budget is exhausted.
     if ((!terminal && this.count() >= this.maxEvents) || this.bytes() + Buffer.byteLength(text) > (terminal ? 32 : 31) * 1024 * 1024) throw new Error('Worker outbox is full; reconnect the controller before continuing');
     const result = this.db.prepare('INSERT INTO worker_events(run_id,type,data,created_at) VALUES(?,?,?,?)').run(runId, type, text, createdAt);
-    return { cursor: Number(result.lastInsertRowid), runId, type, data, createdAt };
+    return { cursor: Number(result.lastInsertRowid), runId, type, data, createdAt,workerId:this.workerId,journalId:this.journalId };
   }
   replay(after: number): WorkerEvent[] {
     return this.replayPage(after).events;
@@ -73,7 +79,7 @@ export class WorkerJournal {
     const rows = this.db.prepare('SELECT * FROM worker_events WHERE cursor>? ORDER BY cursor LIMIT 501').iterate(after);
     for (const raw of rows) {
       const row = raw as { cursor: number; run_id: string; type: string; data: string; created_at: string };
-      const event: WorkerEvent = { cursor: row.cursor, runId: row.run_id, type: row.type, data: JSON.parse(row.data), createdAt: row.created_at };
+      const event: WorkerEvent = { cursor: row.cursor, runId: row.run_id, type: row.type, data: JSON.parse(row.data), createdAt: row.created_at,workerId:this.workerId,journalId:this.journalId };
       const size = Buffer.byteLength(JSON.stringify(event)) + (events.length ? 1 : 0);
       if (events.length >= 500 || bytes + size > WORKER_REPLAY_PAGE_BYTES) { hasMore = true; break; }
       events.push(event); bytes += size;

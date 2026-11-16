@@ -4,13 +4,15 @@ import { lstatSync } from 'node:fs';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { connectorSnapshotSchema } from './connectors/schemas.ts';
+import { workerEffort, workerId } from './workers/schemas.ts';
 
-export const workerEventSchema = z.object({ cursor: z.number().int().positive(), runId: z.string(), type: z.string(), data: z.unknown(), createdAt: z.string() });
+export const workerEventSchema = z.object({ cursor: z.number().int().positive(), runId: z.string(), type: z.string(), data: z.unknown(), createdAt: z.string(),workerId:workerId.optional(),journalId:z.string().uuid().optional() });
 export type WorkerEvent = z.infer<typeof workerEventSchema>;
 export const runtimeOperationSchema=z.object({id:z.string().min(1).max(150),method:z.string().min(1).max(100),status:z.enum(['running','uncertain']),requiresExternalInspection:z.boolean()}).strict();
 export type RuntimeOperation=z.infer<typeof runtimeOperationSchema>;
 export const workerHealthSchema = z.object({
   connected: z.literal(true), uid: z.number().int(), pid: z.number().int(), root: z.boolean(),
+  workerId:workerId.optional(),journalId:z.string().uuid().optional(),model:z.string().nullable().optional(),effort:workerEffort.optional(),workerMode:z.enum(['user','root']).optional(),
   executionUid:z.number().int().nonnegative().optional(),sourceProtected:z.boolean().optional(),
   runtime: z.object({ available: z.boolean(), version: z.string(), authenticated: z.boolean(), authenticating: z.boolean().optional(), detail: z.string(), model: z.string().optional() }),
   activeRunId: z.string().nullable(), uncertainRuns: z.array(z.string()), replacementReserved: z.boolean().optional(),
@@ -23,6 +25,8 @@ export const submitSchema = z.object({
   prompt: z.string().min(1).max(200_000), cwd: z.string().startsWith('/'), bootstrap: z.string().max(40_000),
   skills: z.array(z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), path: z.string().startsWith('/'), version: z.union([z.string(), z.number()]) })).max(100),
   connectors:z.array(connectorSnapshotSchema).max(20).optional(),
+  workerId:workerId.optional(),journalId:z.string().uuid().optional(),attemptId:z.string().min(1).max(150).regex(/^[a-zA-Z0-9_-]+$/).optional(),leaseToken:z.string().min(16).max(200).optional(),
+  maxToolCalls:z.number().int().min(1).max(1000).optional(),maxContextChars:z.number().int().min(1).max(2_000_000).optional(),maxOutputChars:z.number().int().min(1).max(16_000_000).optional(),
   kind: z.enum(['user', 'improvement']).optional(), timeoutMs: z.number().int().min(1000).max(86_400_000).optional(),
 });
 export type Submission = z.infer<typeof submitSchema>;
@@ -59,10 +63,11 @@ export class WorkerClient extends EventEmitter {
   private pending = new Map<number, { socket: Socket; resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private connecting?: Promise<WorkerHealth>;
   constructor(private config: Config) { super(); }
+  private health(raw:unknown):WorkerHealth {const health=workerHealthSchema.parse(raw);if(this.config.workerId&&health.workerId!==this.config.workerId)throw new Error('A different worker answered this private socket.');return health;}
 
   async connect(): Promise<WorkerHealth> {
     if (this.connecting) return this.connecting;
-    if (this.socket && !this.socket.destroyed) return workerHealthSchema.parse(await this.request('health', {}));
+    if (this.socket && !this.socket.destroyed) return this.health(await this.request('health', {}));
     this.connecting = this.open();
     try { return await this.connecting; } finally { this.connecting = undefined; }
   }
@@ -81,7 +86,7 @@ export class WorkerClient extends EventEmitter {
       if (current) this.emit('disconnect');
     });
     readFrames(socket, frame => {
-      if (frame.method === 'event') { const parsed = workerEventSchema.safeParse(frame.params); if (parsed.success) this.emit('event', parsed.data); else socket.destroy(); return; }
+      if (frame.method === 'event') { const parsed = workerEventSchema.safeParse(frame.params); if (parsed.success&&(!this.config.workerId||parsed.data.workerId===this.config.workerId&&parsed.data.journalId)) this.emit('event', parsed.data); else socket.destroy(); return; }
       if (typeof frame.id !== 'number') return;
       const pending = this.pending.get(frame.id); if (!pending) return;
       clearTimeout(pending.timer); this.pending.delete(frame.id);
@@ -95,7 +100,7 @@ export class WorkerClient extends EventEmitter {
         const closed = () => { cleanup(); reject(new Error('Worker disconnected before connecting')); };
         socket.once('connect', connected); socket.once('error', failed); socket.once('close', closed);
       });
-      return workerHealthSchema.parse(await this.request('hello', { token: this.config.ipcToken }));
+      return this.health(await this.request('hello', { token: this.config.ipcToken }));
     } catch (error) { socket.destroy(); throw error; }
   }
   request(method: string, params: unknown = {}): Promise<any> {

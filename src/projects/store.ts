@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { Run } from '../shared.ts';
+import { storedRun } from '../persistence/runs.ts';
+import { transaction } from '../persistence/transaction.ts';
 import { componentObservation, type ComponentInput, type ComponentObservation, type Project, type ProjectComponent, type ProjectStatus, type ProjectDeployment } from './schemas.ts';
 
 type ProjectRow = Pick<Project,'id'|'name'|'description'|'directory'|'origin'|'createdAt'|'updatedAt'>;
@@ -26,10 +27,17 @@ export class ProjectStore {
     this.db.prepare('INSERT INTO projects(id,name,description,directory,origin,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)').run(row.id,row.name,row.description,row.directory,row.origin,row.createdAt,row.updatedAt);
     return this.get(row.id)!;
   }
-  update(id:string,input:{name?:string;description?:string}):Project {
+  update(id:string,input:{name?:string;description?:string;defaultWorkerId?:string|null}):Project {
     const project=this.get(id);if(!project)throw failure('Project not found',404);
-    this.db.prepare('UPDATE projects SET name=?,description=?,updatedAt=? WHERE id=?').run(input.name??project.name,input.description??project.description,new Date().toISOString(),id);
+    if(input.defaultWorkerId&&input.defaultWorkerId!=='default'&&!this.db.prepare('SELECT 1 FROM workers WHERE id=?').get(input.defaultWorkerId))throw failure('Default worker is not registered',404);
+    this.db.prepare('UPDATE projects SET name=?,description=?,defaultWorkerId=?,updatedAt=? WHERE id=?').run(input.name??project.name,input.description??project.description,input.defaultWorkerId===undefined?project.defaultWorkerId??null:input.defaultWorkerId,new Date().toISOString(),id);
     return this.get(id)!;
+  }
+  environment(id:string):{credentialId:string;bindings:Record<string,string>}|null {const row=this.db.prepare('SELECT environment FROM project_environment WHERE projectId=?').get(id);return row?JSON.parse(String(row.environment)):null;}
+  setEnvironment(id:string,environment:{credentialId:string;bindings:Record<string,string>}|null):void {
+    if(!this.db.prepare('SELECT 1 FROM projects WHERE id=?').get(id))throw failure('Project not found',404);
+    if(environment)this.db.prepare('INSERT INTO project_environment(projectId,environment,updatedAt) VALUES(?,?,?) ON CONFLICT(projectId) DO UPDATE SET environment=excluded.environment,updatedAt=excluded.updatedAt').run(id,JSON.stringify(environment),new Date().toISOString());
+    else this.db.prepare('DELETE FROM project_environment WHERE projectId=?').run(id);
   }
   remove(id:string):void {
     this.transaction(()=>{
@@ -45,6 +53,10 @@ export class ProjectStore {
       this.db.prepare('DELETE FROM project_connectors WHERE projectId=? OR connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id,id);
       this.db.prepare('DELETE FROM connector_checks WHERE connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id);
       this.db.prepare('DELETE FROM connectors WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM job_runs WHERE jobId IN (SELECT id FROM jobs WHERE projectId=?)').run(id);
+      this.db.prepare('DELETE FROM jobs WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM project_leases WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM project_environment WHERE projectId=?').run(id);
       for(const table of ['project_components','project_conversations','project_sources','project_deployments','source_finalizations'])this.db.prepare(`DELETE FROM ${table} WHERE projectId=?`).run(id);
       this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
     });
@@ -79,10 +91,18 @@ export class ProjectStore {
     });
   }
   linkConversation(projectId:string,conversationId:string):void {
-    if(!this.get(projectId))throw failure('Project not found',404);
-    const linked=this.db.prepare('SELECT projectId FROM project_conversations WHERE conversationId=?').get(conversationId) as {projectId:string}|undefined;
-    if(linked){if(linked.projectId!==projectId)throw failure('Conversation already belongs to another project',409);return;}
-    this.db.prepare('INSERT INTO project_conversations(conversationId,projectId) VALUES(?,?)').run(conversationId,projectId);
+    this.transaction(()=>{
+      if(!this.get(projectId))throw failure('Project not found',404);
+      const linked=this.db.prepare('SELECT projectId FROM project_conversations WHERE conversationId=?').get(conversationId) as {projectId:string}|undefined;
+      if(linked){if(linked.projectId!==projectId)throw failure('Conversation already belongs to another project',409);return;}
+      const active=this.db.prepare("SELECT id,attemptId FROM runs WHERE conversationId=? AND status IN ('running','waiting','uncertain') LIMIT 1").get(conversationId);
+      if(active){
+        const conflict=this.db.prepare("SELECT 1 FROM project_leases WHERE projectId=? AND runId<>? UNION ALL SELECT 1 FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? AND r.id<>? AND r.status IN ('running','waiting','uncertain') UNION ALL SELECT 1 FROM source_finalizations WHERE projectId=? AND state='pending' LIMIT 1").get(projectId,active.id,projectId,active.id,projectId);
+        if(conflict)throw failure('Another task owns this project until execution and source finalization finish.',409);
+        this.db.prepare('INSERT INTO project_leases(projectId,runId,attemptId,acquiredAt) VALUES(?,?,?,?) ON CONFLICT(projectId) DO NOTHING').run(projectId,active.id,active.attemptId??'legacy',new Date().toISOString());
+      }
+      this.db.prepare('INSERT INTO project_conversations(conversationId,projectId) VALUES(?,?)').run(conversationId,projectId);
+    });
   }
   private expand(row:ProjectRow,connected:boolean,now:number):Project {
     const rows=this.db.prepare('SELECT * FROM project_components WHERE projectId=? ORDER BY createdAt,id').all(row.id) as unknown as ComponentRow[];
@@ -96,7 +116,7 @@ export class ProjectStore {
     const statuses=components.map(item=>item.status);
     const status:ProjectStatus=statuses.includes('failed')?'failed':!statuses.length||statuses.includes('unknown')?'unknown':statuses.includes('stopped')?'stopped':statuses.includes('healthy')?'healthy':statuses.includes('running')?'running':statuses.includes('scheduled')?'scheduled':'ready';
     const conversationIds=(this.db.prepare('SELECT conversationId FROM project_conversations WHERE projectId=? ORDER BY rowid DESC').all(row.id) as {conversationId:string}[]).map(item=>item.conversationId);
-    const runs=this.db.prepare('SELECT r.* FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? ORDER BY r.createdAt DESC,r.rowid DESC LIMIT 20').all(row.id) as unknown as Run[];
+    const runs=this.db.prepare('SELECT r.* FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? ORDER BY r.createdAt DESC,r.rowid DESC LIMIT 20').all(row.id).map(storedRun);
     const source=this.db.prepare('SELECT source FROM project_sources WHERE projectId=?').get(row.id) as {source:string}|undefined;
     const deployed=this.db.prepare('SELECT commitSha,releaseDirectory,unitName,status,detail,checkedAt FROM project_deployments WHERE projectId=?').get(row.id) as ({commitSha:string}&Omit<ProjectDeployment,'commit'>)|undefined;
     const connectorIds=(this.db.prepare('SELECT connectorId FROM project_connectors WHERE projectId=? ORDER BY connectorId').all(row.id) as {connectorId:string}[]).map(item=>item.connectorId);
@@ -106,6 +126,6 @@ export class ProjectStore {
     };
   }
   private transaction<T>(action:()=>T):T {
-    this.db.exec('BEGIN IMMEDIATE');try{const value=action();this.db.exec('COMMIT');return value;}catch(error){this.db.exec('ROLLBACK');throw error;}
+    return transaction(this.db,action);
   }
 }

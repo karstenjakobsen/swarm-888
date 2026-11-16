@@ -6,10 +6,17 @@ import { AgentConnection } from './AgentConnection';
 import { ExecutionRecovery } from './ExecutionRecovery';
 import { ProjectsPanel } from './ProjectsPanel';
 import { ConnectionsPanel } from './ConnectionsPanel';
+import { WorkersPanel } from './WorkersPanel';
+import { isWorkerReady } from './workers';
+import { JobsPanel } from './JobsPanel';
+import { RunExecutionMetadata } from './RunExecutionMetadata';
+import { TaskExecutionFields } from './TaskExecutionFields';
+import type { TaskOptions } from '../src/tasks/schemas';
+import type { Connector } from './management';
 import type { Conversation, ConversationDetail, ExecutionEvent, Message, Run, Status } from './types';
 
-type View = 'chat' | 'projects' | 'connections' | 'memory' | 'skills' | 'artifacts';
-const viewNames: Record<View, string> = { chat: 'Workspace', projects: 'Projects', connections: 'Connections', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
+type View = 'chat' | 'projects' | 'workers' | 'jobs' | 'connections' | 'memory' | 'skills' | 'artifacts';
+const viewNames: Record<View, string> = { chat: 'Workspace', projects: 'Projects', workers: 'Workers', jobs: 'Jobs', connections: 'Connections', memory: 'Memory', skills: 'Skills', artifacts: 'Artifacts' };
 const activeStates = new Set<Run['status']>(['queued', 'running', 'waiting', 'uncertain']);
 export const friendlyStatus = (status: Run['status']) => ({ waiting: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status]);
 export function formatTime(date: string) { const value = new Date(date); return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -20,6 +27,9 @@ export default function App() {
   const [error, setError] = useState('');
   const [view, setView] = useState<View>('chat');
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [connectorTarget, setConnectorTarget] = useState<string | null>(null);
+  const [authorizationNotice, setAuthorizationNotice] = useState('');
+  const [authorizationFailed, setAuthorizationFailed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -30,7 +40,9 @@ export default function App() {
   const [streamConnected, setStreamConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [prompt, setPrompt] = useState('');
-  const [pendingRequest, setPendingRequest] = useState<{ prompt: string; requestId: string } | null>(null);
+  const [pendingRequest, setPendingRequest] = useState<{ prompt: string; requestId: string; options: TaskOptions } | null>(null);
+  const [executionOptions, setExecutionOptions] = useState<TaskOptions>({ workerId: null, requiredRoot: false });
+  const [taskConnectors, setTaskConnectors] = useState<Connector[]>([]);
   const [events, setEvents] = useState<ExecutionEvent[]>([]);
   const cursor = useRef(0);
   const bottom = useRef<HTMLDivElement>(null);
@@ -40,6 +52,15 @@ export default function App() {
     if (!unsavedSource.current) return true;
     return window.confirm('Discard unsaved source edits and leave this editor?');
   };
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get('oauth'), target = params.get('connector');
+    if ((outcome === 'connected' || outcome === 'error') && target && /^[0-9a-f-]{36}$/i.test(target)) {
+      setConnectorTarget(target); setView('connections'); setAuthorizationFailed(outcome === 'error'); setAuthorizationNotice(outcome === 'connected' ? 'Account authorization completed. Check connection readiness below.' : 'Account authorization did not complete. Review the connection and try again.');
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -52,6 +73,13 @@ export default function App() {
     window.addEventListener('operator:unauthorized', unauthorized);
     return () => { alive = false; window.removeEventListener('operator:unauthorized', unauthorized); };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated || view !== 'chat') return;
+    let alive = true;
+    void api<Connector[]>('/connectors').then(value => { if (alive) setTaskConnectors(value); }).catch(cause => { if (alive) setError(cause.message); });
+    return () => { alive = false; };
+  }, [authenticated, view]);
 
   const refreshStatus = useCallback(async () => {
     const value = await api<Status>('/status');
@@ -120,7 +148,7 @@ export default function App() {
   }, [conversationId, authenticated, loadConversation]);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [detail?.messages.length, events.length]);
 
-  const selectConversation = (id: string, discardConfirmed = false) => { if (!discardConfirmed && !canNavigate()) return; setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); };
+  const selectConversation = (id: string, discardConfirmed = false) => { if (!discardConfirmed && !canNavigate()) return; setConversationId(id); setView('chat'); setMobileOpen(false); setPrompt(''); setPendingRequest(null); setExecutionOptions({ workerId: null, requiredRoot: false }); };
   const newConversation = async () => {
     if (!canNavigate()) return;
     setBusy(true);
@@ -132,10 +160,10 @@ export default function App() {
   };
   const submitPrompt = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!prompt.trim() || busy) return;
+    if (!prompt.trim() || busy || !document.querySelector<HTMLFormElement>('form.composer')?.reportValidity()) return;
     setBusy(true); setError('');
     let id = conversationId;
-    const request = pendingRequest?.prompt === prompt.trim() ? pendingRequest : { prompt: prompt.trim(), requestId: crypto.randomUUID() };
+    const request = pendingRequest?.prompt === prompt.trim() && JSON.stringify(pendingRequest.options) === JSON.stringify(executionOptions) ? pendingRequest : { prompt: prompt.trim(), requestId: crypto.randomUUID(), options: { ...executionOptions } };
     setPendingRequest(request);
     try {
       if (!id) {
@@ -144,11 +172,14 @@ export default function App() {
         currentId.current = id; setConversationId(id);
         setConversations(previous => [value, ...previous]);
       }
-      await post(`/conversations/${encodeURIComponent(id)}/runs`, request);
+      await post(`/conversations/${encodeURIComponent(id)}/runs`, { prompt: request.prompt, requestId: request.requestId, ...request.options });
       if (currentId.current === id) setPrompt(previous => previous.trim() === request.prompt ? '' : previous);
       setPendingRequest(previous => previous?.requestId === request.requestId ? null : previous);
       await Promise.all([loadConversation(id), refreshConversations(), refreshStatus()]);
     } catch (cause: any) { setError(cause.message); } finally { setBusy(false); }
+  };
+  const openRun = async (id: string) => {
+    try { const run = await api<Run>(`/runs/${encodeURIComponent(id)}`); if (!canNavigate()) return; currentId.current = run.conversationId; selectConversation(run.conversationId, true); await loadConversation(run.conversationId); } catch (cause: any) { setError(cause.message); }
   };
   const runAction = async (runId: string, action: string, body = {}) => {
     try {
@@ -170,24 +201,33 @@ export default function App() {
   const connected = Boolean(worker);
   const executionUid = worker?.executionUid ?? worker?.uid;
   const rootWorker = Boolean(worker?.uid === 0 && worker.root && executionUid === 0);
-  const agentConnected = rootWorker && Boolean(worker?.runtime.authenticated);
+  const workers = status?.workers ?? [];
+  const poolMode = workers.some(value => value.worker.id !== 'default' || value.worker.mode === 'user');
+  const readyWorkers = workers.filter(isWorkerReady);
+  const agentConnected = poolMode ? workers.some(value => value.worker.enabled && !value.error && value.connected && value.health?.runtime.available && value.health.runtime.authenticated) : rootWorker && Boolean(worker?.runtime.available && worker.runtime.authenticated);
+  const poolConnected = poolMode ? workers.some(value => value.connected) : connected;
   const selected = conversations.find(item => item.id === conversationId);
   const relevantEvents = events.filter(event => event.conversationId === conversationId);
   const runs = detail?.runs || [];
   const conversationActive = runs.filter(run => activeStates.has(run.status));
   const queue = status?.queue || [];
   const queuedCount = queue.filter(run => run.status === 'queued').length;
-  const orphanExecutions = (worker?.uncertainRuns || []).filter(id => !queue.some(run => run.id === id));
-  const runtimeOperations = worker?.runtimeOperations ?? [];
+  const workerHealth = poolMode ? workers.flatMap(value => value.health ? [value.health] : []) : worker ? [worker] : [];
+  const orphanExecutions = [...new Set(workerHealth.flatMap(value => value.uncertainRuns ?? []))].filter(id => !queue.some(run => run.id === id));
+  const runtimeOperations = workerHealth.flatMap(value => value.runtimeOperations ?? []);
+  const blockedTask = queue.find(run => run.status === 'queued' && run.blockedReason);
   const queueBlock = queuedCount === 0 ? null : status?.maintenance ? {
     title: 'Queue paused for maintenance',
     detail: 'Your tasks are saved. Execution will resume when maintenance finishes.',
-  } : !worker ? {
+  } : blockedTask ? {
+    title: 'Queue waiting for task requirements',
+    detail: `Your queued tasks are saved. ${blockedTask.blockedReason!}`,
+  } : poolMode && readyWorkers.length === 0 ? {
+    title: 'Queue waiting for workers',
+    detail: 'Your tasks are saved. Start and connect an enabled user worker, or inspect the assigned worker’s blocked reason.',
+  } : poolMode ? null : !worker ? {
     title: 'Queue paused: worker disconnected',
     detail: 'Connect your agent to start the root worker. Your queued tasks are saved.',
-  } : !rootWorker ? {
-    title: 'Queue paused: root worker required',
-    detail: 'Start a worker running as UID 0 to resume your saved tasks.',
   } : !worker.runtime.available ? {
     title: 'Queue paused: Codex runtime unavailable',
     detail: worker.runtime.detail,
@@ -202,6 +242,8 @@ export default function App() {
     detail: 'Your tasks are saved. Execution will continue after the current runtime operation finishes.',
   } : null;
 
+  const openWorkerSetup = () => { if (poolMode) { if (canNavigate()) setView('workers'); } else setAgentOpen(true); };
+
   return <div className="app-shell">
     {mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
     <aside className={`sidebar ${mobileOpen ? 'is-open' : ''}`}>
@@ -209,7 +251,7 @@ export default function App() {
       <button className="new-conversation" onClick={() => void newConversation()} disabled={busy}><Icon name="plus" /><span>New conversation</span><kbd>+</kbd></button>
       <div className="nav-label">YOUR WORKSPACE</div>
       <nav className="primary-nav" aria-label="Workspace">
-        {(['chat', 'projects', 'connections', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { if (view !== item && !canNavigate()) return; setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'connections' ? 'link' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
+        {(['chat', 'projects', 'workers', 'jobs', 'connections', 'memory', 'skills', 'artifacts'] as View[]).map(item => <button key={item} className={view === item ? 'selected' : ''} onClick={() => { if (view !== item && !canNavigate()) return; setView(item); setMobileOpen(false); }}><Icon name={item === 'chat' ? 'chat' : item === 'projects' ? 'layers' : item === 'workers' ? 'terminal' : item === 'jobs' ? 'clock' : item === 'connections' ? 'link' : item === 'memory' ? 'brain' : item === 'skills' ? 'skill' : 'folder'} /><span>{item === 'chat' ? 'Conversations' : viewNames[item]}</span>{item === 'chat' && conversations.length > 0 && <span className="nav-count">{conversations.length}</span>}</button>)}
       </nav>
       <div className="conversation-heading"><span className="nav-label">RECENT CONVERSATIONS</span><Icon name="clock" size={13} /></div>
       <div className="conversation-list">
@@ -217,19 +259,19 @@ export default function App() {
         {conversations.length === 0 && <p className="sidebar-empty">Your conversations will appear here.</p>}
       </div>
       <div className="sidebar-footer">
-        <div className="host-card"><div className={`status-dot ${connected ? 'ok' : ''}`} /><div><strong>{connected ? 'Worker connected' : 'Worker disconnected'}</strong><span>{worker ? `${rootWorker ? 'Root mode' : 'Non-root mode'} · UID ${executionUid}` : 'Waiting for local worker'}</span></div><Icon name="terminal" size={17} /></div>
+        <div className="host-card"><div className={`status-dot ${poolConnected ? 'ok' : ''}`} /><div><strong>{poolMode ? `${readyWorkers.length} workers ready` : connected ? 'Worker connected' : 'Worker disconnected'}</strong><span>{poolMode ? `${workers.length} registered · ${workers.filter(value => value.worker.enabled).length} enabled` : worker ? `${rootWorker ? 'Root mode' : 'Non-root mode'} · UID ${executionUid}` : 'Waiting for local worker'}</span></div><Icon name="terminal" size={17} /></div>
         <button className="logout" onClick={() => void logout()}><span className="avatar">A</span><span>Administrator<small>Private workspace</small></span><Icon name="logout" size={17} /></button>
       </div>
     </aside>
     <main className="main-shell">
-      <header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><span>Operator</span><span className="slash">/</span><strong>{viewNames[view]}</strong></div><div className="topbar-right"><span className={`connection-label ${streamConnected ? 'connected' : ''}`}><span className="status-dot" />{streamConnected ? 'Live' : 'Reconnecting'}</span><span className={`privilege-pill ${rootWorker ? 'root-mode' : ''}`} title={worker ? `Worker process ${worker.pid}; actual execution UID ${executionUid}. Operator edits are discouraged by prompt instructions.` : 'No worker identity available'}><Icon name="terminal" size={13} />{worker ? `UID ${executionUid} · ${rootWorker ? 'root' : 'non-root'}` : 'No worker'}</span><button className={`agent-connect-button ${agentConnected ? 'is-connected' : ''}`} aria-haspopup="dialog" aria-expanded={agentOpen} onClick={() => setAgentOpen(true)}><Icon name={agentConnected ? 'check' : 'link'} size={14} />{agentConnected ? 'Agent connected' : worker?.runtime.authenticating ? 'Connecting agent…' : 'Connect agent'}</button></div></header>
+      <header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-only" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><span>Operator</span><span className="slash">/</span><strong>{viewNames[view]}</strong></div><div className="topbar-right"><span className={`connection-label ${streamConnected ? 'connected' : ''}`}><span className="status-dot" />{streamConnected ? 'Live' : 'Reconnecting'}</span><span className={`privilege-pill ${!poolMode && rootWorker ? 'root-mode' : ''}`} title={poolMode ? 'Each task records its assigned worker and actual execution identity.' : worker ? `Worker process ${worker.pid}; actual execution UID ${executionUid}. Operator edits are discouraged by prompt instructions.` : 'No worker identity available'}><Icon name="terminal" size={13} />{poolMode ? `${readyWorkers.length}/${workers.length} ready` : worker ? `UID ${executionUid} · ${rootWorker ? 'root' : 'non-root'}` : 'No worker'}</span><button className={`agent-connect-button ${agentConnected ? 'is-connected' : ''}`} aria-haspopup={poolMode ? undefined : 'dialog'} aria-expanded={poolMode ? undefined : agentOpen} onClick={openWorkerSetup}><Icon name={agentConnected ? 'check' : 'link'} size={14} />{poolMode ? 'Manage workers' : agentConnected ? 'Agent connected' : worker?.runtime.authenticating ? 'Connecting agent…' : 'Connect agent'}</button></div></header>
       {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
-      {queueBlock && <div className="runtime-notice" role="status" style={{ marginTop: 14 }}><Icon name="clock" size={17} /><span><strong>{queueBlock.title}</strong>{queueBlock.detail}{!agentConnected && !status?.maintenance && <button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button>}</span></div>}
+      {queueBlock && <div className="runtime-notice" role="status" style={{ marginTop: 14 }}><Icon name="clock" size={17} /><span><strong>{queueBlock.title}</strong>{queueBlock.detail}{!agentConnected && !status?.maintenance && <button className="text-button agent-notice-action" onClick={openWorkerSetup}>{poolMode ? 'Manage workers' : 'Connect agent'}<Icon name="chevron" size={12} /></button>}</span></div>}
       {status?.maintenance && !queueBlock && <div className="notice-banner">Maintenance is active. Work and durable brain writes are paused for a consistent snapshot.</div>}
       <ExecutionRecovery orphanIds={orphanExecutions} operations={runtimeOperations} onResolve={(id, body) => runAction(id, 'resolve', body)} />
       {view === 'chat' ? <>
         <div className="conversation-top"><div><div className="eyebrow">CONVERSATION</div><h1>{selected?.title || 'A fresh start'}</h1></div><div className="model-tag"><span className={`status-dot ${worker?.runtime.authenticated ? 'ok' : ''}`} />{worker?.runtime.model || 'Codex'}<span className="muted">{worker?.runtime.version ? `v${worker.runtime.version.replace(/^.*?([\d.]+)$/, '$1')}` : 'app-server'}</span></div></div>
-        {!agentConnected && !queueBlock && <div className="runtime-notice"><Icon name="terminal" size={17} /><span><strong>{worker?.runtime.authenticating ? 'Finish connecting your agent' : 'Connect your agent to get started'}</strong>{rootWorker ? 'Sign in with ChatGPT to let your agent start working.' : 'Start a root worker and sign in with ChatGPT. Conversations and memory are ready.'}<button className="text-button agent-notice-action" onClick={() => setAgentOpen(true)}>Connect agent<Icon name="chevron" size={12} /></button></span></div>}
+        {!agentConnected && !queueBlock && <div className="runtime-notice"><Icon name="terminal" size={17} /><span><strong>{poolMode ? 'Prepare a worker for your tasks' : worker?.runtime.authenticating ? 'Finish connecting your agent' : 'Connect your agent to get started'}</strong>{poolMode ? 'Use Workers to start, enable, or sign in a matching profile. Your queued tasks keep their requirements.' : rootWorker ? 'Sign in with ChatGPT to let your agent start working.' : 'Start a root worker and sign in with ChatGPT. Conversations and memory are ready.'}<button className="text-button agent-notice-action" onClick={openWorkerSetup}>{poolMode ? 'Manage workers' : 'Connect agent'}<Icon name="chevron" size={12} /></button></span></div>}
         <div className="chat-scroll" data-testid="chat-history">
           <div className="chat-content">
             {!detail?.messages.length && !runs.length ? <div className="empty-conversation"><div className="agent-emblem"><Icon name="skill" size={30} /></div><span className="eyebrow">YOUR MACHINE. YOUR OPERATOR.</span><h2>What should we build?</h2><p>Give your operator a goal. It can inspect your VPS, build applications, and remember what it learns.</p><div className="suggestion-grid">{[
@@ -242,17 +284,17 @@ export default function App() {
                 const deltas = relevantEvents.filter(event => event.runId === run.id && event.type === 'delta').map(event => String(event.data.text || '')).join('');
                 return deltas ? <MessageView key={`stream-${run.id}`} message={{ id: run.id, conversationId: run.conversationId, runId: run.id, role: 'assistant', content: deltas, createdAt: run.startedAt || run.createdAt }} streaming={run.status === 'running'} /> : null;
               })}
-              {runs.map(run => <RunView key={run.id} run={run} events={relevantEvents.filter(event => event.runId === run.id)} onAction={runAction} />)}
+              {runs.map(run => <RunView key={run.id} onOpenRun={openRun} run={run} events={relevantEvents.filter(event => event.runId === run.id)} onAction={runAction} />)}
             </>}
             <div ref={bottom} />
           </div>
         </div>
         <div className="composer-wrap">
-          {queue.length > 0 && <details className="queue-panel"><summary><Icon name="clock" size={15} /><strong>{queue.length} {queue.length === 1 ? 'task' : 'tasks'}{queuedCount === queue.length ? ' queued' : ''}</strong><span>{queueBlock ? 'Execution paused' : 'One execution at a time'}</span><Icon name="chevron" size={13} /></summary><div>{queue.map((run, index) => <div className="queue-item" key={run.id}><span className="queue-number">{index + 1}</span><button onClick={() => selectConversation(run.conversationId)}>{run.prompt || (run.kind === 'improvement' ? 'Improvement pass' : 'Task')}</button><span className={`task-badge ${run.status}`}>{friendlyStatus(run.status)}</span></div>)}</div></details>}
-          <form className="composer" onSubmit={submitPrompt}><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
+          {queue.length > 0 && <details className="queue-panel"><summary><Icon name="clock" size={15} /><strong>{queue.length} {queue.length === 1 ? 'task' : 'tasks'}{queuedCount === queue.length ? ' queued' : ''}</strong><span>{queueBlock ? 'Execution paused' : poolMode ? 'One task per worker' : 'One execution at a time'}</span><Icon name="chevron" size={13} /></summary><div>{queue.map((run, index) => <div className="queue-item" key={run.id}><span className="queue-number">{index + 1}</span><button onClick={() => selectConversation(run.conversationId)}>{run.prompt || (run.kind === 'improvement' ? 'Improvement pass' : 'Task')}</button><span className={`task-badge ${run.status}`}>{friendlyStatus(run.status)}</span></div>)}</div></details>}
+          <form className="composer" onSubmit={submitPrompt}><TaskExecutionFields value={executionOptions} onChange={setExecutionOptions} workers={workers} connectors={taskConnectors} disabled={busy} compact /><label className="sr-only" htmlFor="message-composer">Message your operator</label><textarea id="message-composer" value={prompt} onChange={event => setPrompt(event.target.value)} placeholder={conversationActive.length ? 'Add another goal to the queue…' : 'Give your operator a goal…'} rows={2} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submitPrompt(event); } }} /><div className="composer-bottom"><span><Icon name="skill" size={14} />{status?.maintenance ? 'Maintenance mode' : 'Persistent memory & skills'}</span><button className="send-button" type="submit" disabled={!prompt.trim() || busy || status?.maintenance} aria-label="Send message">{busy ? <span className="spinner" /> : <Icon name="arrow" size={18} />}</button></div></form>
           <p className="composer-caption">Commands run as the worker’s actual user. <span>Enter to send · Shift + Enter for a new line</span></p>
         </div>
-      </> : view === 'projects' ? <ProjectsPanel navigationPending={busy} onBeforeNavigate={canNavigate} onUnsavedSourceChange={reportUnsavedSource} initialProjectId={projectId} workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id, true); }} onSelectConversation={selectConversation} /> : view === 'connections' ? <ConnectionsPanel onError={setError} onProject={id => { setProjectId(id); setView('projects'); }} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
+      </> : view === 'projects' ? <ProjectsPanel workers={workers} navigationPending={busy} onBeforeNavigate={canNavigate} onUnsavedSourceChange={reportUnsavedSource} initialProjectId={projectId} workerConnected={Boolean(worker)} onError={setError} onConversation={conversation => { setConversations(previous => appendUnique(previous, conversation)); selectConversation(conversation.id, true); }} onSelectConversation={selectConversation} /> : view === 'workers' ? <WorkersPanel onError={setError} onChanged={refreshStatus} /> : view === 'jobs' ? <JobsPanel onError={setError} onRun={openRun} /> : view === 'connections' ? <ConnectionsPanel initialConnectorId={connectorTarget} authorizationNotice={authorizationNotice} authorizationFailed={authorizationFailed} onError={setError} onProject={id => { setProjectId(id); setView('projects'); }} /> : view === 'memory' ? <MemoryPanel onError={setError} /> : view === 'skills' ? <SkillsPanel onError={setError} /> : <ArtifactsPanel onError={setError} />}
     </main>
     <AgentConnection open={agentOpen} onClose={() => setAgentOpen(false)} worker={worker} onStatusChanged={refreshStatus} />
   </div>;
@@ -274,12 +316,12 @@ function MessageView({ message, streaming }: { message: Message; streaming?: boo
   return <article className={`message ${message.role}`} data-testid={`message-${message.role}`}><div className={`message-avatar ${message.role}`}>{message.role === 'assistant' ? <Icon name="skill" size={16} /> : 'A'}</div><div className="message-main"><div className="message-meta"><strong>{message.role === 'assistant' ? 'Operator' : 'You'}</strong><time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>{streaming && <span className="streaming-label"><span className="status-dot ok" />Working</span>}</div><div className="message-content">{message.content}{streaming && <span className="text-cursor" />}</div></div></article>;
 }
 
-function RunView({ run, events, onAction }: { run: Run; events: ExecutionEvent[]; onAction: (id: string, action: string, body?: any) => Promise<void> }) {
+function RunView({ run, events, onAction, onOpenRun }: { run: Run; events: ExecutionEvent[]; onOpenRun: (id: string) => Promise<void>; onAction: (id: string, action: string, body?: any) => Promise<void> }) {
   const activity = events.filter(event => ['activity', 'checkpoint', 'status', 'thread', 'error', 'skills', 'tool', 'skill_discovery'].includes(event.type));
   const clarification = [...events].reverse().find(event => event.type === 'clarification');
   const waiting = run.status === 'waiting';
   const running = run.status === 'running' || waiting;
-  return <div className="run-block"><div className="run-status-row"><span className={`task-badge ${run.status}`}><span className={`status-dot ${run.status === 'completed' ? 'ok' : ''}`} />{friendlyStatus(run.status)}</span><span className="run-kind">{run.kind === 'improvement' ? 'Improvement pass' : 'Task'} <code>{run.id.slice(0, 8)}</code></span>{running && <button className="subtle-button danger" onClick={() => void onAction(run.id, 'interrupt')}><Icon name="stop" size={12} />Interrupt</button>}{run.status === 'queued' && <button className="subtle-button" onClick={() => void onAction(run.id, 'interrupt')}>Cancel queued task</button>}</div>{run.error && <p className="inline-error">{run.error}</p>}{run.status === 'uncertain' && <div className="uncertain-notice"><p>Inspect the host and affected external services before resolving this run. The worker checks only its recorded local process groups and terminates verified helpers or confirms their absence. External actions may already have happened; resolving does not verify or undo them. This task will not be retried.</p><button className="secondary-button danger" onClick={() => void onAction(run.id, 'resolve')}>Host inspected · resolve run</button></div>}{run.summary && <p className="checkpoint"><Icon name="check" size={14} />{run.summary}</p>}{activity.length > 0 && <details className="activity"><summary><Icon name="terminal" size={14} />Execution activity <span>{activity.length}</span><Icon name="chevron" size={13} /></summary><div className="activity-list">{activity.map(event => <ActivityEvent key={event.seq} event={event} />)}</div></details>}{waiting && clarification && <Clarification event={clarification} onReply={answers => onAction(run.id, 'reply', { requestId: clarification.data.requestId, answers })} />}{run.status === 'interrupted' && <p className="small-note">The task was interrupted. Deployed or deliberately detached services may continue independently.</p>}</div>;
+  return <div className="run-block" id={`run-${run.id}`}><div className="run-status-row"><span className={`task-badge ${run.status}`}><span className={`status-dot ${run.status === 'completed' ? 'ok' : ''}`} />{friendlyStatus(run.status)}</span><span className="run-kind">{run.kind === 'improvement' ? 'Improvement pass' : 'Task'} <code>{run.id.slice(0, 8)}</code></span>{running && <button className="subtle-button danger" onClick={() => void onAction(run.id, 'interrupt')}><Icon name="stop" size={12} />Interrupt</button>}{run.status === 'queued' && <button className="subtle-button" onClick={() => void onAction(run.id, 'interrupt')}>Cancel queued task</button>}</div><RunExecutionMetadata run={run} onOpenRun={onOpenRun} />{run.error && <p className="inline-error">{run.error}</p>}{run.status === 'uncertain' && <div className="uncertain-notice"><p>Inspect the host and affected external services before resolving this run. The worker checks only its recorded local process groups and terminates verified helpers or confirms their absence. External actions may already have happened; resolving does not verify or undo them. This task will not be retried.</p><button className="secondary-button danger" onClick={() => void onAction(run.id, 'resolve')}>Host inspected · resolve run</button></div>}{run.summary && <p className="checkpoint"><Icon name="check" size={14} />{run.summary}</p>}{activity.length > 0 && <details className="activity"><summary><Icon name="terminal" size={14} />Execution activity <span>{activity.length}</span><Icon name="chevron" size={13} /></summary><div className="activity-list">{activity.map(event => <ActivityEvent key={event.seq} event={event} />)}</div></details>}{waiting && clarification && <Clarification event={clarification} onReply={answers => onAction(run.id, 'reply', { requestId: clarification.data.requestId, answers })} />}{run.status === 'interrupted' && <p className="small-note">The task was interrupted. Deployed or deliberately detached services may continue independently.</p>}</div>;
 }
 function ActivityEvent({ event }: { event: ExecutionEvent }) {
   const data = event.data;

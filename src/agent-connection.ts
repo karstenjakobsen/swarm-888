@@ -28,7 +28,7 @@ export class AgentConnectionService {
   private projectDirectoryMismatch():string|undefined {
     const expected=resolve(this.config.projectsDir??join(this.config.stateDir,'projects')),reported=this.lastHealth?.projectsDir;
     if(reported===expected)return;
-    return `The worker project directory does not match this controller: expected APP_PROJECTS_DIR=${expected}; reported ${reported??'unknown (older worker)'}. Restart the root worker from Connect agent, or run npm run worker:root as your normal user. Existing project paths are preserved.`;
+    return `The worker project directory does not match this controller: expected APP_PROJECTS_DIR=${expected}; reported ${reported??'unknown (older worker)'}. Restart it with its current command from Workers. Existing project paths are preserved.`;
   }
   private safe(raw:unknown,health:WorkerHealth):AgentConnection {
     try{
@@ -72,24 +72,24 @@ export class AgentConnectionService {
       if((error as {statusCode?:number}).statusCode===503&&this.lastHealth)return {state:'error',workerConnected:true,workerUid:this.lastHealth.uid,workerSetupRequired:true,error:(error as Error).message,rootWorkerCommand:this.launch().command};
       this.client.close();
       const launch=this.launch();
-      return {state:'disconnected',workerConnected:false,workerUid:null,error:'The root worker is unavailable. Start it here, or run the root worker command on the VPS.',rootWorkerCommand:launch.command};
+      return {state:'disconnected',workerConnected:false,workerUid:null,error:`The ${this.config.requireRootWorker?'root worker':'worker'} is unavailable. Start it here, or run its current command from Workers in your terminal.`,rootWorkerCommand:launch.command};
     }
   }
   connect():Promise<AgentConnection>{
     if(this.connecting)return this.connecting;
-    const release=this.queue.holdAuthentication();
+    const release=this.queue.holdAuthentication(this.config.workerId??'default');
     this.connecting=(async()=>{
       try{return await this.request('agent/connect');}
       catch(error){
         const code=(error as NodeJS.ErrnoException).code;
-        if(code==='ENOENT'||code==='ECONNREFUSED')throw failure('Start the root worker before connecting your ChatGPT account.',503);
+        if(code==='ENOENT'||code==='ECONNREFUSED')throw failure(`Start the ${this.config.requireRootWorker?'root worker':'worker'} before connecting your ChatGPT account.`,503);
         throw error;
       }finally{release();this.connecting=undefined;}
     })();
     return this.connecting;
   }
   async cancel():Promise<AgentConnection>{
-    const release=this.queue.holdAuthentication();
+    const release=this.queue.holdAuthentication(this.config.workerId??'default');
     try{return await this.request('agent/cancel');}finally{release();}
   }
   startWorker():Promise<AgentConnection>{
@@ -99,18 +99,20 @@ export class AgentConnectionService {
   }
   private async launchWorker():Promise<AgentConnection>{
     const existing=await this.status();
-    if(existing.workerConnected&&existing.workerUid===0){
+    const root=this.config.requireRootWorker===true;
+    if(existing.workerConnected&&(root?existing.workerUid===0:existing.workerUid===this.config.controllerUid)){
+      if(!root){const mismatch=this.projectDirectoryMismatch();if(mismatch)throw failure(`${mismatch} Stop this worker in its terminal before restarting it.`,409);return existing;}
       if((existing.executionUid??existing.workerUid)!==0)throw failure('The existing worker launches agent commands as a non-root account. Stop it in its terminal and run the root worker command.',409);
       if(!this.projectDirectoryMismatch())return existing;
     }
-    if(this.lastHealth?.activeRunId||this.lastHealth?.uncertainRuns.length||this.lastHealth?.runtimeOperations?.length||this.lastHealth?.runtime.authenticating)throw failure('Finish or reconcile existing execution and cancel any pending sign-in before starting the root worker.',409);
-    if(process.getuid?.()===0||process.getuid?.()!==this.config.controllerUid)throw failure('Start the web controller as its normal owner; it launches only the separate worker with root privileges.',403);
+    if(this.lastHealth?.activeRunId||this.lastHealth?.uncertainRuns.length||this.lastHealth?.runtimeOperations?.length||this.lastHealth?.runtime.authenticating)throw failure('Finish or reconcile existing execution and cancel any pending sign-in before restarting this worker.',409);
+    if(process.getuid?.()===0||process.getuid?.()!==this.config.controllerUid)throw failure('Start the web controller as its normal owner; workers use their registered permissions.',403);
     if(this.closed)throw failure('The controller is shutting down.',503);
     const launch=this.launch();
-    const log=openSync(join(this.config.stateDir,'worker/development.log'),constants.O_WRONLY|constants.O_CREAT|constants.O_APPEND|constants.O_NOFOLLOW,0o600);
+    const log=openSync(join(this.config.workerDir??join(this.config.stateDir,'worker'),'development.log'),constants.O_WRONLY|constants.O_CREAT|constants.O_APPEND|constants.O_NOFOLLOW,0o600);
     let child:ChildProcess;
     try{
-      child=spawn('sudo',['-n','--',...launch.args],{
+      child=spawn(root?'sudo':launch.args[0]!,root?['-n','--',...launch.args]:launch.args.slice(1),{
         cwd:projectRoot,detached:true,
         env:process.env,
         stdio:['ignore',log,log],
@@ -121,16 +123,19 @@ export class AgentConnectionService {
     while(Date.now()<deadline&&!this.closed){
       if(existsSync(this.config.socketPath)){
         const connection=await this.status();
-        if(connection.workerConnected&&connection.workerUid===0){
-          if((connection.executionUid??connection.workerUid)!==0)throw failure('The existing worker launches agent commands as a non-root account. Stop it in its terminal and run the root worker command.',409);
-          if(!this.projectDirectoryMismatch()){await this.queue.tick();return connection;}
+        if(connection.workerConnected&&(root?connection.workerUid===0:connection.workerUid===this.config.controllerUid)){
+          if(!root&&!this.projectDirectoryMismatch()){await this.queue.tick();return connection;}
+          if(root){
+            if((connection.executionUid??connection.workerUid)!==0)throw failure('The existing worker launches agent commands as a non-root account. Stop it in its terminal and run the root worker command.',409);
+            if(!this.projectDirectoryMismatch()){await this.queue.tick();return connection;}
+          }
         }
       }
-      if(spawnError||child.exitCode!==null||child.signalCode!==null)throw failure('Root access requires a privileged launch on this host. Run npm run worker:root as your normal user in your VPS terminal, or use the exact command shown in Connect agent. Enter your operating-system password in that terminal.',503);
+      if(spawnError||child.exitCode!==null||child.signalCode!==null)throw failure(root?'Root access requires a privileged launch on this host. Run npm run worker:root as your normal user in your VPS terminal, or use the exact command shown in Workers. Enter your operating-system password in that terminal.':'The worker did not start. Run its exact command from Workers in your terminal and check its output. Stop any existing worker with the same ID before restarting it.',503);
       await new Promise(ok=>setTimeout(ok,100));
     }
     if(child.pid&&child.exitCode===null)child.kill('SIGTERM');
-    throw failure('The root worker did not become available. Run the privileged command shown in Connect agent and check its terminal output.',503);
+    throw failure(`The ${root?'root worker':'worker'} did not become available. Run its current command from Workers and check its terminal output.`,503);
   }
   close(){this.closed=true;this.client.off('disconnect',this.onDisconnect);this.client.close();}
 }

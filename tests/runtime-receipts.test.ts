@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import { RuntimeReceipts } from '../src/runtime-receipts.ts';
 import type { WorkerClient } from '../src/ipc.ts';
+import type { WorkerRegistry } from '../src/workers/registry.ts';
 
 class ReceiptWorker {
   capability=true;online=true;ackFails=false;connects=0;calls:Array<{method:string;input:any}>=[];
@@ -37,6 +38,33 @@ test('lost ACKs return confirmed results and restart recovery ACKs receipts with
     f.worker.ackFails=true;assert.deepEqual(await f.receipts.request('connectors/call',{name:'mutate'}),f.worker.payload);assert.equal(f.receipts.list()[0].acknowledgedAt,null);
     f.reopen();f.worker.ackFails=false;const effects=f.worker.calls.filter(call=>call.method==='connectors/call').length;const receipts=f.receipts;
     assert.equal(await receipts.recover(),true);assert.equal(await receipts.recover(),false);assert.equal(f.worker.calls.filter(call=>call.method==='connectors/call').length,effects);assert.equal(effects,1);assert(receipts.list()[0].acknowledgedAt);
+  }finally{f.close();}
+});
+
+test('receipt recovery ACKs healthy owners despite offline or changed journals and never repeats effects',async()=>{
+  const f=fixture();
+  class OwnedWorker extends ReceiptWorker {
+    journalId=randomUUID();constructor(readonly workerId:string){super();}
+    async connect(){return {...await super.connect(),workerId:this.workerId,journalId:this.journalId};}
+  }
+  const offline=new OwnedWorker('offline'),healthy=new OwnedWorker('healthy'),replaced=new OwnedWorker('replaced'),workers=[offline,healthy,replaced],clients=new Map(workers.map(worker=>[worker.workerId,worker]));let selected=offline;
+  const control={connect:()=>selected.connect()} as unknown as WorkerClient,registry={client:(id:string)=>{const worker=clients.get(id);assert(worker,`Unexpected worker owner ${id}`);return worker;}} as unknown as WorkerRegistry;
+  try{
+    let receipts=new RuntimeReceipts(f.store.db,control,undefined,registry);
+    for(const [index,worker] of workers.entries()){
+      selected=worker;worker.ackFails=true;await receipts.request('connectors/call',{name:'mutate'});
+      f.store.db.prepare('UPDATE runtime_receipts SET receivedAt=? WHERE operationId=?').run(new Date(index*1000).toISOString(),worker.id);
+      assert.equal(receipts.get(worker.id).workerId,worker.workerId);assert.equal(receipts.get(worker.id).journalId,worker.journalId);
+    }
+    f.reopen();receipts=new RuntimeReceipts(f.store.db,control,undefined,registry);offline.online=false;healthy.ackFails=false;replaced.ackFails=false;const originalJournal=replaced.journalId;replaced.journalId=randomUUID();
+    const recovery=receipts.recover();assert.equal(receipts.recover(),recovery,'Concurrent recovery must share the same ACK pass');
+    await assert.rejects(recovery,error=>{assert(error instanceof AggregateError);assert.equal(error.errors.length,2);assert.equal((error as AggregateError&{statusCode:number}).statusCode,503);assert.match(error.message,/offline.*Fixture disconnected/);assert.match(error.message,/replaced.*journal owner changed/);return true;});
+    assert(receipts.get(healthy.id).acknowledgedAt);assert.equal(receipts.get(offline.id).acknowledgedAt,null);assert.equal(receipts.get(replaced.id).acknowledgedAt,null);
+    assert.equal(offline.calls.filter(call=>call.method==='runtime/acknowledge').length,1,'No ACK may be sent while its owner is unavailable');
+    assert.equal(replaced.calls.filter(call=>call.method==='runtime/acknowledge').length,1,'A new journal cannot ACK the original journal receipt');
+    const healthyCalls=healthy.calls.length,healthyConnects=healthy.connects;await assert.rejects(receipts.recover(),/ACK recovery incomplete/);assert.equal(healthy.calls.length,healthyCalls);assert.equal(healthy.connects,healthyConnects);
+    offline.online=true;offline.ackFails=false;replaced.journalId=originalJournal;assert.equal(await receipts.recover(),true);assert.equal(await receipts.recover(),false);
+    for(const worker of workers){assert(receipts.get(worker.id).acknowledgedAt);assert.equal(worker.calls.filter(call=>call.method==='connectors/call').length,1);assert(worker.calls.filter(call=>call.method==='runtime/acknowledge').every(call=>call.input.operationId===worker.id));}
   }finally{f.close();}
 });
 

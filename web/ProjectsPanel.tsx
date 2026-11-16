@@ -4,6 +4,8 @@ import type { Conversation } from './types';
 import { api, post } from './api';
 import { Icon, type IconName } from './icons';
 import { ProjectConnections, ProjectWorkspace } from './ProjectWorkspace';
+import { ProjectWorker } from './ProjectWorker';
+import type { WorkerStatus } from '../src/workers/schemas';
 
 const kindNames: Record<ComponentKind, string> = { website: 'Website', service: 'Background service', scheduled_job: 'Scheduled job', script: 'Manual script' };
 const kindIcons: Record<ComponentKind, IconName> = { website: 'globe', service: 'terminal', scheduled_job: 'clock', script: 'code' };
@@ -15,7 +17,7 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
   return <span className={`project-status ${status}`}><span className="status-dot" />{statusNames[status]}</span>;
 }
 
-export function ProjectsPanel({ workerConnected, onError, onConversation, onSelectConversation, initialProjectId, onBeforeNavigate, onUnsavedSourceChange, navigationPending }: {
+export function ProjectsPanel({ workerConnected, onError, onConversation, onSelectConversation, initialProjectId, onBeforeNavigate, onUnsavedSourceChange, navigationPending, workers = [] }: {
   workerConnected: boolean;
   onError: (message: string) => void;
   onConversation: (conversation: Conversation) => void;
@@ -24,6 +26,7 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
   onBeforeNavigate: () => boolean;
   onUnsavedSourceChange: (dirty: boolean) => void;
   navigationPending: boolean;
+  workers?: WorkerStatus[];
 }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialProjectId ?? null);
@@ -136,6 +139,7 @@ export function ProjectsPanel({ workerConnected, onError, onConversation, onSele
           <div className="project-detail-heading"><div><div className="eyebrow">{selected.origin === 'adopted' ? 'REGISTERED PROJECT' : 'PROJECT'}</div><h2>{selected.name}</h2><p>{selected.description || 'Give your operator a goal to start building this project.'}</p><button className="subtle-button danger" disabled={busy || navigationPending} onClick={() => void removeProject()}><Icon name="close" size={13} />{removingId === selected.id ? 'Removing project…' : 'Remove project'}</button></div><button className="subtle-button" onClick={() => { if (onBeforeNavigate()) setEditor('edit'); }} aria-label="Edit project"><Icon name="settings" size={14} />Edit</button></div>
           <div className="project-overview"><StatusBadge status={workerConnected ? selected.status : 'unknown'} /><span>Last checked: {timestamp(selected.lastCheckedAt)}</span><button className="subtle-button" onClick={() => void refresh()} disabled={busy || !workerConnected}><Icon name="refresh" size={14} />{busy ? 'Working…' : 'Refresh status'}</button></div>
           <div className="project-actions"><button className="primary-button" onClick={() => void ask()} disabled={busy}><Icon name="chat" size={15} />Ask operator</button><span className="small-note">Start a conversation with this project's context.</span></div>
+          <ProjectWorker key={`worker-${selected.id}`} project={selected} workers={workers} onUpdated={load} onError={onError} />
           <ProjectWorkspace readOnly={busy || navigationPending} key={`source-${selected.id}`} project={selected} workerConnected={workerConnected} onUpdated={load} onError={onError} onDirtyChange={onUnsavedSourceChange} />
           <ProjectConnections key={`connections-${selected.id}`} project={selected} onUpdated={load} onError={onError} />
           <div className="project-section-heading"><h3>Components <span>{selected.components.length}</span></h3><button className="secondary-button" onClick={() => setComponentEditor('new')}><Icon name="plus" size={13} />Add component</button></div>

@@ -36,11 +36,13 @@ export class ManagedRepository {
   readonly workspacePath:string;
   private readonly lockPath:string;
   private pending:Promise<unknown>=Promise.resolve();
+  private secretGuard?:(value:unknown)=>void;
   constructor(private config:Config){
     this.repositoryPath=resolve(config.repositoryPath??projectRoot);
     this.workspacePath=resolve(config.stateDir,'workspaces','managed');
     this.lockPath=resolve(config.stateDir,'workspaces','managed-repository.lock');
   }
+  setSecretGuard(guard:(value:unknown)=>void){this.secretGuard=guard;}
   private git(cwd:string,args:string[],allowFailure=false):string {
     const env={...process.env};for(const key of Object.keys(env))if(key.startsWith('GIT_'))delete env[key];
     env.GIT_TERMINAL_PROMPT='0';env.GIT_LITERAL_PATHSPECS='1';
@@ -126,6 +128,7 @@ export class ManagedRepository {
   }
   source(kind:ManagedKind,id:string):Promise<ManagedSource>{return this.exclusive(()=>{this.ensureUnlocked();return this.sourceUnlocked(kind,id);});}
   private validateCommit(files:Record<string,string>,message:string,runId?:string):void {
+    this.secretGuard?.({files,message,runId});
     const secrets=[this.config.adminPassword,this.config.ipcToken,...Object.entries(process.env).filter(([key])=>/(?:KEY|TOKEN|PASSWORD|SECRET)$/.test(key)).map(([,value])=>value)].filter((value):value is string=>Boolean(value&&value.length>=6));
     for(const content of [...Object.values(files),message,runId??''])for(const secret of secrets){if(content.includes(secret)||content.includes(JSON.stringify(secret).slice(1,-1)))throw failure('Known credentials cannot be committed into generated source. Remove the credential value and use external configuration.',400);}
     if(!message.trim()||message.length>2000||message.includes('\0'))throw failure('Commit message must contain 1–2000 characters',400);

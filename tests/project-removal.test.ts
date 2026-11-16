@@ -9,6 +9,7 @@ import { createController } from '../src/controller.ts';
 import { initState, type Config } from '../src/config.ts';
 import { bridgeRequest } from '../src/mcp.ts';
 import type { ManagedSource } from '../src/managed/schemas.ts';
+import type { WorkerHealth } from '../src/ipc.ts';
 
 class OfflineWorker extends EventEmitter {
   calls=0;
@@ -58,7 +59,7 @@ test('unregistering an outside-root project removes every association while reta
     for(const id of [owned.id,second.id])f.ctl.store.connectors.observed(id,[],new Date().toISOString(),JSON.stringify({sourceCommit:src.commit,configuration:{}}));
     f.ctl.connectors.assign(consumer.id,{connectorIds:[owned.id,second.id,external.id]});f.ctl.connectors.assign(p.id,{connectorIds:[external.id]});
     const unrelatedConversation=f.ctl.projects.newConversation(unrelated.id),queued=f.ctl.store.enqueue(unrelatedConversation.id,'Unrelated queued task',randomUUID());
-    const receipt=`runtime_${randomUUID()}`,now=new Date().toISOString();f.ctl.store.db.prepare('INSERT INTO runtime_receipts VALUES(?,?,?,?,?,?)').run(receipt,'managed/deploy',p.id,JSON.stringify({evidence:'Retained receipt'}),now,now);
+    const receipt=`runtime_${randomUUID()}`,now=new Date().toISOString();f.ctl.store.db.prepare('INSERT INTO runtime_receipts(operationId,method,projectId,payload,receivedAt,acknowledgedAt) VALUES(?,?,?,?,?,?)').run(receipt,'managed/deploy',p.id,JSON.stringify({evidence:'Retained receipt'}),now,now);
     const before={conversations:f.ctl.store.conversations(),runs:f.ctl.store.runs(),messages:f.ctl.store.messages(conversation.id),events:f.ctl.store.events()};
     const result=await remove(f,p.id);assert.equal(result.statusCode,200,result.body);
     for(const table of ['projects','project_components','project_conversations','project_sources','project_deployments','source_finalizations']){
@@ -91,7 +92,7 @@ test('pending source commits, null-project receipts and known worker uncertainty
   const f=await fixture();try{
     const p=project(f),conversation=f.ctl.projects.newConversation(p.id),run=f.ctl.store.enqueue(conversation.id,'Finished task',randomUUID());f.ctl.store.transition(run.id,'interrupted');
     f.ctl.store.managed.beginFinalization(run.id,p.id);let result=await remove(f,p.id);assert.equal(result.statusCode,409);assert.match(result.json().error,/source commits/);f.ctl.store.managed.finalized(run.id,'a'.repeat(40));
-    const receipt=`runtime_${randomUUID()}`;f.ctl.store.db.prepare('INSERT INTO runtime_receipts VALUES(?,?,?,?,?,NULL)').run(receipt,'connectors/call',null,'{}',new Date().toISOString());result=await remove(f,p.id);assert.equal(result.statusCode,409);assert.match(result.json().error,/receipts/);f.ctl.store.db.prepare('UPDATE runtime_receipts SET acknowledgedAt=? WHERE operationId=?').run(new Date().toISOString(),receipt);
+    const receipt=`runtime_${randomUUID()}`;f.ctl.store.db.prepare('INSERT INTO runtime_receipts(operationId,method,projectId,payload,receivedAt,acknowledgedAt) VALUES(?,?,?,?,?,NULL)').run(receipt,'connectors/call',null,'{}',new Date().toISOString());result=await remove(f,p.id);assert.equal(result.statusCode,409);assert.match(result.json().error,/receipts/);f.ctl.store.db.prepare('UPDATE runtime_receipts SET acknowledgedAt=? WHERE operationId=?').run(new Date().toISOString(),receipt);
     f.ctl.queue.health={runtimeOperations:[{id:`runtime_${randomUUID()}`,method:'managed/deploy',status:'uncertain',requiresExternalInspection:true}]} as any;assert.equal((await remove(f,p.id)).statusCode,409);f.ctl.queue.health=null;
     assert.equal((await remove(f,p.id)).statusCode,200);assert.equal(f.worker.calls,0);assert(f.ctl.store.db.prepare('SELECT operationId FROM runtime_receipts WHERE operationId=?').get(receipt));
   }finally{await f.close();}
@@ -107,6 +108,27 @@ test('an asynchronous source GET prevents removal until its final metadata write
     const blocked=await remove(f,p.id);assert.equal(blocked.statusCode,409);assert.match(blocked.json().error,/requests to finish/);release();assert.equal((await response).statusCode,200);
     assert.equal((await remove(f,p.id)).statusCode,200);assert.equal(f.ctl.store.managed.source(p.id),undefined);
   }finally{release();if(pending)await pending;await f.close();}
+});
+
+test('observed execution on a secondary worker blocks project removal without contacting another worker',async()=>{
+  const f=await fixture();try{
+    const p=project(f),id='secondary',journalId=randomUUID();let reads=0;
+    const health:WorkerHealth={connected:true,uid:f.config.controllerUid,executionUid:f.config.controllerUid,root:false,pid:1234,workerId:id,workerMode:'user',journalId,model:'fixture-model',projectsDir:f.config.projectsDir,activeRunId:null,uncertainRuns:[],runtimeOperations:[],runtime:{available:true,authenticated:true,model:'fixture-model',version:'fixture',detail:'No runtime effects'}};
+    const worker=Object.assign(new EventEmitter(),{async connect(){reads++;return health;},async request(){throw new Error('Removal must not issue worker requests');},close(){}});
+    f.ctl.queue.registry.register({id,name:'Secondary worker',model:'fixture-model',mode:'user'});
+    (f.ctl.queue.registry as any).attach(id,worker);
+    // The representative legacy health is idle; only the secondary worker owns this work.
+    f.ctl.queue.health={...health,workerId:'default'};
+    for(const state of ['active','uncertain','operation'] as const){
+      health.activeRunId=state==='active'?'unrecorded-run':null;
+      health.uncertainRuns=state==='uncertain'?['unrecorded-run']:[];
+      health.runtimeOperations=state==='operation'?[{id:`runtime_${randomUUID()}`,method:'connectors/call',status:'uncertain',requiresExternalInspection:true}]:[];
+      await f.ctl.queue.registry.refresh(id);const before=reads;
+      const result=await remove(f,p.id);assert.equal(result.statusCode,409,result.body);assert.match(result.json().error,/reconcile/);assert(f.ctl.store.projects.get(p.id));assert.equal(reads,before);
+    }
+    health.runtimeOperations=[];await f.ctl.queue.registry.refresh(id);
+    assert.equal((await remove(f,p.id)).statusCode,200);assert.equal(f.worker.calls,0);
+  }finally{await f.close();}
 });
 
 test('an asynchronous owned-connector request blocks removal and releases its guard after failure',async()=>{

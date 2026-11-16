@@ -97,7 +97,8 @@ export class ManagedService {
     const project=this.projects.get(id),value=await this.readSource(id);
     if(!value.source.commit||value.source.dirty)throw fail('Commit source changes before deploying.',409);
     if(!value.manifest.run)throw fail('The package manifest needs a run command before it can be deployed.');
-    const deployed=this.response(managedDeploymentResult,await this.receipts.request('managed/deploy',{project:{id,directory:project.directory},source:{commit:value.source.commit,path:value.source.path},manifest:value.manifest,files:value.files}));
+    const environment=this.store.projects.environment(id);
+    const deployed=this.response(managedDeploymentResult,await this.receipts.request('managed/deploy',{project:{id,directory:project.directory},source:{commit:value.source.commit,path:value.source.path},manifest:value.manifest,files:value.files,...(environment?{environment}:{})}));
     this.verifyRelease(project,deployed,value.source.commit);
     this.store.managed.saveDeployment(id,deployed);
     this.registerService(id,deployed.unitName);
