@@ -1,13 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { connectorSnapshotSchema, connectorToolsResult, type Connector, type ConnectorTool, type ConnectorTransport } from './schemas.ts';
 
-type Row={id:string;name:string;description:string;enabled:number;definition:string;projectId:string|null;tools:string;status:Connector['status'];detail:string;checkedAt:string|null;createdAt:string;updatedAt:string};
+type Row={id:string;name:string;description:string;enabled:number;definition:string;projectId:string|null;packageId:string|null;tools:string;status:Connector['status'];detail:string;checkedAt:string|null;createdAt:string;updatedAt:string};
 
 /** Connection definitions and observed tools, without process or network concerns. */
 export class ConnectorStore {
   constructor(private db:DatabaseSync){}
   private expand(row:Row):Connector {
-    return {...connectorSnapshotSchema.parse({id:row.id,name:row.name,...JSON.parse(row.definition)}),description:row.description,enabled:row.enabled===1,projectId:row.projectId,tools:JSON.parse(row.tools),status:row.status,detail:row.detail,checkedAt:row.checkedAt,createdAt:row.createdAt,updatedAt:row.updatedAt};
+    return {...connectorSnapshotSchema.parse({id:row.id,name:row.name,...JSON.parse(row.definition)}),description:row.description,enabled:row.enabled===1,projectId:row.projectId,packageId:row.packageId,tools:JSON.parse(row.tools),status:row.status,detail:row.detail,checkedAt:row.checkedAt,createdAt:row.createdAt,updatedAt:row.updatedAt};
   }
   list():Connector[]{return (this.db.prepare('SELECT * FROM connectors ORDER BY name,id').all() as Row[]).map(row=>this.expand(row));}
   get(id:string):Connector|undefined {const row=this.db.prepare('SELECT * FROM connectors WHERE id=?').get(id) as Row|undefined;return row?this.expand(row):undefined;}
@@ -18,6 +18,24 @@ export class ConnectorStore {
   }
   update(id:string,input:Pick<Connector,'name'|'description'|'enabled'>){
     this.db.prepare('UPDATE connectors SET name=?,description=?,enabled=?,updatedAt=? WHERE id=?').run(input.name,input.description,input.enabled?1:0,new Date().toISOString(),id);
+  }
+  private packageConnection(packageId:string):{id:string}|undefined{
+    return this.db.prepare(`SELECT id FROM connectors WHERE packageId=? OR (packageId IS NULL AND projectId=?)
+      ORDER BY CASE WHEN packageId=? THEN 0 ELSE 1 END,name,id LIMIT 1`).get(packageId,packageId,packageId) as {id:string}|undefined;
+  }
+  assertPackageName(packageId:string,name:string){
+    const connection=this.packageConnection(packageId);
+    if(connection&&this.nameExists(name,connection.id))throw Object.assign(new Error('That connection name is already registered'),{statusCode:409});
+  }
+  syncPackageDetails(packageId:string,input:{name:string;description:string}){
+    this.assertPackageName(packageId,input.name);const connection=this.packageConnection(packageId);
+    if(connection)this.db.prepare('UPDATE connectors SET name=?,description=?,updatedAt=? WHERE id=?').run(input.name,input.description,new Date().toISOString(),connection.id);
+  }
+  attachPackage(id:string,packageId:string){
+    this.db.prepare(`UPDATE connectors SET packageId=?,tools='[]',status='untested',checkedAt=NULL,
+      detail='Connection is backed by a source package. Test its current configuration.',updatedAt=? WHERE id=?`)
+      .run(packageId,new Date().toISOString(),id);
+    this.db.prepare('DELETE FROM connector_checks WHERE connectorId=?').run(id);
   }
   setAuth(id:string,auth:Connector['auth']|null){
     const row=this.db.prepare('SELECT definition FROM connectors WHERE id=?').get(id) as {definition:string}|undefined;if(!row)throw new Error('Connection not found');

@@ -20,7 +20,7 @@ export type ConnectorSnapshot=z.infer<typeof connectorSnapshotSchema>;
 export type ConnectorTool=z.infer<typeof connectorToolSchema>;
 export type ConnectorStatus='untested'|'connected'|'error';
 export type Connector=ConnectorSnapshot&{
-  description:string;enabled:boolean;projectId:string|null;tools:ConnectorTool[];status:ConnectorStatus;detail:string;
+  description:string;enabled:boolean;projectId:string|null;packageId?:string|null;tools:ConnectorTool[];status:ConnectorStatus;detail:string;
   checkedAt:string|null;createdAt:string;updatedAt:string;source?:import('../managed/schemas.ts').ManagedSource|null;
   readiness?:{ready:boolean;reason?:string;credentialId?:string};
 };
@@ -29,6 +29,10 @@ const registration={
   projectId:z.string().uuid().nullable().optional(),
 };
 export const connectorInput=z.discriminatedUnion('transport',[stdio.extend({...registration,cwd:cwd.optional()}),http.extend(registration)]);
+export const connectorAdoptInput=z.object({repositoryId:z.string().uuid(),packagePath:z.string().min(1).max(500)}).strict();
+const packagedRegistration={name:registration.name,description:registration.description,enabled:registration.enabled,...connectorAdoptInput.shape};
+/** Owner registrations and model tools create portable definitions; local paths and auth remain private. */
+export const connectorPackageInput=z.discriminatedUnion('transport',[stdio.extend(packagedRegistration),http.extend(packagedRegistration)]);
 export const connectorPatchInput=z.object({name:z.string().trim().min(1).max(120).optional(),description:z.string().max(4000).optional(),enabled:z.boolean().optional()}).strict();
 export const connectorAssignmentInput=z.object({connectorIds:z.array(z.string().uuid()).max(20)}).strict();
 export const connectorCall=z.object({name:z.string().min(1).max(200),arguments:z.record(z.string(),z.unknown()).default({})}).strict();

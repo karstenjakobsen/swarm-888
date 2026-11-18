@@ -670,6 +670,8 @@ test('Connections creates a local demo, discovers tools, validates JSON, and sho
 test('Connections registers an HTTP server without credential fields', async ({ page }) => {
   let submitted: unknown;
   const connector = { id: 'f15f39d3-3a57-426f-bbf0-e7acf9105d4f', name: 'Fixture HTTP tools', description: '', enabled: true, transport: 'http', url: 'http://127.0.0.1:4400/mcp', projectId: null, tools: [], status: 'untested', detail: 'Not tested.', checkedAt: null };
+  const repository = { id: randomUUID(), name: 'HTTP connector repository', status: 'ready' };
+  await page.route('**/api/repositories', route => route.fulfill({ json: [repository] }));
   await page.route('**/api/connectors', route => { if (route.request().method() === 'POST') { submitted = route.request().postDataJSON(); return route.fulfill({ json: connector }); } return route.fulfill({ json: [] }); });
   await page.route('**/api/projects', route => route.fulfill({ json: [] }));
   await login(page);
@@ -681,9 +683,87 @@ test('Connections registers an HTTP server without credential fields', async ({ 
   await expect(editor.getByLabel('Command', { exact: true })).toHaveCount(0);
   await expect(editor).toContainText('configure credentials in Authentication.');
   await editor.getByLabel('MCP server URL').fill(connector.url);
+  await expect(editor.getByRole('button', { name: 'Add connection', exact: true })).toBeDisabled();
+  await expect(editor.getByLabel('Related project (optional)')).toHaveCount(0);
+  await editor.getByLabel('Git repository', { exact: true }).selectOption(repository.id);
+  await editor.getByLabel('Folder in repository', { exact: true }).fill('connectors/http-tools');
   await editor.getByRole('button', { name: 'Add connection', exact: true }).click();
   await expect(page.getByRole('heading', { name: connector.name, exact: true })).toBeVisible();
-  expect(submitted).toEqual({ name: connector.name, description: '', transport: 'http', projectId: null, enabled: true, url: connector.url });
+  expect(submitted).toEqual({ name: connector.name, description: '', transport: 'http', repositoryId: repository.id, packagePath: 'connectors/http-tools', enabled: true, url: connector.url });
+});
+
+test('Connections saves an HTTP definition in a real Git package', async ({ page }) => {
+  await login(page);
+  const repository = await browserRepository(page);
+  const name = `HTTP package ${randomUUID().slice(0, 8)}`;
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.locator('.management-heading-actions').getByRole('button', { name: 'Add connection', exact: true }).click();
+  const editor = page.locator('.connection-editor');
+  await editor.getByLabel('Connection name').fill(name);
+  await editor.getByLabel('Transport', { exact: true }).selectOption('http');
+  await editor.getByLabel('MCP server URL').fill('https://example.invalid/tools/mcp');
+  await editor.getByLabel('Git repository', { exact: true }).selectOption(repository.id);
+  await editor.getByLabel('Folder in repository', { exact: true }).fill('connectors/http-tools');
+  await editor.getByRole('button', { name: 'Add connection', exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  await expect(page.locator('.connection-facts')).toContainText('connectors/http-tools');
+  const connections = await (await page.request.get('/api/connectors')).json();
+  const connection = connections.find((value: { name: string }) => value.name === name);
+  expect(connection.source.repositoryId).toBe(repository.id);
+  expect(connection.source.commit).toMatch(/^[a-f0-9]{40,64}$/);
+  const packages = await (await page.request.get('/api/packages')).json();
+  expect(packages.find((value: { id: string }) => value.id === connection.source.packageId)).toMatchObject({ kind: 'connector', name, repositoryId: repository.id, path: 'connectors/http-tools', manifest: { schemaVersion: 1, mcp: { transport: 'http', url: 'https://example.invalid/tools/mcp' } } });
+  await page.getByRole('button', { name: 'Open source project', exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Source and deployment' })).toContainText(connection.source.commit.slice(0, 10));
+});
+
+test('Connections adopts a legacy registration while retaining authentication and project assignment on a phone', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const id = randomUUID(), relatedId = randomUUID(), packageId = randomUUID(), repositoryId = randomUUID(), credentialId = randomUUID();
+  const auth = { type: 'bearer', credentialId, field: 'token' };
+  const source = { repositoryId, packageId, repositoryPath: '/tmp/adopt-repository', branch: 'operator/packages', path: 'connectors/retained', workspacePath: '/tmp/adopt-repository/connectors/retained', commit: 'e'.repeat(40), dirty: false };
+  const connector: any = { id, name: 'Retained HTTP connection', description: 'Existing connection', transport: 'http', url: 'https://example.invalid/mcp', projectId: relatedId, packageId: null, auth, readiness: { ready: true }, enabled: true, tools: [], status: 'untested', detail: 'Test to discover tools.', checkedAt: null };
+  const projectBase = { description: '', origin: 'created', directory: '/tmp/adopt-runtime', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'ready', lastCheckedAt: null, conversationIds: [], runs: [], components: [] };
+  const related = { ...projectBase, id: relatedId, name: 'Assigned project', connectorIds: [id] };
+  const packageProject = { ...projectBase, id: packageId, name: connector.name, connectorIds: [], source };
+  let adoptions = 0;
+  await page.route('**/api/connectors', route => route.fulfill({ json: [connector] }));
+  await page.route('**/api/projects', route => route.fulfill({ json: [related, packageProject] }));
+  await page.route('**/api/repositories', route => route.fulfill({ json: [{ id: repositoryId, name: 'Adoption repository', status: 'ready' }] }));
+  await page.route('**/api/credentials', route => route.fulfill({ json: [{ id: credentialId, name: 'Retained token', kind: 'secret', fields: ['token'], ready: true, revision: 1 }] }));
+  await page.route(`**/api/connectors/${id}/package`, route => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy();
+    expect(route.request().postDataJSON()).toEqual({ repositoryId, packagePath: source.path });
+    adoptions++; Object.assign(connector, { packageId, source });
+    return route.fulfill({ json: connector });
+  });
+  await page.route(`**/api/projects/${packageId}/source`, route => route.fulfill({ json: { source, manifest: { schemaVersion: 1, id: packageId, kind: 'connector', name: connector.name, mcp: { transport: 'http', url: connector.url } }, files: { 'README.md': 'Retained connector source.\n' } } }));
+  await page.route(`**/api/projects/${packageId}/environment`, route => route.fulfill({ json: { environment: null, readiness: { ready: true } } }));
+  await login(page);
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.locator('.source-migration>summary').click();
+  const adoption = page.locator('.source-migration');
+  await expect(adoption).toContainText('Credentials and project assignments stay on this server.');
+  await expect(adoption.getByRole('button', { name: 'Adopt into package', exact: true })).toBeDisabled();
+  await adoption.getByLabel('Git repository', { exact: true }).selectOption(repositoryId);
+  await adoption.getByLabel('Folder in repository', { exact: true }).fill(source.path);
+  await adoption.getByRole('button', { name: 'Adopt into package', exact: true }).click();
+  await expect(page.locator('.connection-facts')).toContainText('eeeeeeeeee');
+  await expect(page.locator('.connection-facts')).toContainText(source.path);
+  await expect(page.locator('.source-migration')).toHaveCount(0);
+  await expect(page.getByLabel('Connection authentication method')).toHaveValue('bearer');
+  await expect(page.getByLabel('Saved credential')).toHaveValue(credentialId);
+  expect(connector.id).toBe(id); expect(connector.auth).toEqual(auth); expect(related.connectorIds).toEqual([id]); expect(adoptions).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('connection-adoption-phone.png'), fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: 'Open source project', exact: true }).click();
+  await expect(page.getByRole('heading', { name: connector.name, exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Source and deployment' })).toContainText('eeeeeeeeee');
+  await page.locator('.project-list-item').filter({ hasText: related.name }).click();
+  await expect(page.getByRole('region', { name: 'Project connections' }).getByRole('checkbox', { name: connector.name })).toBeChecked();
 });
 
 async function sourceReviewFixture(page: Page, mode: 'legacy' | 'diverged' | 'current' = 'current') {
@@ -1211,7 +1291,7 @@ test('project removal confirms metadata-only cleanup outside the current root wi
     await expect(page.getByRole('button', { name: 'Removing project…', exact: true })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Create project', exact: true })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Ask operator', exact: true })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Add source', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Adopt into package', exact: true })).toBeDisabled();
     for (const item of await page.locator('.project-list-item').all()) await expect(item).toBeDisabled();
     pending.resolve();
     await expect(page.locator('.project-list-item').filter({ hasText: removed.name })).toHaveCount(0);

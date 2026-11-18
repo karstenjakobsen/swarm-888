@@ -52,18 +52,18 @@ export class ProjectStore {
     this.transaction(()=>{
       if(!this.db.prepare('SELECT id FROM projects WHERE id=?').get(id))throw failure('Project not found',404);
       const affected=`WITH affected_projects(id) AS (
-        SELECT ? UNION SELECT pc.projectId FROM project_connectors pc JOIN connectors c ON c.id=pc.connectorId WHERE c.projectId=?
+        SELECT ? UNION SELECT pc.projectId FROM project_connectors pc JOIN connectors c ON c.id=pc.connectorId WHERE c.projectId=? OR c.packageId=?
       )`;
-      if(this.db.prepare(`${affected} SELECT r.id FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId JOIN affected_projects a ON a.id=pc.projectId WHERE r.status IN ('queued','running','waiting','uncertain') LIMIT 1`).get(id,id))throw failure('Finish or reconcile tasks for this project and projects using its connections before removing it.',409);
-      if(this.db.prepare(`${affected} SELECT sf.runId FROM source_finalizations sf JOIN affected_projects a ON a.id=sf.projectId WHERE sf.state='pending' LIMIT 1`).get(id,id))throw failure('Finish pending source commits before removing this project.',409);
+      if(this.db.prepare(`${affected} SELECT r.id FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId JOIN affected_projects a ON a.id=pc.projectId WHERE r.status IN ('queued','running','waiting','uncertain') LIMIT 1`).get(id,id,id))throw failure('Finish or reconcile tasks for this project and projects using its connections before removing it.',409);
+      if(this.db.prepare(`${affected} SELECT sf.runId FROM source_finalizations sf JOIN affected_projects a ON a.id=sf.projectId WHERE sf.state='pending' LIMIT 1`).get(id,id,id))throw failure('Finish pending source commits before removing this project.',409);
       const repositoryId=projectRepository(this.db,id);
       if(repositoryId&&this.db.prepare('SELECT 1 FROM repository_leases WHERE repositoryId=?').get(repositoryId))throw failure('Finish or reconcile the task writing this repository before removing its project.',409);
       // Connector receipts may have no project ID, so every unacknowledged result
       // must be recovered before registrations can be removed.
       if(this.db.prepare('SELECT operationId FROM runtime_receipts WHERE acknowledgedAt IS NULL LIMIT 1').get())throw failure('Acknowledge pending runtime result receipts before removing project registrations.',409);
-      this.db.prepare('DELETE FROM project_connectors WHERE projectId=? OR connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id,id);
-      this.db.prepare('DELETE FROM connector_checks WHERE connectorId IN (SELECT id FROM connectors WHERE projectId=?)').run(id);
-      this.db.prepare('DELETE FROM connectors WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM project_connectors WHERE projectId=? OR connectorId IN (SELECT id FROM connectors WHERE projectId=? OR packageId=?)').run(id,id,id);
+      this.db.prepare('DELETE FROM connector_checks WHERE connectorId IN (SELECT id FROM connectors WHERE projectId=? OR packageId=?)').run(id,id);
+      this.db.prepare('DELETE FROM connectors WHERE projectId=? OR packageId=?').run(id,id);
       this.db.prepare('DELETE FROM job_runs WHERE jobId IN (SELECT id FROM jobs WHERE projectId=?)').run(id);
       this.db.prepare('DELETE FROM jobs WHERE projectId=?').run(id);
       this.db.prepare('DELETE FROM project_leases WHERE projectId=?').run(id);

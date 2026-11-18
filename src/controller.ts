@@ -159,7 +159,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.get('/api/projects',async()=>projects.list());
   app.post('/api/projects',async req=>{writable();return managed.createProject(req.body);});
   app.get('/api/projects/:id',async(req:any)=>projects.get(req.params.id));
-  app.patch('/api/projects/:id',async(req:any)=>{writable();return projects.update(req.params.id,req.body);});
+  app.patch('/api/projects/:id',async(req:any)=>{writable();return managed.updateProject(req.params.id,req.body);});
   app.delete('/api/projects/:id',async(req:any)=>{
     writable();z.object({}).strict().parse(req.body===undefined?{}:req.body);
     if([...resourceRequests].some(id=>id!==req.id))throw fail('Wait for other project and connection requests to finish before removing a project.',409);
@@ -184,10 +184,11 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.get('/api/projects/:id/deployment/logs',async(req:any)=>redacted(await managed.deploymentAction(req.params.id,'logs')));
   app.put('/api/projects/:id/connectors',async(req:any)=>{writable();return connectors.assign(req.params.id,req.body);});
   app.get('/api/connectors',async()=>connectors.list());
-  app.post('/api/connectors',async req=>{writable();return connectors.create(req.body);});
+  app.post('/api/connectors',async req=>{writable();return connectors.createPackaged(req.body);});
   app.post('/api/connectors/examples',async req=>{writable();return connectors.createExample(req.body);});
   app.get('/api/connectors/:id',async(req:any)=>connectors.get(req.params.id));
-  app.patch('/api/connectors/:id',async(req:any)=>{writable();return connectors.update(req.params.id,req.body);});
+  app.patch('/api/connectors/:id',async(req:any)=>{writable();return connectors.updatePackaged(req.params.id,req.body);});
+  app.post('/api/connectors/:id/package',async(req:any)=>{writable();return connectors.adoptPackage(req.params.id,req.body);});
   app.post('/api/connectors/:id/test',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return connectors.test(req.params.id);});
   app.post('/api/connectors/:id/call',async(req:any)=>{writable();return redacted(await connectors.call(req.params.id,req.body));});
   app.get('/api/conversations',async()=>store.conversations());
@@ -301,8 +302,17 @@ export async function createController(config:Config, options:{client?:WorkerCli
         const target=args.projectId??(params.name.startsWith('project_')?args.id:undefined);
         if(project&&typeof target==='string'&&target!==project.id)throw fail('Project tools are scoped to the current task project',403);
         if(project&&params.name==='package_create'&&args.repositoryId!==project.source?.repositoryId)throw fail('Create packages in the repository assigned to this project, or use a generic conversation.',403);
+        if(project&&params.name==='connector_register'&&args.repositoryId!==project.source?.repositoryId)throw fail('Create connector packages in the repository assigned to this project, or use a generic conversation.',403);
+        if(project&&params.name==='connector_register_project'&&typeof args.id==='string'&&projects.get(args.id).source?.repositoryId!==project.source?.repositoryId)throw fail('Register connector packages from the repository assigned to this project, or use a generic conversation.',403);
+        if(project&&params.name==='connector_update'&&(args.name!==undefined||args.description!==undefined)&&typeof args.id==='string'&&connectors.get(args.id).source?.repositoryId!==project.source?.repositoryId)throw fail('Edit connector package metadata in its own project or a generic conversation.',403);
         if(project&&params.name==='repository_import')throw fail('Import repository packages from a generic conversation or the Repositories UI; this task is scoped to its existing project.',403);
         if(project&&params.name==='repository_push'&&args.id!==project.source?.repositoryId)throw fail('Publish only the repository assigned to this task project.',403);
+        if(params.name==='connector_register_project'||params.name==='connector_register'){
+          const packageId=params.name==='connector_register_project'?args.id:
+            typeof args.repositoryId==='string'&&typeof args.packagePath==='string'?managed.packages.store.atPath(args.repositoryId,args.packagePath)?.id:undefined;
+          const existing=typeof packageId==='string'?connectors.list().find(connection=>connection.packageId===packageId||!connection.packageId&&connection.projectId===packageId):undefined;
+          if(existing&&!granted.includes(existing.id))throw fail('This connection is outside the task grant',403);
+        }
         if(['connector_call','connector_test','connector_update'].includes(params.name)&&typeof args.id==='string'&&!granted.includes(args.id))throw fail('This connection is outside the task grant',403);
         if(params.name==='project_connectors'&&Array.isArray(args.connectorIds)&&args.connectorIds.some(id=>!granted.includes(String(id))))throw fail('Project assignments cannot expand the accepted task connection grant',403);
         const charged=store.db.prepare("UPDATE runs SET toolCalls=toolCalls+1 WHERE id=? AND toolCalls<maxToolCalls AND status IN ('running','waiting')").run(run.id);

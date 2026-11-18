@@ -83,12 +83,33 @@ test('model job updates accept inheritance reset while preserving the accepted p
 
 test('parallel connector registrations preserve both additions to the accepted task grant',async()=>{
   const f=await fixture(true);let release=()=>{};try{
-    const {run}=f.active({maxToolCalls:8}),original=f.ctl.brain.callTool.bind(f.ctl.brain);let entered=0;
+    const repository=await f.ctl.managed.packages.register({name:'Parallel connections',remoteUrl:'https://example.test/parallel.git',mode:'create'});
+    const project=await f.ctl.managed.createProject({name:'Parallel connection project',repositoryId:repository.id,packagePath:'apps/project',template:'empty'}),conversation=f.ctl.projects.newConversation(project.id);
+    const queued=f.ctl.store.enqueue(conversation.id,'Create connections',randomUUID(),'user',null,{maxToolCalls:8}),run=f.ctl.store.claim(queued.id,{id:'default'},f.worker.health()),original=f.ctl.brain.callTool.bind(f.ctl.brain);let entered=0;
     const gate=new Promise<void>(resolve=>{release=resolve;});
     f.ctl.brain.callTool=async(name,input,context)=>{if(name==='connector_register'){if(++entered===2)release();await gate;}return original(name,input,context);};
-    const results=await Promise.all(['First','Second'].map(name=>f.tool(run.id,'connector_register',{name,transport:'http',url:'http://127.0.0.1:1/mcp'})));
+    const results=await Promise.all(['First','Second'].map(name=>f.tool(run.id,'connector_register',{name,repositoryId:repository.id,packagePath:`connectors/${name.toLowerCase()}`,transport:'http',url:'http://127.0.0.1:1/mcp'})));
     assert.equal(entered,2);assert.deepEqual(new Set(f.ctl.store.run(run.id)?.grantedConnectorIds),new Set(results.map((connection:any)=>connection.id)));
+    f.ctl.store.transition(run.id,'interrupted');await f.ctl.managed.finishRun(f.ctl.store.run(run.id)!);
   }finally{release();await f.close();}
+});
+
+test('project tasks cannot create or edit connector packages in another repository',async()=>{
+  const f=await fixture(true);try{
+    const repository=await f.ctl.managed.packages.register({name:'Project scope',remoteUrl:'https://example.test/scoped.git',mode:'create'}),foreignRepository=await f.ctl.managed.packages.register({name:'Foreign scope',remoteUrl:'https://example.test/foreign.git',mode:'create'});
+    const project=await f.ctl.managed.createProject({name:'Scoped project',repositoryId:repository.id,packagePath:'apps/scoped'});
+    const connection=await f.ctl.connectors.createPackaged({name:'Foreign tools',transport:'http',url:'https://tools.example.test/mcp',repositoryId:foreignRepository.id,packagePath:'connectors/foreign'}),ungranted=await f.ctl.connectors.createPackaged({name:'Ungrantable existing tools',transport:'http',url:'https://tools.example.test/mcp',repositoryId:repository.id,packagePath:'connectors/existing'});
+    f.ctl.connectors.assign(project.id,{connectorIds:[connection.id]});
+    const conversation=f.ctl.projects.newConversation(project.id),queued=f.ctl.store.enqueue(conversation.id,'Use granted tools',randomUUID(),'user',null,{maxToolCalls:8}),run=f.ctl.store.claim(queued.id,{id:'default'},f.worker.health(),[connection.id]);
+    await assert.rejects(f.tool(run.id,'connector_register',{name:'Outside scope',transport:'http',url:'https://tools.example.test/mcp',repositoryId:foreignRepository.id,packagePath:'connectors/outside'}),/repository assigned/);
+    await assert.rejects(f.tool(run.id,'connector_register_project',{id:connection.packageId}),/repository assigned/);
+    await assert.rejects(f.tool(run.id,'connector_register_project',{id:ungranted.packageId}),/outside the task grant/);
+    await assert.rejects(f.tool(run.id,'connector_register',{name:ungranted.name,transport:'http',url:'https://tools.example.test/mcp',repositoryId:repository.id,packagePath:'connectors/existing',enabled:false}),/outside the task grant/);
+    await assert.rejects(f.tool(run.id,'connector_update',{id:connection.id,name:'Outside rename'}),/own project or a generic conversation/);
+    const disabled=await f.tool(run.id,'connector_update',{id:connection.id,enabled:false});assert.equal(disabled.enabled,false);
+    assert.equal(f.ctl.managed.packages.listPackages().length,3);assert.equal(f.ctl.connectors.get(connection.id).name,connection.name);
+    f.ctl.store.transition(run.id,'interrupted');await f.ctl.managed.finishRun(f.ctl.store.run(run.id)!);
+  }finally{await f.close();}
 });
 
 test('chat-created connector packages use the same task grants as newly registered connections',async()=>{

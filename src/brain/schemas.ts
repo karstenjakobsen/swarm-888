@@ -3,7 +3,7 @@ import { delegatedTaskInput } from '../tasks/schemas.ts';
 import { jobInput,jobPatch } from '../jobs/schemas.ts';
 import { projectCreateInput, projectUpdateInput, componentInput, componentUpdateInput, projectId } from '../projects/schemas.ts';
 import { sourceCreateInput, sourceWriteInput, sourceCommitInput } from '../managed/schemas.ts';
-import { connectorInput, connectorPatchInput, connectorAssignmentInput, connectorCall } from '../connectors/schemas.ts';
+import { connectorPackageInput, connectorPatchInput, connectorAssignmentInput, connectorCall } from '../connectors/schemas.ts';
 import { createPackageInput } from '../packages/inputs.ts';
 import { repositoryInput,packageImportInput,packageVersion } from '../packages/schemas.ts';
 
@@ -71,7 +71,7 @@ export const toolSchemas = {
   project_deployment_logs:z.object({id:projectId}).strict(),
   project_connectors:connectorAssignmentInput.extend({id:projectId}),
   connector_list:z.object({}).strict(),
-  connector_register:connectorInput,
+  connector_register:connectorPackageInput,
   connector_register_project:z.object({id:projectId}).strict(),
   connector_update:connectorPatchInput.extend({id:projectId}),
   connector_test:z.object({id:projectId}).strict(),
@@ -113,7 +113,7 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   project_list:'List durable projects and their observed website, service, schedule and script state. Unknown or stale status is not proof of failure or success.',
   project_get:'Read a project, registered components, observations and linked tasks.',
   project_create:'Create a project in a registered Git repository; repositoryId and packagePath are required. template service creates a tested local HTTP example, empty creates a source package. Remote URL belongs to repository registration. Source and runtime directories are separate. Adopted runtime directories stay within the projects root. Links the current conversation. Accepted commits follow the repository owner’s automatic publishing setting.',
-  project_update:'Update the name or purpose of an existing project without changing its directory or claiming it is running.',
+  project_update:'Commit shared name/description changes to an existing project package. Worker choice stays local. Adopt or migrate legacy source first; runtime directory and observed service state are preserved.',
   project_component_add:'Register a website, background service, scheduled job or manual script in a project. Only verified host observations establish status.',
   project_component_update:'Update a registered project component after changing its configuration; invalidates stale observations.',
   project_refresh:'Ask the worker to verify registered components against actual host state and website responses. Does not start, stop, restart or install services.',
@@ -128,9 +128,9 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   project_deployment_logs:'Read bounded logs for this project’s managed service.',
   project_connectors:'Select registered MCP connections for subsequent project tasks. Enabled selected connections become namespaced tools at the next task start.',
   connector_list:'List registered MCP connections, discovered tools and last observed connection health.',
-  connector_register:'Register a local stdio MCP command or HTTP endpoint. The owner configures scoped credentials and OAuth through Connections; never put secret values in URLs, arguments, source or chat.',
+  connector_register:'Create a connector package for a stdio MCP command or HTTP endpoint in a registered repository and package folder, commit it, and register its connection. Credentials and enabled state remain local; the owner configures authorization in Connections. Never put secret values in URLs, arguments, source or chat.',
   connector_register_project:'Register the MCP configuration declared in a managed project source manifest. Local package code is prepared from its committed revision outside the authoring worktree.',
-  connector_update:'Rename, describe, enable or disable a registered MCP connection.',
+  connector_update:'Commit name/description changes to the registered connector package, or enable/disable the local connection. Adopt legacy connections through Connections before editing shared details.',
   connector_test:'Initialize a registered MCP server and discover its actual tools. Reports failure honestly.',
   connector_call:'Call a discovered MCP tool through its registered connection. A timeout may leave side effects uncertain; inspect state before repeating a mutation.',
   artifact_publish:'Publish a regular output file from a project workspace as an authenticated downloadable artifact. Operator files and controller credentials cannot be published.',

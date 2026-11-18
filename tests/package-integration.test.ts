@@ -68,6 +68,62 @@ test('repository APIs require a remote and every new project or package gets a c
   }finally{await f.close();}
 });
 
+test('connection APIs require package source and publish portable metadata edits as Git commits',async()=>{
+  const f=await fixture();try{
+    const remote=join(f.root,'connections.git');mkdirSync(remote);git(remote,'init','--quiet','--bare');
+    const repository=await f.api('POST','/api/repositories',{name:'Connection packages',remoteUrl:remote,mode:'create'});
+    await f.api('PATCH',`/api/repositories/${repository.id}/push-settings`,{enabled:true,autoPush:true,branch:'main'});
+    const definition={name:'HTTP tools',description:'Portable service endpoint',transport:'http',url:'https://tools.example.test/mcp',repositoryId:repository.id,packagePath:'connectors/http'};
+    assert.equal((await f.ctl.app.inject({method:'POST',url:'/api/connectors',headers:{origin:f.headers.origin},payload:definition})).statusCode,401);
+    assert.equal((await f.ctl.app.inject({method:'POST',url:'/api/connectors',headers:{...f.headers,'x-csrf-token':'invalid'},payload:definition})).statusCode,403);
+    assert.equal((await f.request('POST','/api/connectors',{name:'No source',transport:'http',url:definition.url})).statusCode,400);
+    assert.equal(f.ctl.connectors.list().length,0);
+    const connection=await f.api('POST','/api/connectors',definition),packageId=connection.source.packageId;
+    assert.equal(connection.packageId,packageId);assert.equal(connection.source.repositoryId,repository.id);
+    const source=await f.api('GET',`/api/projects/${packageId}/source`);
+    assert.deepEqual(source.manifest.mcp,{transport:'http',url:definition.url});assert.equal(source.manifest.kind,'connector');
+    assert.equal(source.manifest.build,undefined);assert.equal(source.manifest.check,undefined);assert.equal(source.files['server.mjs'],undefined);
+    const updated=await f.api('PATCH',`/api/connectors/${connection.id}`,{name:'Renamed HTTP tools',description:'Updated portable endpoint'});
+    assert.notEqual(updated.source.commit,connection.source.commit);
+    const manifest=JSON.parse(readFileSync(join(repository.directory,'connectors/http/operator-package.json'),'utf8'));
+    assert.equal(manifest.name,updated.name);assert.equal(manifest.description,updated.description);
+    const disabled=await f.api('PATCH',`/api/connectors/${connection.id}`,{enabled:false});assert.equal(disabled.enabled,false);assert.equal(disabled.source.commit,updated.source.commit);
+    await f.api('POST',`/api/repositories/${repository.id}/import`,{paths:['connectors/http']});
+    assert.equal(f.ctl.connectors.list().length,1);assert.equal(f.ctl.connectors.get(connection.id).enabled,false);
+    for(let attempt=0;attempt<3;attempt++)await f.ctl.managed.packages.flushPushes();
+    assert.equal(git(remote,'rev-parse','refs/heads/main'),updated.source.commit);
+    assert.equal(JSON.parse(git(remote,'show','main:connectors/http/operator-package.json')).name,updated.name);
+    assert.equal(f.worker.requests.length,0);
+  }finally{await f.close();}
+});
+
+test('adopting a legacy connection retains identity, credentials and assignments through reimport',async()=>{
+  const f=await fixture();try{
+    const repository=await f.repository(),owner=f.ctl.projects.create({name:'Existing association'}),consumer=f.ctl.projects.create({name:'Connection consumer'});
+    const connection=f.ctl.connectors.create({name:'Existing HTTP connection',transport:'http',url:'https://tools.example.test/mcp',projectId:owner.id,enabled:false});
+    const credential=f.ctl.vault.create({name:'Connection secret',values:{token:'legacy-adoption-private-token'}});
+    f.ctl.connectors.setAuth(connection.id,{type:'bearer',credentialId:credential.id,field:'token'});
+    f.ctl.connectors.assign(consumer.id,{connectorIds:[connection.id]});
+    const url=`/api/connectors/${connection.id}/package`,location={repositoryId:repository.id,packagePath:'connectors/existing'};
+    assert.equal((await f.ctl.app.inject({method:'POST',url,headers:{...f.headers,'x-csrf-token':'invalid'},payload:location})).statusCode,403);
+    const adopted=await f.api('POST',url,location);
+    assert.equal(adopted.id,connection.id);assert.equal(adopted.projectId,owner.id);assert.equal(adopted.enabled,false);
+    assert.deepEqual(adopted.auth,{type:'bearer',credentialId:credential.id,field:'token'});
+    assert.deepEqual(f.ctl.projects.get(consumer.id).connectorIds,[connection.id]);
+    assert.equal((await f.api('POST',url,location)).source.commit,adopted.source.commit);
+    assert.equal((await f.request('POST',url,{...location,packagePath:'connectors/elsewhere'})).statusCode,409);
+    await f.api('POST',`/api/repositories/${repository.id}/import`,{paths:[location.packagePath]});
+    const current=f.ctl.connectors.get(connection.id);assert.equal(f.ctl.connectors.list().length,1);assert.equal(current.id,connection.id);assert.deepEqual(current.auth,adopted.auth);
+    const committed=git(repository.directory,'show',`HEAD:${location.packagePath}/operator-package.json`);
+    for(const value of ['legacy-adoption-private-token',credential.id,'auth','enabled','projectId'])assert(!committed.includes(value),value);
+    assert.deepEqual(f.ctl.store.db.prepare('PRAGMA foreign_key_check').all(),[]);
+    // Removing the source registration must also remove its connection even when its original project association differs.
+    f.ctl.projects.remove(adopted.source.packageId);assert.equal(f.ctl.connectors.list().length,0);
+    assert.deepEqual(f.ctl.projects.get(consumer.id).connectorIds??[],[]);assert.equal(f.ctl.projects.get(owner.id).id,owner.id);
+    assert(existsSync(join(repository.directory,location.packagePath,'operator-package.json')));
+  }finally{await f.close();}
+});
+
 test('owner-authenticated push settings enable publication while model tools cannot enable or retarget it',async()=>{
   const f=await fixture();try{
     const remote=join(f.root,'publish-api.git');mkdirSync(remote);git(remote,'init','--quiet','--bare');

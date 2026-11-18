@@ -47,7 +47,12 @@ export class ProjectService {
     this.validateDirectory(directory);const now=new Date().toISOString();
     return this.store.projects.create({...input,directory,origin:'created',createdAt:now,updatedAt:now});
   }
-  update(id:string,raw:unknown){this.get(id);return this.store.projects.update(id,projectUpdateInput.parse(raw));}
+  validateUpdate(id:string,raw:unknown){
+    this.get(id);const input=projectUpdateInput.parse(raw);
+    if(input.defaultWorkerId&&input.defaultWorkerId!=='default'&&!this.store.db.prepare('SELECT 1 FROM workers WHERE id=?').get(input.defaultWorkerId))throw failure('Default worker is not registered',404);
+    return input;
+  }
+  update(id:string,raw:unknown){return this.store.projects.update(id,this.validateUpdate(id,raw));}
   remove(id:string){projectId.parse(id);this.store.projects.remove(id);return {ok:true};}
   addComponent(id:string,raw:unknown){this.get(id);return this.store.projects.writeComponent(id,randomUUID(),componentInput.parse(raw));}
   updateComponent(id:string,componentId:string,raw:unknown){
