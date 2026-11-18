@@ -11,6 +11,7 @@ import { taskOptions, type TaskOptions } from './tasks/schemas.ts';
 import { ProjectStore } from './projects/store.ts';
 import { ManagedStore } from './managed/store.ts';
 import { ConnectorStore } from './connectors/store.ts';
+import { acquireRepository,projectRepository } from './packages/leases.ts';
 
 const failure=(message:string,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 
@@ -26,7 +27,7 @@ export class Store extends EventEmitter {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;');
     this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS fts_capability_check USING fts5(content); DROP TABLE fts_capability_check;');
     this.db.exec('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
-    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql','009-conversation-deletion.sql'].entries()){
+    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql','009-conversation-deletion.sql','010-packages.sql','011-repository-leases.sql','012-package-finalizations.sql'].entries()){
       if(this.db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(index+1))continue;
       this.transaction(()=>{this.db.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));this.db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(index+1,new Date().toISOString());});
     }
@@ -73,6 +74,8 @@ export class Store extends EventEmitter {
       if(inFlightRunIds.length&&this.db.prepare(`${related} SELECT 1 FROM related t JOIN json_each(?) pending ON pending.value=t.id LIMIT 1`).get(id,JSON.stringify(inFlightRunIds)))throw failure('Wait for this conversation’s tool operations to finish before deleting it.',409);
       if(this.db.prepare(`${related} SELECT 1 FROM source_finalizations sf JOIN related t ON t.id=sf.runId WHERE sf.state='pending' LIMIT 1`).get(id))throw failure('Finish pending source commits before deleting this conversation.',409);
       if(this.db.prepare(`${related} SELECT 1 FROM project_leases lease JOIN related t ON t.id=lease.runId LIMIT 1`).get(id))throw failure('Resolve the project execution lease before deleting this conversation.',409);
+      if(this.db.prepare(`${related} SELECT 1 FROM repository_leases lease JOIN related t ON t.id=lease.runId LIMIT 1`).get(id))throw failure('Resolve the repository execution lease before deleting this conversation.',409);
+      if(this.db.prepare(`${related} SELECT 1 FROM package_finalizations pf JOIN related t ON t.id=pf.runId WHERE pf.state='pending' LIMIT 1`).get(id))throw failure('Finish pending package source commits before deleting this conversation.',409);
       const now=new Date().toISOString();
       this.db.prepare('UPDATE conversations SET deletedAt=?,updatedAt=? WHERE id=?').run(now,now,id);
       return this.eventRow('conversation_deleted',{conversationId:id});
@@ -99,6 +102,7 @@ export class Store extends EventEmitter {
       if(!this.conversation(run.conversationId))throw failure('Conversation not found',404);
       const project=this.projects.forConversation(run.conversationId),lease=project?this.db.prepare('SELECT runId FROM project_leases WHERE projectId=?').get(project.id):undefined;
       if(lease&&lease.runId!==run.id)throw new Error('Another task owns this project until execution and source finalization finish');
+      const repositoryId=project&&projectRepository(this.db,project.id);if(repositoryId)acquireRepository(this.db,repositoryId,id);
       const now=new Date().toISOString(),attemptId=randomUUID(),token=randomUUID(),journalId=health.journalId??'legacy',model=health.runtime.model??worker.model??null;
       this.db.prepare('INSERT INTO run_attempts(id,runId,workerId,journalId,leaseToken,status,model,effort,uid,leaseExpiresAt,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(attemptId,id,worker.id,journalId,token,'running',model,worker.effort??null,health.uid,new Date(Date.now()+30_000).toISOString(),now,now);
       this.db.prepare("UPDATE runs SET assignedWorkerId=?,attemptId=?,model=?,effort=?,status='running',startedAt=?,blockedReason=NULL,grantedConnectorIds=? WHERE id=?").run(worker.id,attemptId,model,worker.effort??null,now,JSON.stringify(connectionIds),id);
@@ -109,8 +113,9 @@ export class Store extends EventEmitter {
   renew(id:string){const run=this.run(id);if(run?.attemptId)this.db.prepare('UPDATE run_attempts SET leaseExpiresAt=?,updatedAt=? WHERE id=?').run(new Date(Date.now()+30_000).toISOString(),new Date().toISOString(),run.attemptId);}
   releaseProject(id:string){
     const run=this.run(id);if(!run||!terminal.has(run.status))return;
-    if(this.db.prepare("SELECT 1 FROM source_finalizations WHERE runId=? AND state='pending'").get(id))return;
+    if(this.managed.hasPendingFinalization(id))return;
     this.db.prepare('DELETE FROM project_leases WHERE runId=?').run(id);
+    this.db.prepare('DELETE FROM repository_leases WHERE runId=?').run(id);
   }
   enqueue(conversationId:string,prompt:string,requestId:string,kind:Run['kind']='user',parentRunId:string|null=null,options:TaskOptions&{taskType?:Run['taskType']}={}):Run {
     const parsed=taskOptions.parse(Object.fromEntries(Object.entries(options).filter(([key])=>key!=='taskType')));

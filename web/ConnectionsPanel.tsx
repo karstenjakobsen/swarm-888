@@ -4,11 +4,14 @@ import { api, post } from './api';
 import { Icon } from './icons';
 import { connectionStatusLabel, managementError, shortCommit, type Connector } from './management';
 import { ConnectorCredentials } from './ConnectorCredentials';
+import { RepositoryFields } from './RepositoryFields';
 
 export function ConnectionsPanel({ onError, onProject, initialConnectorId, authorizationNotice, authorizationFailed = false }: { onError: (message: string) => void; onProject: (id: string) => void; initialConnectorId?: string | null; authorizationNotice?: string; authorizationFailed?: boolean }) {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(initialConnectorId ?? null);
   const [editor, setEditor] = useState(false);
+  const [exampleEditor, setExampleEditor] = useState(false);
+  const [exampleLocation, setExampleLocation] = useState({ repositoryId: '', packagePath: '' });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
@@ -47,18 +50,18 @@ export function ConnectionsPanel({ onError, onProject, initialConnectorId, autho
   const choose = (id: string) => {
     if (id === selectedId && !editor) return;
     contextGeneration.current++; currentId.current = id;
-    setSelectedId(id); setEditor(false); setOutput(null); setCallError('');
+    setSelectedId(id); setEditor(false); setExampleEditor(false); setOutput(null); setCallError('');
   };
-  const openEditor = () => { contextGeneration.current++; setEditor(true); };
+  const openEditor = () => { contextGeneration.current++; setEditor(true); setExampleEditor(false); };
   const argumentsChanged = (value: string) => {
     contextGeneration.current++; setArgumentsText(value); setOutput(null); setCallError('');
   };
   const createExample = async () => {
-    if (actionPending.current) return;
+    if (actionPending.current || !exampleLocation.repositoryId || !exampleLocation.packagePath.trim()) return;
     actionPending.current = true;
     const context = contextGeneration.current;
     setBusy('example');
-    try { const value = await post<Connector>('/connectors/examples'); if (mounted.current) accept(value, context === contextGeneration.current); }
+    try { const value = await post<Connector>('/connectors/examples', exampleLocation); if (mounted.current) { accept(value, context === contextGeneration.current); if (context === contextGeneration.current) setExampleEditor(false); } }
     catch (error) { if (mounted.current && context === contextGeneration.current) onError(managementError(error)); }
     finally { actionPending.current = false; if (mounted.current) setBusy(''); }
   };
@@ -91,9 +94,9 @@ export function ConnectionsPanel({ onError, onProject, initialConnectorId, autho
   };
 
   return <section className="resource-panel connections-panel">
-    <div className="page-heading"><div><div className="eyebrow">TOOLS FOR YOUR OPERATOR</div><h1>Connections</h1><p>Connect MCP servers and give your projects the tools they need.</p></div><div className="management-heading-actions"><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void createExample()}><Icon name="code" size={14} />{busy === 'example' ? 'Creating demo…' : 'Create local demo'}</button><button className="primary-button" onClick={openEditor}><Icon name="plus" size={14} />Add connection</button></div></div>
+    <div className="page-heading"><div><div className="eyebrow">TOOLS FOR YOUR OPERATOR</div><h1>Connections</h1><p>Connect MCP servers and give your projects the tools they need.</p></div><div className="management-heading-actions"><button className="secondary-button" disabled={Boolean(busy)} onClick={() => { setExampleEditor(true); setEditor(false); }}><Icon name="code" size={14} />{busy === 'example' ? 'Creating demo…' : 'Create local demo'}</button><button className="primary-button" onClick={openEditor}><Icon name="plus" size={14} />Add connection</button></div></div>
     {authorizationNotice && <p className={authorizationFailed ? 'management-warning' : 'management-notice'} role={authorizationFailed ? 'alert' : 'status'}>{authorizationNotice}</p>}<div className="projects-layout connections-layout"><aside className="projects-list" aria-label="Connection list"><div className="list-count">{loading ? 'Loading connections…' : `${connectors.length} ${connectors.length === 1 ? 'connection' : 'connections'}`}</div>{connectors.map(connector => <button key={connector.id} className={`project-list-item ${selectedId === connector.id && !editor ? 'selected' : ''}`} onClick={() => choose(connector.id)}><span className="project-list-icon"><Icon name="link" size={18} /></span><span className="project-list-copy"><strong>{connector.name}</strong><small>{connector.enabled ? `${connector.tools.length} ${connector.tools.length === 1 ? 'tool' : 'tools'}` : 'Disabled'}</small></span><span className={`connection-status ${connector.status}`}><span className="status-dot" />{connectionStatusLabel[connector.status]}</span></button>)}{!loading && connectors.length === 0 && <p className="project-list-empty">Start with the local demo or register an MCP server.</p>}</aside>
-      <div className="project-content">{editor ? <ConnectionEditor onSave={accept} onCancel={() => setEditor(false)} onError={onError} /> : selected ? <>
+      <div className="project-content">{exampleEditor ? <form className="project-editor" onSubmit={event => { event.preventDefault(); void createExample(); }}><div className="project-detail-heading"><div><div className="eyebrow">CONNECTOR SOURCE</div><h2>Create a local demo</h2><p>Save the reusable MCP connector in a Git repository.</p></div><button type="button" className="icon-button" aria-label="Close demo editor" onClick={() => setExampleEditor(false)}><Icon name="close" size={16} /></button></div><RepositoryFields {...exampleLocation} onChange={setExampleLocation} onError={onError} disabled={Boolean(busy)} prefix="example" /><div className="editor-actions"><button type="button" className="secondary-button" onClick={() => setExampleEditor(false)}>Cancel</button><button className="primary-button" disabled={Boolean(busy) || !exampleLocation.repositoryId || !exampleLocation.packagePath.trim()}>{busy === 'example' ? 'Creating demo…' : 'Create demo package'}</button></div></form> : editor ? <ConnectionEditor onSave={accept} onCancel={() => setEditor(false)} onError={onError} /> : selected ? <>
         <div className="project-detail-heading"><div><div className="eyebrow">{selected.transport === 'stdio' ? 'LOCAL MCP SERVER' : 'HTTP MCP SERVER'}</div><h2>{selected.name}</h2><p>{selected.description || 'Tools available to your operator.'}</p></div><span className={`connection-status ${selected.status}`}><span className="status-dot" />{connectionStatusLabel[selected.status]}</span></div>
         <div className="connection-actions"><button className="primary-button" disabled={Boolean(busy) || authBusy || !selected.enabled || selected.readiness?.ready === false} onClick={() => void update('test')}><Icon name="refresh" size={14} />{busy === 'test' ? 'Testing…' : 'Test connection'}</button><button className="secondary-button" disabled={Boolean(busy) || authBusy} onClick={() => void update('enable')}>{busy === 'enable' ? 'Saving…' : selected.enabled ? 'Disable connection' : 'Enable connection'}</button></div>
         {selected.projectId && <button className="subtle-button connection-source-link" onClick={() => onProject(selected.projectId!)}><Icon name="code" size={13} />Open source project<Icon name="chevron" size={12} /></button>}
@@ -102,7 +105,7 @@ export function ConnectionsPanel({ onError, onProject, initialConnectorId, autho
         <ConnectorCredentials key={selected.id} connector={selected} disabled={Boolean(busy)} onBusyChange={setAuthBusy} onUpdated={load} onError={onError} />
         <section className="connection-tools" aria-label="Connection tools"><div className="project-section-heading"><h3>Tools <span>{selected.tools.length}</span></h3></div>{selected.tools.length ? <><label htmlFor="connection-tool">Tool to test</label><select id="connection-tool" value={toolName} onChange={event => { contextGeneration.current++; setToolName(event.target.value); setOutput(null); setCallError(''); }}>{selected.tools.map(tool => <option key={tool.name} value={tool.name}>{tool.name}</option>)}</select>{selectedTool?.description && <p className="small-note">{selectedTool.description}</p>}<details className="tool-schema"><summary>Input schema</summary><pre>{JSON.stringify(selectedTool?.inputSchema, null, 2)}</pre></details><label htmlFor="connection-arguments">Tool arguments (JSON)</label><textarea id="connection-arguments" spellCheck={false} rows={6} value={argumentsText} onChange={event => argumentsChanged(event.target.value)} />{callError && <p className="inline-error" role="alert">{callError}</p>}<button className="primary-button" disabled={Boolean(busy) || authBusy || !selected.enabled || selected.readiness?.ready === false || selected.status !== 'connected' || !toolName} onClick={() => void callTool()}><Icon name="arrow" size={13} />{busy === 'call' ? 'Running tool…' : 'Run tool'}</button>{output !== null && <div className={`tool-output ${output.isError ? 'is-error' : ''}`} role="region" aria-label="Tool result"><h4>{output.isError ? 'Tool reported an error' : 'Tool result'}</h4><pre>{output.text}</pre></div>}</> : <div className="connection-tools-empty"><Icon name="link" size={23} /><p>{selected.enabled ? 'Test the connection to discover available tools.' : 'Enable this connection, then test it to discover tools.'}</p></div>}</section>
         <p className="small-note connection-assignment-hint">Assign this connection in a project's Connections section to make its tools available there.</p>
-      </> : <div className="project-welcome"><div className="resource-empty-icon"><Icon name="link" size={27} /></div><span className="eyebrow">EXTEND WHAT YOU CAN DO</span><h2>A connection to your tools.</h2><p>Register a local or HTTP MCP server. Try the local echo demo to verify discovery and a real tool call.</p><button className="primary-button" disabled={Boolean(busy)} onClick={() => void createExample()}><Icon name="code" size={14} />{busy === 'example' ? 'Creating demo…' : 'Create local demo'}</button></div>}</div>
+      </> : <div className="project-welcome"><div className="resource-empty-icon"><Icon name="link" size={27} /></div><span className="eyebrow">EXTEND WHAT YOU CAN DO</span><h2>A connection to your tools.</h2><p>Register a local or HTTP MCP server. Try the local echo demo to verify discovery and a real tool call.</p><button className="primary-button" disabled={Boolean(busy)} onClick={() => { setExampleEditor(true); setEditor(false); }}><Icon name="code" size={14} />{busy === 'example' ? 'Creating demo…' : 'Create local demo'}</button></div>}</div>
     </div>
   </section>;
 }

@@ -92,13 +92,14 @@ test('a named small-model worker resumes a credential-blocked recurring analysis
   const f=await fixture(),token='fixture-scenario-provider-secret';
   try{
     await f.api('POST','/api/workers',{id:f.worker.id,name:'Routine analysis',model:f.worker.model,mode:'user'});f.attach();
-    const connector=await f.api('POST','/api/connectors/examples',{});
+    const repository=await f.api('POST','/api/repositories',{name:'Scenario packages',remoteUrl:'https://example.test/scenario.git',mode:'create'});
+    const connector=await f.api('POST','/api/connectors/examples',{repositoryId:repository.id,packagePath:'connectors/timeframes'});
     const provider=`import{createInterface}from'node:readline';const token=process.env.PROVIDER_TOKEN;createInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);if(m.id===undefined)return;const result=m.method==='initialize'?{protocolVersion:m.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'scenario',version:'1'}}:m.method==='tools/list'?{tools:[{name:'snapshot',description:'Read deterministic fixture timeframes',inputSchema:{type:'object'}}]}:{content:[{type:'text',text:'Prepared local fixture data'}],structuredContent:{snapshot:${JSON.stringify(snapshot)},authorization:token??'missing'}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+String.fromCharCode(10));});`;
     const check=`import test from'node:test';import assert from'node:assert/strict';import{spawnSync}from'node:child_process';test('prepared timeframe snapshot uses the MCP contract',()=>{const messages=[{id:1,method:'initialize',params:{protocolVersion:'2025-06-18'}},{id:2,method:'tools/list'},{id:3,method:'tools/call',params:{name:'snapshot',arguments:{}}}];const child=spawnSync(process.execPath,['server.mjs'],{input:messages.map(value=>JSON.stringify({jsonrpc:'2.0',...value})).join(String.fromCharCode(10))+String.fromCharCode(10),encoding:'utf8',timeout:5000});assert.equal(child.status,0,child.stderr);const replies=child.stdout.trim().split(String.fromCharCode(10)).map(value=>JSON.parse(value));assert.equal(replies[1].result.tools[0].name,'snapshot');assert.equal(replies[2].result.structuredContent.snapshot.dataAsOf,'2026-11-16T12:00:00Z');});`;
     const source=await f.api('PUT',`/api/projects/${connector.projectId}/source`,{files:{'server.mjs':provider,'connector.test.mjs':check},message:'Add local deterministic snapshot fixture'});
-    assert.match(source.source.path,/^generated\/connectors\//);
+    assert.equal(source.source.path,'connectors/timeframes');
     const credential=await f.api('POST','/api/credentials',{name:'Local account',values:{accountId:'fixture-account-identifier'}});
-    const project=await f.api('POST','/api/projects',{name:'Fictional analysis application',managed:true,template:'empty'});
+    const project=await f.api('POST','/api/projects',{name:'Fictional analysis application',managed:true,template:'empty',repositoryId:repository.id,packagePath:'apps/analysis'});
     await f.api('PATCH',`/api/projects/${project.id}`,{defaultWorkerId:f.worker.id});
     await f.api('PUT',`/api/projects/${project.id}/connectors`,{connectorIds:[connector.id]});
     const job=await f.api('POST','/api/jobs',{name:'Analyze prepared timeframes',projectId:project.id,prompt:'Read the local snapshot and produce a bounded observation. Do not place orders or change source.',schedule:{type:'interval',seconds:3600},workerId:f.worker.id,requiredConnectorIds:[connector.id],timeoutMs:30_000,maxToolCalls:8,maxContextChars:12_000,maxOutputChars:4000});

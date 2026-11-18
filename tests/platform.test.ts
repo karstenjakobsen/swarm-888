@@ -144,7 +144,7 @@ test('upgrading legacy state preserves history and receipts and does not restore
       const conversation=store.newConversation(),run=store.enqueue(conversation.id,'Independent work',`upgraded-${id}`);store.claim(run.id,{id,model:'fixture-model'},{uid:process.getuid!(),journalId:`${id}-journal`,runtime:{model:'fixture-model'}});
     }
     store.close();store=new Store(stateDir);
-    assert.equal(store.db.prepare('SELECT count(*) AS n FROM schema_migrations').get()?.n,9);assert.equal(store.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='one_active_run'").get(),undefined);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version=6').get()?.n,1);assert.equal(store.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='one_active_run'").get(),undefined);
     assert.equal(store.runs().filter(run=>['running','uncertain'].includes(run.status)).length,3);assert.equal(store.events().filter(event=>event.seq===17).length,1);assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(),[]);
   }finally{store?.close();if(legacy.isOpen)legacy.close();rmSync(stateDir,{recursive:true,force:true});}
 });

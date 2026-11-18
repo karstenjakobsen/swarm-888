@@ -51,7 +51,7 @@ test('only owner routes save project environment references and deployment carri
     assert.equal(JSON.stringify(ctl.store.db.prepare('SELECT * FROM project_environment').all()).includes('fixture-project-service-token'),false);
     assert.equal(ctl.brain.listTools().some(tool=>tool.name.includes('environment')),false,'Model tools cannot grant service credentials');
     const manifest:ManagedManifest={schemaVersion:1,id:project.id,kind:'project',name:'Bound service',description:'',run:{command:'node',args:['server.mjs']}};
-    ctl.managed.readSource=async()=>({source:{commit:'a'.repeat(40),path:managedPath('project',project.id),dirty:false},manifest,files:{'operator-package.json':JSON.stringify(manifest),'server.mjs':''}}) as any;
+    ctl.managed.readReleaseSource=async()=>({source:{commit:'a'.repeat(40),path:managedPath('project',project.id),dirty:false},manifest,files:{'operator-package.json':JSON.stringify(manifest),'server.mjs':''}}) as any;
     await ctl.managed.deploy(project.id);assert.deepEqual(worker.deployments[0].environment,environment);assert.equal(JSON.stringify(worker.deployments).includes('fixture-project-service-token'),false);
     const invalid=await ctl.app.inject({method:'PUT',url,headers,payload:{environment,values:{token:'fixture-project-service-token'}}});assert.equal(invalid.statusCode,400);
     const cleared=await ctl.app.inject({method:'PUT',url,headers,payload:{environment:null}});assert.equal(cleared.statusCode,200,cleared.body);assert.deepEqual(cleared.json(),{environment:null,readiness:{ready:true}});assert.throws(()=>resolveProjectSecrets(f.config,project.id,environment),/granted/);

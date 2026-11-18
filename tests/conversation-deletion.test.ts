@@ -30,7 +30,7 @@ test('conversation removal hides the workspace entry durably and emits one delet
     const event=f.store.events().find(event=>event.type==='conversation_deleted')!;assert.deepEqual(event.data,{conversationId:conversation.id});assert.equal(event.conversationId,null);assert.equal(event.runId,null);
     assert.deepEqual(f.store.removeConversation(conversation.id),{ok:true});assert.deepEqual(emitted,['conversation_deleted']);assert.throws(()=>f.store.removeConversation(randomUUID()),status(404,/not found/));
     f.reopen();assert.equal(f.store.conversation(conversation.id),undefined);assert.deepEqual(f.store.conversations().map(item=>item.id),[other.id]);assert.equal(f.store.events().filter(event=>event.type==='conversation_deleted').length,1);
-    const created=f.store.newConversation('A new chat');assert(f.store.conversation(created.id));assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM schema_migrations').get()?.n,9);
+    const created=f.store.newConversation('A new chat');assert(f.store.conversation(created.id));assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version=9').get()?.n,1);
   }finally{f.close();}
 });
 
@@ -142,6 +142,6 @@ test('conversation deletion migration upgrades an existing eight-migration datab
       db.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));db.prepare('INSERT INTO schema_migrations VALUES(?,?)').run(index+1,now);
     }
     const id=randomUUID();db.prepare('INSERT INTO conversations VALUES(?,?,?,?,?)').run(id,'Existing chat',null,now,now);db.close();
-    store=new Store(directory);assert.equal(store.conversation(id)?.title,'Existing chat');assert.deepEqual(store.removeConversation(id),{ok:true});store.close();store=new Store(directory);assert.equal(store.conversation(id),undefined);assert.equal(store.db.prepare('SELECT count(*) AS n FROM schema_migrations').get()?.n,9);assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(),[]);
+    store=new Store(directory);assert.equal(store.conversation(id)?.title,'Existing chat');assert.deepEqual(store.removeConversation(id),{ok:true});store.close();store=new Store(directory);assert.equal(store.conversation(id),undefined);assert.equal(store.db.prepare('SELECT count(*) AS n FROM schema_migrations WHERE version=9').get()?.n,1);assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(),[]);
   }finally{store?.close();if(db.isOpen)db.close();rmSync(directory,{recursive:true,force:true});}
 });

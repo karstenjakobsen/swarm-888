@@ -3,12 +3,16 @@ import { connectorAuthSchema,type ConnectorAuth } from '../credentials/schemas.t
 
 const argument=z.string().max(16_000).refine(value=>!value.includes('\0'),'Arguments cannot contain NUL');
 const stdio=z.object({transport:z.literal('stdio'),command:z.string().min(1).max(2000).refine(value=>!value.includes('\0'),'Commands cannot contain NUL'),args:z.array(argument).max(100).default([])}).strict();
-const http=z.object({transport:z.literal('http'),url:z.string().url().max(2000).refine(value=>{const url=new URL(value);return ['http:','https:'].includes(url.protocol)&&!url.username&&!url.password&&!url.search&&!url.hash;},'Use an HTTP(S) URL without credentials, query parameters, or fragments')}).strict();
+const http=z.object({transport:z.literal('http'),url:z.string().max(2000).refine(value=>{
+  const url=URL.parse(value);
+  return url!==null&&['http:','https:'].includes(url.protocol)&&!url.username&&!url.password&&!url.search&&!url.hash;
+},'Use an HTTP(S) URL without credentials, query parameters, or fragments')}).strict();
 const cwd=z.string().startsWith('/').max(2000).refine(value=>!value.includes('\0'));
 const identity={id:z.string().uuid(),name:z.string().trim().min(1).max(120)};
 
 /** Portable MCP transport configuration shared by manifests, registrations, and snapshots. */
 export const connectorTransportSchema=z.discriminatedUnion('transport',[stdio,http]);
+export type ConnectorTransport=z.infer<typeof connectorTransportSchema>;
 const auth={auth:connectorAuthSchema.optional()};
 function scoped(value:{transport:'stdio'|'http';auth?:ConnectorAuth},context:z.RefinementCtx){if(value.auth&&(value.transport==='stdio')!==(value.auth.type==='env'))context.addIssue({code:'custom',message:'Use environment credentials for stdio, or HTTP credentials for HTTP connections'});}
 export const connectorSnapshotSchema=z.discriminatedUnion('transport',[stdio.extend({...identity,...auth,cwd:cwd.optional(),credentialRevision:z.number().int().positive().optional()}),http.extend({...identity,...auth,credentialRevision:z.number().int().positive().optional()})]).superRefine(scoped);

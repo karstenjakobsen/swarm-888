@@ -104,7 +104,7 @@ Required connections must be enabled, successfully tested at their current confi
 
 Managed projects have a **Runtime credentials** form. It stores credential/field references only. Selected values are injected into the deployed service, never build/check commands or the model's environment. Private launch descriptors contain references and literal arguments; a supervisor redacts selected credentials from service stdout/stderr before journal delivery. Saving/clearing bindings does not restart a service; explicitly redeploy/restart to apply changes. Managed systemd installation and stop remain privileged host operations using a root worker.
 
-Known credential values are rejected from new task inputs, source and owner instructions and redacted from stored execution context/results. Source-created skills commit `SKILL.md`, helpers and checks under `generated/skills/<id>` and pin each validated immutable runtime version to its exact source revision.
+Known credential values are rejected from new task inputs, source and owner instructions and redacted from stored execution context/results. Source-created skills commit `SKILL.md`, helpers and checks in their registered repository folder and pin each validated immutable runtime version to its exact source revision.
 
 Legacy `brain:export/restore` intentionally rejects named-worker/project layouts. For the expanded platform, stop the controller/workers and back up complete operator state (including encrypted credentials and their local key), the source repository/worktrees, and project runtime roots together. No provider-specific trading code, brokerage connection or real order execution is included in this platform release.
 
@@ -114,14 +114,14 @@ Durable data and project files live beneath `APP_STATE_DIR` by default. Set `APP
 
 | Path | Contents |
 | --- | --- |
-| `operator.sqlite` | Projects/components, workers, task attempts/leases, jobs/history, credential metadata, conversations, events, web sessions, memory and skill metadata/evidence |
+| `operator.sqlite` | Repositories/packages/import history, project/components, workers, task attempts/leases/source finalization, jobs/history, credential metadata, conversations, events, web sessions, memory and skill metadata/evidence |
 | `runtime/` | Dedicated Codex profile and native thread/session files |
 | `workers/<id>/` | Named worker manifest, private socket, lock, journal and native runtime profile |
 | `skills/staging/` | Candidate revisions and declared deterministic checks |
 | `skills/packages/NAME/vN/` | Published immutable version contents |
 | `skills/active/` | Recoverable active-version symlinks |
 | `workspaces/` | Persistent generic conversation workspaces and temporary fixture checks |
-| `projects/` | Project workspaces (unless `APP_PROJECTS_DIR` overrides the default) |
+| `projects/` | Project runtimes plus `repositories/` source checkouts and content-addressed Git `artifacts/` (unless `APP_PROJECTS_DIR` overrides the default) |
 | `artifacts/` | Generated files available through authenticated download routes |
 | `worker/journal.sqlite` | Worker acceptance ledger and bounded unacknowledged event outbox |
 | `secrets/ipc-token` | Local IPC credential, excluded from searchable memory |
@@ -139,25 +139,45 @@ Skill creation requires `SKILL.md` metadata, declared files, and deterministic c
 
 ## Managed source, deployments and MCP connections
 
-Slices 1–4 in [TODO.md](TODO.md) provide the source/Git/deployment/MCP foundation. New projects created in the UI default to a managed Node service package; an empty source package and metadata-only registration are also supported. Existing adopted projects retain their runtime directories and can add source explicitly.
+Open **Repositories → Add repository** first. A remote URL is required: **Create locally** initializes a checkout and configures `origin` without contacting it; **Clone existing** reads the remote and follows its default branch unless you select another. All work stays on this machine: the operator has no push action. New projects, connector code and reusable skills must belong to a registered repository. Existing runtime directories and services are preserved.
 
 To remove an obsolete entry, open **Projects**, select it, choose **Remove project**, and confirm. This removes its registry entry and project-owned connection registrations, including their assignments to other projects. Conversations, source files, Git history, and runtime files are retained; existing services continue running. Removal works for missing directories and projects outside the current `APP_PROJECTS_DIR`, without a worker connection. Finish or reconcile pending work before removing its registration.
 
-Generated source is stored on the `operator/generated` branch of this Git repository under `generated/projects/<id>`, `generated/connectors/<id>`, or `generated/skills/<id>`. The normal-user controller owns a linked worktree at `APP_STATE_DIR/workspaces/managed`, creates serialized scoped commits, and preserves the development checkout's HEAD, staged changes and working files. `APP_REPOSITORY_PATH` selects the repository; it defaults to the operator checkout and must be a canonical, controller-owned Git checkout with an initial commit. Git must be installed. Commits do not push, merge, or switch the development branch.
+The controller owns checkouts at `APP_PROJECTS_DIR/repositories/<repository-id>` on an operator branch, normally `operator/work`. A repository can contain several projects, connectors and skills, each in a separate folder. Registered folders cannot overlap. Use `.` when the repository contains a single root package. **Discover packages** previews committed manifests (up to 200 manifests/50,000 tracked repository files), then **Import selected** registers them without running check/build/run commands. **Fetch & preview remote** explicitly reads remote updates; importing them only fast-forwards clean local history. Divergence requires manual reconciliation. One writing task holds the repository through source finalization; tasks in different repositories can run concurrently. Git must be installed.
 
-Every package has `operator-package.json` with `schemaVersion`, `id`, `kind`, `name`, `description`, and optional `{command,args}` check/build/run commands or an MCP configuration. Source and runtime locations are independent. The source editor supports up to 500 UTF-8 text files and 8 MB per package; individual UI writes are bounded. Credentials, runtime state, build output, and dependencies are excluded from committed source. Packages should have their own dependencies and tests without importing operator internals, allowing later repository extraction.
+Every package has a strict v1 `operator-package.json`:
 
-Creating source and saving files commits immediately. Editor saves carry their loaded commit and return 409 if a newer revision exists, preserving the draft. Rejected source writes are validated before changing files or Git state. Direct generated-source edits from a model task are committed when its confirmed terminal result is recorded. Pending commit finalization is durable and recovered before another task is dispatched; Git errors remain visible and pause admission until resolved. A stale managed Git lock is reported explicitly: confirm no controller/source operation remains before removing `APP_STATE_DIR/workspaces/managed-repository.lock`.
+```json
+{
+  "schemaVersion": 1,
+  "id": "be1f4a84-9762-4a01-a768-3b1ab5dd0941",
+  "kind": "project",
+  "name": "website",
+  "version": "0.1.0",
+  "description": "My website",
+  "run": { "command": "node", "args": ["server.mjs"] }
+}
+```
+
+`kind` is `project`, `connector`, or `skill`. Connector packages require `mcp`; skill packages require matching `SKILL.md` metadata. Optional `check`, `build`, and project `run` commands use `{command,args}`. The canonical UUID survives renames and moves inside the repository. Independent copies in other repositories need new UUIDs. `schemaVersion` describes the file format, semantic `version` is the package release label, and the imported Git SHA identifies the exact revision. Reimporting the same revision is idempotent. SQLite stores every attempted import and its outcome; a failed update preserves the last successful package revision. Imported, validated and deployed are separate states.
+
+Use **Create package** for new code or **Adopt folder** to add a manifest to existing code. The text editor displays a bounded subset of regular UTF-8 files (up to 500 files/8 MB; 1 MB each); binary and additional files remain in Git and are preserved. Builds use exact Git snapshots with binary assets and executable permissions, up to 100,000 files/2 GiB (256 MiB per file). Packages must have self-contained build inputs within their folder; shared monorepo root dependencies are not copied into a package release. Symlinks/submodules, credentials, runtime state and dependencies are excluded. `.env.example` templates are supported. Connection credentials and configured external endpoint references stay in SQLite rather than portable package source.
+
+Legacy `generated/` sources remain readable. In **Projects → Source & deployment → Migrate source**, explicitly choose the registered repository and folder before starting new coding work. Migration preserves the package UUID, old Git history, runtime directory and service registration; it does not move runtime files. `APP_REPOSITORY_PATH` is retained only to read/migrate the old checkout. The bundled maintenance skill belongs to the operator distribution; newly authored application skills require registered source. Importing a skill with `skill-checks.json` creates an inactive runtime candidate; validate and publish it separately. Without checks, the source imports successfully and the UI reports what is needed for a candidate.
+
+Creating source and saving files commits immediately. Editor saves carry their loaded commit and return 409 if a newer revision exists, preserving the draft. Direct package edits from a model task are committed when its confirmed terminal result is recorded. Pending commit finalization is durable and recovered before another task writes that repository; Git errors remain visible until resolved. Tasks that change files outside their assigned package cannot silently finalize. Stale Git locks fail closed: confirm no controller/source operation remains before removing `APP_STATE_DIR/workspaces/repository-<repository-id>.lock` (or the legacy `managed-repository.lock`).
 
 **Source & deployment** in Projects displays source and deployed commits separately. **Deploy committed source** exports that exact revision into `<project-runtime>/releases/<commit>`, runs declared checks/builds, and asks the root worker to install and enable `vps-ai-project-<id>.service`. Deployment requires systemd. Failed checks leave the previous service unchanged; failures after a service-manager mutation require inspecting status/logs before retrying. **Stop service** disables and stops that unit; source, release files, and application data are retained. Services run independently of the chat and worker process. Source files are checked against the committed snapshot after checks/builds; write build output into separate output files rather than modifying committed inputs.
 
 **Connections** registers stdio commands or HTTP MCP endpoints, tests initialization/tool discovery, enables/disables them, and offers a JSON tool-call form. **Create local example** generates and commits a deterministic echo connector. Managed stdio connectors execute from a checked committed runtime snapshot; source changes invalidate the previous tool test. HTTP connections support JSON/SSE Streamable HTTP with bounded requests, responses and deadlines. Connections support owner-configured bearer/custom headers, selected stdio environment fields, and generic OAuth authorization/refresh. URLs cannot include credentials, query parameters or fragments. Secret values belong in the credential forms, never source, command arguments or chat.
 
-Assign up to 20 enabled connections in a project's **Connections** section. Their tools receive unique MCP namespaces at the next model task start; active tasks keep their original configuration. The original operator MCP bridge retains its per-run authorization. Generic chat can create/register connectors using `project_source_*` and `connector_*` tools. Connection tests report last-tested results; they do not imply an always-open connection. A timed-out tool may have caused side effects and is never automatically repeated.
+When an imported connector changes its HTTP endpoint or stdio command or arguments, an existing credential binding blocks use of the changed transport. Remove the binding in **Connections**, review and register the updated package, then authorize and test the connection again.
+
+Assign up to 20 enabled connections in a project's **Connections** section. Their tools receive unique MCP namespaces at the next model task start. The operator MCP bridge enforces each task's connection grants. In generic chat, `package_create` with kind `connector` creates the source and registers its connection. Use `project_source_write` to edit it and `connector_test` to discover its tools. A timed-out tool may have caused side effects and is never automatically repeated.
 
 To test locally after restarting the controller and the chosen worker:
 
-1. Open **Connections → Create local example → Test connection**. Select `echo`, enter `{"text":"hello from the operator"}`, and call it. The result should contain that text, and the connector's source should show a Git commit.
+1. Open **Repositories → Add repository**, enter a remote URL, and create it locally. In **Connections → Create local example**, select that repository and a package folder, then **Test connection**. Select `echo`, enter `{"text":"hello from the operator"}`, and call it. The result should contain that text, and the connector's source should show a Git commit.
 2. Open **Projects → Create project**, use the Node service template, edit a source file, and **Save & commit**. Confirm the new source revision while the deployed revision remains unchanged.
 3. With a root worker and systemd available, choose **Deploy committed source**, inspect logs/status, then **Stop service**. The example listens on the VPS's loopback port 8080; change its source if that port is occupied. This does not expose a public port.
 4. Assign the example connection to the project. With model authentication configured, use **Ask operator** to request its echo tool. Source editing, standalone connection tests and deployment controls do not require model authentication.
@@ -192,7 +212,7 @@ Artifact downloads require an administrator session and stay within the canonica
 
 ## Snapshot and restore
 
-The existing brain snapshot format supports only the legacy in-state layout. Named-worker layouts, custom external runtime profiles, external project workspaces, and registered-project snapshots are rejected explicitly: the old archive cannot safely capture and restore those directories. Back up expanded deployments through the complete stopped-state procedure described above; this release does not silently omit them.
+The existing brain snapshot format supports only the legacy in-state layout. Named-worker layouts, custom external runtime profiles, external project workspaces, registered repositories and registered-project snapshots are rejected explicitly: the old archive cannot safely capture and restore those directories. Back up expanded deployments through the complete stopped-state procedure described above; this release does not silently omit them.
 
 For compatible legacy/test state, snapshots use an explicit **offline maintenance window**. Finish or interrupt active work, reconcile uncertain runs, then stop both the controller/frontend and worker. Export refuses live process locks or unresolved execution. Do not copy a live `.sqlite` file with `cp`.
 

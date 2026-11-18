@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createController } from '../src/controller.ts';
 import { initState, type Config } from '../src/config.ts';
+import { scaffold } from '../src/managed/repository.ts';
 import type { WorkerClient } from '../src/ipc.ts';
 
 const git=(cwd:string,...args:string[])=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8'}).trim();
@@ -31,7 +32,8 @@ async function fixture(){
   const config:Config={stateDir,repositoryPath,projectsDir:join(stateDir,'projects'),runtimeHome:join(stateDir,'runtime'),socketPath:join(stateDir,'worker.sock'),bridgeSocket:join(stateDir,'bridge.sock'),ipcToken:'',controllerUid:process.getuid!(),codexBin:'unused',host:'127.0.0.1',port:3001,origins:['http://localhost:5173'],adminPassword:'recovery-fixture-password',secureCookie:false,improvementEnabled:false,improvementTimeoutMs:1000,improvementMaxTurns:1,allowTempState:true,requireRootWorker:true};
   initState(config);let worker=new RecoveryWorker();
   let ctl=await createController(config,{client:worker as unknown as WorkerClient,startQueue:false,startBridge:false});ctl.brain.skillAction('skill-maintenance','disable');
-  return {root,config,owner,get ctl(){return ctl;},get worker(){return worker;},
+  const repository=await ctl.managed.packages.register({name:'Recovery packages',remoteUrl:'https://example.test/recovery.git',mode:'create'});
+  return {root,config,owner,repository,get ctl(){return ctl;},get worker(){return worker;},
     async reopen(){await ctl.close();worker=new RecoveryWorker();ctl=await createController(config,{client:worker as unknown as WorkerClient,startQueue:false,startBridge:false});return ctl;},
     verifyOwner(){assert.equal(git(repositoryPath,'rev-parse','HEAD'),owner.head);assert.equal(git(repositoryPath,'status','--porcelain=v1'),owner.status);assert.deepEqual(readFileSync(join(repositoryPath,'.git','index')),owner.index);assert.equal(git(repositoryPath,'diff','--cached'),owner.staged);assert.equal(readFileSync(join(repositoryPath,'owner.txt'),'utf8'),'Owner unstaged work\n');},
     async close(){await ctl.close();rmSync(root,{recursive:true,force:true});},
@@ -43,9 +45,9 @@ async function entered(promise:Promise<void>){let timeout:NodeJS.Timeout|undefin
 test('terminal source finalization survives controller restart and commits before another task is submitted',async()=>{
   const f=await fixture();
   try{
-    const project=await f.ctl.managed.createProject({name:'Recover generated edits',managed:true}),conversation=f.ctl.projects.newConversation(project.id);
+    const project=await f.ctl.managed.createProject({name:'Recover generated edits',managed:true,repositoryId:f.repository.id,packagePath:'apps/recovery'}),conversation=f.ctl.projects.newConversation(project.id);
     const run=f.ctl.store.enqueue(conversation.id,'Write a source module','recovery-first');f.ctl.store.transition(run.id,'running');
-    const original=await f.ctl.managed.readSource(project.id),count=git(original.source.workspacePath,'rev-list','--count','operator/generated');
+    const original=await f.ctl.managed.readSource(project.id),count=git(original.source.workspacePath,'rev-list','--count','operator/work');
     writeFileSync(join(original.source.workspacePath,'recovered.mjs'),'export const recovered = true;\n');
     const terminal={cursor:1,runId:run.id,type:'completed',data:{status:'completed'},createdAt:new Date().toISOString()};
     // Simulate durable completion/ACK followed by a crash before Queue.receive can finalize Git.
@@ -56,12 +58,12 @@ test('terminal source finalization survives controller restart and commits befor
     assert.equal(f.ctl.store.ingest(terminal),false);
     const next=f.ctl.store.enqueue(conversation.id,'Continue after recovery','recovery-next');
     f.worker.beforeSubmit=()=>assert.equal((f.ctl.store.db.prepare('SELECT state FROM source_finalizations WHERE runId=?').get(run.id) as {state:string}).state,'committed');
-    await f.ctl.queue.tick();assert.equal(f.worker.submissions.length,1);assert.equal(f.worker.submissions[0].runId,next.id);
+    await f.ctl.queue.tick();await f.ctl.queue.drainSource();await f.ctl.queue.tick();assert.equal(f.worker.submissions.length,1);assert.equal(f.worker.submissions[0].runId,next.id);
     const saved=await f.ctl.managed.readSource(project.id);assert.equal(saved.files['recovered.mjs'],'export const recovered = true;\n');assert.equal(saved.source.dirty,false);assert.notEqual(saved.source.commit,original.source.commit);
-    assert.equal(Number(git(saved.source.workspacePath,'rev-list','--count','operator/generated')),Number(count)+1);assert.match(git(saved.source.workspacePath,'log','-1','--format=%B'),new RegExp(run.id));
+    assert.equal(Number(git(saved.source.workspacePath,'rev-list','--count','operator/work')),Number(count)+1);assert.match(git(saved.source.workspacePath,'log','-1','--format=%B'),new RegExp(run.id));
     const checkpoints=()=>f.ctl.store.events(0,conversation.id).filter(event=>event.runId===run.id&&event.type==='checkpoint'&&event.data&&typeof event.data==='object'&&'source' in event.data).length;
     assert.equal(checkpoints(),1);await f.ctl.managed.recoverSource();await f.ctl.managed.recoverSource();await f.ctl.managed.finishRun(f.ctl.store.run(run.id)!);
-    assert.equal(checkpoints(),1);assert.equal(git(saved.source.workspacePath,'rev-list','--count','operator/generated'),String(Number(count)+1));f.verifyOwner();
+    assert.equal(checkpoints(),1);assert.equal(git(saved.source.workspacePath,'rev-list','--count','operator/work'),String(Number(count)+1));f.verifyOwner();
   }finally{await f.close();}
 });
 
@@ -69,12 +71,14 @@ test('source association recovers a committed package without a database row or 
   const f=await fixture();
   try{
     const project=f.ctl.projects.create({name:'Recover connector source',description:'Commit succeeded before database association'});
-    const created=await f.ctl.managed.repository.create({id:project.id,kind:'connector',name:project.name,description:project.description,template:'connector'});
+    const initial=scaffold({id:project.id,kind:'connector',name:project.name,description:project.description,template:'connector'});
+    await f.ctl.managed.packages.createPackage(f.repository.id,{path:'connectors/recovered',manifest:{...initial.manifest,version:'0.1.0'},files:initial.files});
+    const created=await f.ctl.managed.packageExport(project.id);
     assert.equal(f.ctl.store.db.prepare('SELECT 1 FROM project_sources WHERE projectId=?').get(project.id),undefined);
-    const count=git(created.source.workspacePath,'rev-list','--count','operator/generated');await f.reopen();
-    const attached=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector'});
+    const count=git(created.source.workspacePath,'rev-list','--count','operator/work');await f.reopen();
+    const attached=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector',repositoryId:f.repository.id,packagePath:'connectors/recovered'});
     assert.equal(attached.source.commit,created.source.commit);assert.equal(attached.manifest.kind,'connector');assert.deepEqual(attached.files,created.files);assert.equal(f.ctl.projects.get(project.id).source?.commit,created.source.commit);
-    const again=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector'});assert.equal(again.source.commit,created.source.commit);assert.equal(git(created.source.workspacePath,'rev-list','--count','operator/generated'),count);f.verifyOwner();
+    const again=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector',repositoryId:f.repository.id,packagePath:'connectors/recovered'});assert.equal(again.source.commit,created.source.commit);assert.equal(git(created.source.workspacePath,'rev-list','--count','operator/work'),count);f.verifyOwner();
   }finally{await f.close();}
 });
 
@@ -97,4 +101,57 @@ test('a completed authentication cycle during connector snapshots defers dispatc
     assert.equal(f.worker.submissions.length,0);assert.equal(f.ctl.store.run(run.id)?.status,'queued');assert.equal(f.ctl.queue.status().worker?.uid,0);assert.equal(f.ctl.queue.status().workerError,null);
     f.ctl.connectors.snapshots=async()=>[];await f.ctl.queue.tick();assert.equal(f.worker.submissions.length,1);assert.equal(f.worker.submissions[0].runId,run.id);
   }finally{release.resolve();await f.close();}
+});
+
+test('a failed import preserves the last usable release and blocks tasks from entering the divergent checkout',async()=>{
+  const f=await fixture();
+  try{
+    const project=await f.ctl.managed.createProject({name:'Pinned service',repositoryId:f.repository.id,packagePath:'apps/pinned',template:'service'});
+    const original=await f.ctl.managed.readSource(project.id),conversation=f.ctl.projects.newConversation(project.id);
+    writeFileSync(join(original.source.workspacePath,'operator-package.json'),'{"schemaVersion":42}\n');
+    git(f.repository.directory,'add','.');
+    git(f.repository.directory,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','Invalid manifest revision');
+    const result=await f.ctl.managed.packages.importPackages(f.repository.id,{paths:[original.source.path]});
+    assert.equal(result.imports[0]?.status,'failed');
+    const retained=await f.ctl.managed.readSource(project.id);
+    assert.equal(retained.source.workspaceDiverged,true);
+    assert.equal(retained.source.dirty,false);
+    assert.equal(retained.source.commit,original.source.commit);
+    assert.deepEqual(retained.manifest,original.manifest);
+    await assert.rejects(f.ctl.managed.executionDirectory(conversation.id),/Import the committed changes/);
+    const run=f.ctl.store.enqueue(conversation.id,'Edit the pinned service','diverged-source');f.ctl.store.transition(run.id,'running');
+    assert.throws(()=>f.ctl.managed.trackProject(project.id,run.id),/Import the committed changes/);
+    assert.deepEqual(f.ctl.store.managed.pendingPackages(run.id),[]);
+  }finally{await f.close();}
+});
+
+test('legacy UUIDs stay reserved during discovery/import and explicit migration can finish after a restart',async()=>{
+  const f=await fixture();
+  try{
+    const project=f.ctl.projects.create({name:'Existing service'});
+    const legacy=await f.ctl.managed.repository.create({id:project.id,name:project.name,kind:'project',template:'empty'});
+    f.ctl.store.managed.saveSource(project.id,'project',legacy.source);
+    const folder='apps/reserved',manifest={...legacy.manifest,version:'0.1.0'};
+    mkdirSync(join(f.repository.directory,folder),{recursive:true});
+    writeFileSync(join(f.repository.directory,folder,'operator-package.json'),JSON.stringify(manifest));
+    git(f.repository.directory,'add','.');
+    git(f.repository.directory,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','Unrelated package claims legacy UUID');
+    const result=await f.ctl.managed.packages.importPackages(f.repository.id,{paths:[folder]});
+    assert.equal(result.imports[0]?.status,'failed');
+    assert.match(String(result.imports[0]?.error),/legacy registration/);
+    assert.equal(f.ctl.managed.packages.store.package(project.id),undefined);
+    assert.equal(f.ctl.projects.get(project.id).source?.commit,legacy.source.commit);
+
+    const destination=await f.ctl.managed.packages.register({name:'New source',remoteUrl:'https://example.test/migration.git',mode:'create'});
+    const path='apps/migrated';
+    await f.ctl.managed.packages.createPackage(destination.id,{path,manifest,files:legacy.files});
+    const committed=git(destination.directory,'rev-parse','HEAD');
+    await f.reopen();
+    for(let attempt=0;attempt<2;attempt++){
+      const recovered=await f.ctl.managed.migrateSource(project.id,{repositoryId:destination.id,packagePath:path});
+      assert.equal(recovered.source.commit,committed);
+      assert.equal(f.ctl.projects.get(project.id).source?.repositoryId,destination.id);
+      assert.equal(git(destination.directory,'rev-parse','HEAD'),committed);
+    }
+  }finally{await f.close();}
 });

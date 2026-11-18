@@ -198,7 +198,7 @@ export class ManagedRepository {
   });}
 }
 
-function scaffold(input:ReturnType<typeof managedCreateSchema.parse>):{manifest:ManagedManifest;files:Record<string,string>}{
+export function scaffold(input:ReturnType<typeof managedCreateSchema.parse>):{manifest:ManagedManifest;files:Record<string,string>}{
   const manifest:ManagedManifest={schemaVersion:1,id:input.id,kind:input.kind,name:input.name,description:input.description};
   const files:Record<string,string>={'README.md':`# ${input.name}\n\n${input.description}\n\nManaged source. Credentials and runtime data belong outside this package.\n`};
   if(input.template==='service'){

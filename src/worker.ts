@@ -1,6 +1,6 @@
 import { createServer, type Server, type Socket } from 'node:net';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
-import { chownSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chownSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -11,7 +11,7 @@ import { AgentAuthenticator } from './runtime/auth.js';
 import { checkSkill } from './runtime/fixtures.js';
 import { WorkerJournal, type JournalRun, type JournalCheck } from './runtime/journal.js';
 import { processStamp, bootId, groupMembers, terminateGroup } from './runtime/processes.js';
-import { inside, prepareExecutionDirectory } from './runtime/execution.ts';
+import { prepareExecutionDirectory } from './runtime/execution.ts';
 import { projectInspectInput, projectLogsInput, projectReferenceSchema } from './projects/schemas.ts';
 import { inspectProject, projectLogs, validateProjectReference } from './runtime/projects.ts';
 import { publishArtifact } from './runtime/artifacts.ts';
@@ -23,6 +23,7 @@ import { connectorCallInput, connectorTestInput, type ConnectorSnapshot } from '
 import { prepareWorkerDirectory, workerDirectory } from './workers/config.ts';
 import { loadWorkerConfig } from './workers/startup.ts';
 import type { WorkerModel } from './workers/models-schema.ts';
+import { repairProjectOwnership,repairTreeOwnership } from './runtime/ownership.ts';
 
 const runIdInput = z.object({ runId: z.string().min(1) });
 const emptyInput = z.object({}).strict();
@@ -398,6 +399,7 @@ export class WorkerServer {
       await active.adapter.close();
       for (const check of this.journal.checks().filter(check => check.run_id === active.submission.runId)) await this.resolveOrphan(check);
       await this.checks;
+      this.repairOwnership();
       this.journal.status(active.submission.runId, result.status);
       this.broadcast(this.journal.append(active.submission.runId, 'completed', this.clean(result), true));
     } catch (error) {
@@ -405,7 +407,6 @@ export class WorkerServer {
       this.broadcast(this.journal.append(active.submission.runId, 'completed', { status: 'failed', uncertain: true, error: this.redact(error instanceof Error ? error.message : String(error)) }, true));
     }
     if (this.active === active) this.active = undefined;
-    this.repairOwnership();
   }
   private broadcast(event: WorkerEvent): void { for (const client of this.clients) { if (client.writableLength > 4 * 1024 * 1024) client.destroy(); else client.write(JSON.stringify({ method: 'event', params: event }) + '\n'); } }
   private redact(value: string): string {
@@ -436,15 +437,10 @@ export class WorkerServer {
   }
   private repairOwnership(): void {
     if (process.getuid?.() !== 0) return;
-    const visit = (path: string) => {
-      try { const stat = lstatSync(path); if (stat.isSymbolicLink()) return; chownSync(path, this.config.controllerUid, -1); if (stat.isDirectory()) for (const name of readdirSync(path)) visit(resolve(path, name)); } catch {}
-    };
-    // Controller remains the owner of durable data so maintenance-window snapshots work.
-    // Agent-created paths outside these roots intentionally retain host semantics.
-    for (const path of this.config.workerId?['workspaces','artifacts']:['runtime', 'workspaces', 'artifacts', 'worker']) visit(resolve(this.config.stateDir, path));
-    if(this.config.workerId)visit(workerDirectory(this.config));
-    const projects=resolve(this.config.projectsDir??resolve(this.config.stateDir,'projects'));
-    if(inside(this.config.stateDir,projects))visit(projects);
+    const directories=this.config.workerId?['workspaces','artifacts']:['runtime','workspaces','artifacts','worker'];
+    for(const directory of directories)repairTreeOwnership(resolve(this.config.stateDir,directory),this.config.controllerUid);
+    if(this.config.workerId)repairTreeOwnership(workerDirectory(this.config),this.config.controllerUid);
+    repairProjectOwnership(this.config);
   }
   close(): Promise<void> {
     return this.closingOperation??=(async()=>{

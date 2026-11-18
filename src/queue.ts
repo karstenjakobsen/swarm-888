@@ -13,6 +13,7 @@ import type { RuntimeReceipts } from './runtime-receipts.ts';
 import { WorkerRegistry,type WorkerSelection } from './workers/registry.ts';
 import type { TaskOptions } from './tasks/schemas.ts';
 import { taskPromptCapacity } from './tasks/budgets.ts';
+import { assertRepositoryWritable,projectRepository } from './packages/leases.ts';
 
 type Session={id:string;connected:boolean;replaying:boolean;buffer:WorkerEvent[];journalId:string;error:string|null};
 
@@ -151,6 +152,7 @@ export class Queue extends EventEmitter {
     const {worker,client,health}=selected,generation=this.authentication.get(worker.id)?.generation??0;
     if(run.prompt.length>taskPromptCapacity(run))throw new Error('The task prompt exceeds its context budget. Increase the limit or provide a smaller focused prompt.');
     if(project&&this.store.db.prepare('SELECT 1 FROM project_leases WHERE projectId=?').get(project.id))throw new Error('Another task owns this project until execution and source finalization finish.');
+    const repositoryId=project&&projectRepository(this.store.db,project.id);if(repositoryId)assertRepositoryWritable(this.store.db,repositoryId,run.id);
     if(this.store.sanitize(run.prompt)!==run.prompt)throw new Error('This stored task contains a known credential. Replace its prompt before execution.');
     const ids=run.connectionScope==='explicit'?run.requiredConnectorIds??[]:this.store.connectors.assigned(project?.id??'',true);
     const readiness=this.connectors?.readiness(ids);if(readiness&&!readiness.ready)throw new Error(readiness.reason??'Configure required connections before this task can run.');

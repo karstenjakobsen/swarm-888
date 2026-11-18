@@ -15,7 +15,8 @@ test('project HTTP routes enforce session/CSRF and keep project conversations li
     const login=await ctl.app.inject({method:'POST',url:'/api/login',headers:{origin:config.origins[0]},payload:{password:config.adminPassword}});
     const cookie=String(login.headers['set-cookie']).split(';')[0],headers={cookie,origin:config.origins[0],'x-csrf-token':login.json().csrfToken};
     assert.equal((await ctl.app.inject({method:'POST',url:'/api/projects',headers:{cookie,origin:config.origins[0]},payload:{name:'Missing CSRF'}})).statusCode,403);
-    let response=await ctl.app.inject({method:'POST',url:'/api/projects',headers,payload:{name:'VPS report',description:'A deployed report site'}});
+    const repository=await ctl.managed.packages.register({name:'API packages',remoteUrl:'https://example.test/projects-api.git',mode:'create'});
+    let response=await ctl.app.inject({method:'POST',url:'/api/projects',headers,payload:{name:'VPS report',description:'A deployed report site',repositoryId:repository.id,packagePath:'apps/report'}});
     assert.equal(response.statusCode,200,response.body);const project=response.json();
     response=await ctl.app.inject({method:'POST',url:`/api/projects/${project.id}/components`,headers,payload:{name:'Report site',kind:'website',url:'https://report.example.test'}});
     assert.equal(response.statusCode,200,response.body);const component=response.json();

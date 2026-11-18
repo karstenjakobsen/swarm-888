@@ -33,6 +33,7 @@ function rejectProjectSnapshot(database:string){
   const db=new DatabaseSync(database,{readOnly:true});
   try{
     if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'").get()&&db.prepare('SELECT id FROM projects LIMIT 1').get())throw new Error('Legacy brain snapshots do not include project workspace data or rebase project directories. Use an owner-controlled backup of operator state and projects together.');
+    if(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='repositories'").get()&&db.prepare('SELECT id FROM repositories LIMIT 1').get())throw new Error('Legacy brain snapshots do not include registered source repositories. Back up the complete stopped operator state and APP_PROJECTS_DIR together.');
   }finally{db.close();}
 }
 function maintenance(config:Config):()=>void {

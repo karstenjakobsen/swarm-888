@@ -60,6 +60,9 @@ test('status is based only on bounded fresh worker observations and becomes unkn
 test('project directory and component contracts reject escapes, source overlap and claimed status',()=>{
   const f=fixture();
   try{
+    for(const reserved of ['repositories','artifacts','runtimes']){
+      assert.throws(()=>f.projects.create({name:'Reserved runtime',origin:'adopted',directory:join(f.config.projectsDir!,reserved,'existing')}),/operator-managed/);
+    }
     assert.throws(()=>f.projects.create({name:'Outside',origin:'adopted',directory:'/etc'}),/inside the configured projects directory/);
     assert.throws(()=>f.projects.create({name:'Root',origin:'adopted',directory:f.config.projectsDir}),/inside the configured projects directory/);
     assert.throws(()=>f.projects.create({name:'Claimed healthy',status:'healthy'}));

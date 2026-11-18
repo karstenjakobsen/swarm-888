@@ -4,6 +4,8 @@ import { jobInput,jobPatch } from '../jobs/schemas.ts';
 import { projectCreateInput, projectUpdateInput, componentInput, componentUpdateInput, projectId } from '../projects/schemas.ts';
 import { sourceCreateInput, sourceWriteInput, sourceCommitInput } from '../managed/schemas.ts';
 import { connectorInput, connectorPatchInput, connectorAssignmentInput, connectorCall } from '../connectors/schemas.ts';
+import { createPackageInput } from '../packages/inputs.ts';
+import { repositoryInput,packageImportInput,packageVersion } from '../packages/schemas.ts';
 
 export const skillName = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const fileMap = z.record(z.string(), z.string().max(1_000_000)).refine(v => Object.keys(v).length <= 100, 'At most 100 files');
@@ -35,6 +37,12 @@ export type CheckSpec = { candidatePath: string; checks: SkillCheck[] };
 export type CheckEvidence = { passed: boolean; checks: Array<{ name: string; exitCode: number | null; stdout: string; stderr: string; passed: boolean; error?: string; durationMs: number }> };
 
 export const toolSchemas = {
+  repository_list:z.object({}).strict(),
+  repository_register:repositoryInput,
+  repository_discover:z.object({id:z.string().uuid()}).strict(),
+  repository_import:packageImportInput.extend({id:z.string().uuid()}),
+  package_list:z.object({}).strict(),
+  package_create:createPackageInput.safeExtend({repositoryId:z.string().uuid()}),
   worker_list:z.object({}).strict(),
   task_create:delegatedTaskInput,
   task_get:z.object({id:z.string().uuid()}).strict(),
@@ -77,7 +85,7 @@ export const toolSchemas = {
   progress_checkpoint: z.object({ summary: z.string().min(1).max(4000) }).strict(),
   skill_search: z.object({ query: z.string().max(1000).default('') }).strict(),
   skill_read: z.object({ name: skillName, version: z.number().int().positive().optional() }).strict(),
-  skill_create: candidateInput,
+  skill_create: candidateInput.extend({repositoryId:z.string().uuid().optional(),packagePath:z.string().min(1).max(500).optional(),packageVersion:packageVersion.optional()}),
   skill_validate: z.object({ name: skillName, version: z.number().int().positive() }).strict(),
   skill_publish: z.object({ name: skillName, version: z.number().int().positive(), activate: z.boolean().default(true) }).strict(),
   skill_action: z.object({ name: skillName, action: z.enum(['activate', 'disable', 'retire', 'rollback']), version: z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER),z.string().regex(/^[1-9]\d*$/).refine(value=>Number.isSafeInteger(Number(value)),'Version must be a positive safe integer')]).optional() }).strict(),
@@ -85,6 +93,12 @@ export const toolSchemas = {
 } as const;
 
 export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
+  repository_list:'List registered source Git repositories. Each code project, connector and reusable skill belongs to a registered repository.',
+  repository_register:'Register a repository with its required remote URL. mode create initializes a local checkout and configures origin; clone reads an existing remote. Never pushes.',
+  repository_discover:'Discover and validate v1 operator-package.json manifests at a committed revision. Does not execute package code.',
+  repository_import:'Import selected discovered folders at an expected Git commit. Preserves canonical UUIDs and records durable import history. Does not validate, deploy or execute code.',
+  package_create:'Create a project, connector or skill package in a registered repository folder and commit it locally. Use a connector template for a new MCP server or adopt existing code with explicit transport metadata. Runtime tests and deployment are separate actions.',
+  package_list:'List imported packages with canonical UUID, kind, declared version and exact last successfully imported Git commit.',
   worker_list:'List registered worker availability, selected model and actual OS identity. Model choice does not grant OS privileges.',
   task_create:'Create a durable delegated task from the current task with an explicit request ID and bounded worker, root, connector, context and output requirements. Parent grants and budgets apply.',
   task_get:'Read a durable task, its attempt ownership and observed outcome.',
@@ -96,13 +110,13 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   job_trigger:'Queue a manual occurrence of a registered job, restricted to the current parent task connection, privilege and execution limits.',
   project_list:'List durable projects and their observed website, service, schedule and script state. Unknown or stale status is not proof of failure or success.',
   project_get:'Read a project, registered components, observations and linked tasks.',
-  project_create:'Create a project before building or deploying it. For new code set managed:true to create committed generated source in this Git repository; template service creates a tested local HTTP example, empty creates a source package. Source and runtime directories are separate. Adopted directories stay within the projects root. Links the current conversation.',
+  project_create:'Create a project in a registered Git repository; repositoryId and packagePath are required. template service creates a tested local HTTP example, empty creates a source package. Remote URL belongs to repository registration. Source and runtime directories are separate. Adopted runtime directories stay within the projects root. Links the current conversation. Never pushes.',
   project_update:'Update the name or purpose of an existing project without changing its directory or claiming it is running.',
   project_component_add:'Register a website, background service, scheduled job or manual script in a project. Only verified host observations establish status.',
   project_component_update:'Update a registered project component after changing its configuration; invalidates stale observations.',
   project_refresh:'Ask the worker to verify registered components against actual host state and website responses. Does not start, stop, restart or install services.',
   project_prepare:'Prepare the registered project workspace using the root worker. Use after a project was registered while the worker was unavailable.',
-  project_source_create:'Add Git-managed source to a project. kind project/connector/skill selects its generated subtree. Templates service/connector provide deterministic local examples; empty starts a manifest. Automatically commits the generated files on the managed branch.',
+  project_source_create:'Add source in a registered repositoryId and packagePath to an existing project, preserving its runtime directory. kind selects the package type. Templates service/connector provide deterministic local examples; empty starts a v1 manifest with a canonical UUID. Automatically commits locally.',
   project_source_read:'Read committed package metadata, source branch/commit/workspace path and pending-change state. Returns a file listing by default. Supply paths for selected committed text files (bounded response).',
   project_source_write:'Save relative UTF-8 source files and commit only this generated package. Excludes credentials, dependencies and runtime output. Use for reviewable source changes; removedFiles is explicit.',
   project_source_commit:'Commit direct filesystem edits in this generated package; keeps unrelated development checkout changes untouched. Commit before deployment.',
@@ -127,7 +141,7 @@ export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   progress_checkpoint: 'Persist a concise milestone and resumable summary for the current task immediately.',
   skill_search: 'Search existing application skills before creating duplicates. Includes disabled and candidate packages.',
   skill_read: 'Read an application skill package, immutable versions and actual validation evidence on demand.',
-  skill_create: 'Commit reusable skill source and deterministic checks in the managed Git repository, then create a candidate runtime revision. Does not activate it.',
+  skill_create: 'Create a runtime candidate from a complete skill bundle and deterministic checks. Supply repositoryId and packagePath for new skills. For an existing skill this replaces all source files, including deleting omitted binary files. Use only for an intended full replacement. packageVersion is the semantic release label. Publication is separate.',
   skill_validate: 'Validate metadata, declared package files, helpers and execute representative fixture checks on the worker. Records actual evidence.',
   skill_publish: 'Atomically publish a validated candidate as an immutable version and optionally activate for future runs.',
   skill_action: 'Activate, disable, retire or roll back a published skill. Active runs retain their immutable version.',

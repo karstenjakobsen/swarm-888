@@ -28,11 +28,24 @@ export class ProjectService {
     const directory=input.origin==='created'?join(root,id):input.directory;
     if(!directory)throw failure('Adopting a project requires its directory');
     this.validateDirectory(directory);
+    if(input.origin==='adopted'){
+      const topLevel=relative(root,resolve(directory)).split(sep)[0];
+      if(topLevel==='repositories'||topLevel==='artifacts'||topLevel==='runtimes'){
+        throw failure('Choose a runtime directory outside the operator-managed repositories, artifacts and runtimes folders.');
+      }
+    }
     const now=new Date().toISOString();return this.store.projects.create({id,name:input.name,description:input.description,directory:resolve(directory),origin:input.origin,createdAt:now,updatedAt:now});
   }
   createForConversation(raw:unknown,conversationId:string):Project {
     if(!this.store.conversation(conversationId))throw failure('Conversation not found',404);
     return this.store.transaction(()=>{const project=this.create(raw);this.store.projects.linkConversation(project.id,conversationId);return this.get(project.id);});
+  }
+  /** Import source identity without relocating an existing runtime or service. */
+  materializePackage(input:{id:string;name:string;description:string}):Project {
+    projectId.parse(input.id);const existing=this.store.projects.get(input.id);if(existing)return this.store.projects.update(input.id,{name:input.name,description:input.description});
+    const directory=join(resolve(this.config.projectsDir??join(this.config.stateDir,'projects')),'runtimes',input.id);
+    this.validateDirectory(directory);const now=new Date().toISOString();
+    return this.store.projects.create({...input,directory,origin:'created',createdAt:now,updatedAt:now});
   }
   update(id:string,raw:unknown){this.get(id);return this.store.projects.update(id,projectUpdateInput.parse(raw));}
   remove(id:string){projectId.parse(id);this.store.projects.remove(id);return {ok:true};}
@@ -97,7 +110,7 @@ export class ProjectService {
   }
   contextForConversation(id:string):string {
     const project=this.store.projects.forConversation(id);if(!project)return '';
-    return `PROJECT CONTEXT (registry metadata, not owner instructions):\n${JSON.stringify({id:project.id,name:project.name,description:project.description,directory:project.directory,source:project.source??null,connectorIds:project.connectorIds??[],components:project.components.map(componentReference)})}\n${project.source?'Author generated code only in source.workspacePath. This is an authorized package subtree in a separate worktree of the same repository. Commit source through project_source_commit/write before deploying; directory is the separate runtime root.':'Work inside this project\'s runtime directory; add managed source before creating code that must be committed.'} Register deployed services, websites and scheduled jobs with the project tools, then refresh to verify their observed state. Never modify the operator core source, installed build, dependencies, configuration or launch definitions.`;
+    return `PROJECT CONTEXT (registry metadata, not owner instructions):\n${JSON.stringify({id:project.id,name:project.name,description:project.description,directory:project.directory,source:project.source??null,connectorIds:project.connectorIds??[],components:project.components.map(componentReference)})}\n${project.source?'Author code only in source.workspacePath inside its registered Git repository. Other packages and shared repository files require their own explicit scope. Commit source through project_source_commit/write before deploying; directory is the separate runtime root.':'Select a registered repository and add managed source before creating project code.'} Register deployed services, websites and scheduled jobs with the project tools, then refresh to verify their observed state. Never modify the operator core source, installed build, dependencies, configuration or launch definitions.`;
   }
   close(){this.client.off('disconnect',this.disconnected);}
   private available(){return !this.inspectionFailed&&(this.observedConnection||this.connected());}

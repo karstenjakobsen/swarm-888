@@ -26,6 +26,7 @@ import { createPlatformTools } from './tasks/tools.ts';
 import { ownWorkerConfig } from './workers/config.ts';
 import { WorkerModelCatalogService } from './workers/models.ts';
 import { registerProjectEnvironmentRoutes } from './projects/environment.ts';
+import { registerPackageRoutes } from './packages/routes.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -46,6 +47,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const receipts=new RuntimeReceipts(store.db,queue.client,config.projectsDir??join(config.stateDir,'projects'),queue.registry);
   const managed=new ManagedService(config,store,projects,queue.client,receipts);
   managed.repository.setSecretGuard(value=>vault.assertSafe(value));
+  managed.packages.setSecretGuard(value=>vault.assertSafe(value));
   const connectors=new ConnectorService(store,queue.client,projects,managed,receipts,vault);
   const tasks=new TaskService(store,queue,projects,connectors,value=>vault.assertSafe(value));
   queue.setTaskInheritance((parent,options)=>{tasks.checkTree(parent);return tasks.inherited(parent,options);});
@@ -53,7 +55,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const workerConnections=new Map<string,AgentConnectionService>();
   const workerConnection=(id:string)=>{let connection=workerConnections.get(id);if(!connection){connection=new AgentConnectionService(ownWorkerConfig(config,queue.registry.get(id)),queue,queue.registry.client(id));workerConnections.set(id,connection);}return connection;};
   queue.setManaged(managed,connectors,receipts);
-  brain.setManaged(managed,connectors);
+  const registration=brain.setManaged(managed,connectors);
   brain.setProjects(projects);
   brain.setExecutor(spec=>queue.client.request('checkSkill',spec));
   brain.setArtifactPublisher(input=>queue.client.request('artifacts/publish',input));
@@ -91,7 +93,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
     if(!['GET','HEAD'].includes(req.method)&&!equal(String(req.headers['x-csrf-token']??''),current.csrf))throw fail('CSRF token is missing or invalid',403);
   });
   app.addHook('onRoute',route=>{
-    if(!/^\/api\/(projects|connectors)(?:\/|$)/.test(route.url))return;
+    if(!/^\/api\/(projects|connectors|repositories|packages)(?:\/|$)/.test(route.url))return;
     const handler=route.handler;
     route.handler=async function(req,reply){
       resourceRequests.add(req.id);
@@ -110,6 +112,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   const writable=()=>{if(queue.maintenance&&!store.active())throw fail('Maintenance window: writes are paused',503);};
   registerCredentialRoutes(app,{vault,connectors,config,session,writable});
   registerProjectEnvironmentRoutes(app,{vault,projects,store,writable});
+  registerPackageRoutes(app,{packages:managed.packages,registration,writable});
   app.get('/api/session',async req=>{const current=session(req);return {authenticated:Boolean(current),...(current?{csrfToken:current.csrf}:{})};});
   app.post('/api/login',async(req,reply)=>{
     const {password}=z.object({password:z.string().max(4096)}).parse(req.body);
@@ -169,6 +172,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.post('/api/projects/:id/conversations',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return projects.newConversation(req.params.id);});
   const sourceWritable=(id:string)=>{writable();projects.get(id);if(store.db.prepare('SELECT 1 FROM project_leases WHERE projectId=?').get(id)||store.runs().some(run=>['running','waiting','uncertain'].includes(run.status)&&store.projects.forConversation(run.conversationId)?.id===id))throw fail('Finish or reconcile the active project task before changing source from the UI.',409);};
   app.post('/api/projects/:id/source',async(req:any)=>{sourceWritable(req.params.id);return managed.createSource(req.params.id,req.body??{});});
+  app.post('/api/projects/:id/source/migrate',async(req:any)=>{sourceWritable(req.params.id);return managed.migrateSource(req.params.id,z.object({repositoryId:z.string().uuid(),packagePath:z.string().min(1).max(500)}).strict().parse(req.body));});
   app.get('/api/projects/:id/source',async(req:any)=>managed.readSource(req.params.id));
   app.put('/api/projects/:id/source',async(req:any)=>{sourceWritable(req.params.id);return managed.writeSource(req.params.id,req.body);});
   app.post('/api/projects/:id/source/commit',async(req:any)=>{sourceWritable(req.params.id);return managed.commitSource(req.params.id,req.body??{});});
@@ -179,7 +183,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   app.put('/api/projects/:id/connectors',async(req:any)=>{writable();return connectors.assign(req.params.id,req.body);});
   app.get('/api/connectors',async()=>connectors.list());
   app.post('/api/connectors',async req=>{writable();return connectors.create(req.body);});
-  app.post('/api/connectors/examples',async req=>{writable();z.object({}).strict().parse(req.body??{});return connectors.createExample();});
+  app.post('/api/connectors/examples',async req=>{writable();return connectors.createExample(req.body);});
   app.get('/api/connectors/:id',async(req:any)=>connectors.get(req.params.id));
   app.patch('/api/connectors/:id',async(req:any)=>{writable();return connectors.update(req.params.id,req.body);});
   app.post('/api/connectors/:id/test',async(req:any)=>{writable();z.object({}).strict().parse(req.body??{});return connectors.test(req.params.id);});
@@ -293,6 +297,8 @@ export async function createController(config:Config, options:{client?:WorkerCli
         const granted=run.attemptId?run.grantedConnectorIds??[]:run.connectionScope==='explicit'?run.requiredConnectorIds??[]:store.connectors.assigned(project?.id??'',true);
         const target=args.projectId??(params.name.startsWith('project_')?args.id:undefined);
         if(project&&typeof target==='string'&&target!==project.id)throw fail('Project tools are scoped to the current task project',403);
+        if(project&&params.name==='package_create'&&args.repositoryId!==project.source?.repositoryId)throw fail('Create packages in the repository assigned to this project, or use a generic conversation.',403);
+        if(project&&params.name==='repository_import')throw fail('Import repository packages from a generic conversation or the Repositories UI; this task is scoped to its existing project.',403);
         if(['connector_call','connector_test','connector_update'].includes(params.name)&&typeof args.id==='string'&&!granted.includes(args.id))throw fail('This connection is outside the task grant',403);
         if(params.name==='project_connectors'&&Array.isArray(args.connectorIds)&&args.connectorIds.some(id=>!granted.includes(String(id))))throw fail('Project assignments cannot expand the accepted task connection grant',403);
         const charged=store.db.prepare("UPDATE runs SET toolCalls=toolCalls+1 WHERE id=? AND toolCalls<maxToolCalls AND status IN ('running','waiting')").run(run.id);
@@ -301,8 +307,10 @@ export async function createController(config:Config, options:{client?:WorkerCli
         try{
           const arguments_=params.name==='memory_write'?memoryInput(params.arguments??{}):params.arguments??{};
           const result=await queue.registry.withWorker(run.assignedWorkerId??'default',()=>brain.callTool(params.name,arguments_,{runId:run.id,conversationId:run.conversationId,workerId:run.assignedWorkerId??'default',attemptId:run.attemptId??undefined}));
-          if(['connector_register','connector_register_project'].includes(params.name)&&run.connectionScope==='project'&&!run.parentRunId&&result&&typeof result==='object'&&'id' in result){
-            const connection=connectors.get(String(result.id));
+          const registeredConnection=params.name==='package_create'?result?.connection:
+            ['connector_register','connector_register_project'].includes(params.name)?result:undefined;
+          if(run.connectionScope==='project'&&!run.parentRunId&&typeof registeredConnection?.id==='string'){
+            const connection=connectors.get(registeredConnection.id);
             if(!connection.auth&&Date.parse(connection.createdAt)>=Date.parse(run.startedAt??run.createdAt))store.db.prepare('UPDATE runs SET grantedConnectorIds=? WHERE id=?').run(JSON.stringify([...new Set([...(store.run(run.id)?.grantedConnectorIds??[]),connection.id])]),run.id);
           }
           const historyResult=params.name.startsWith('project_source_')&&result&&typeof result==='object'&&'files' in result?{...result,files:undefined}:result;

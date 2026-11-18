@@ -7,10 +7,15 @@ import type { ProjectService } from '../projects/service.ts';
 import { RuntimeReceipts } from '../runtime-receipts.ts';
 import type { CredentialVault } from '../credentials/vault.ts';
 import { connectorAuthSchema,type ConnectorAuth } from '../credentials/schemas.ts';
-import { connectorSnapshotSchema, connectorToolsResult, connectorCallResult, connectorInput, connectorPatchInput, connectorAssignmentInput, connectorCall, type ConnectorSnapshot, type Connector } from './schemas.ts';
+import { connectorSnapshotSchema, connectorToolsResult, connectorCallResult, connectorInput, connectorPatchInput, connectorAssignmentInput, connectorCall, type ConnectorSnapshot, type Connector, type ConnectorTransport } from './schemas.ts';
 
 const failure=(message:string,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 type ResolvedConnector={connector:ConnectorSnapshot;updatedAt:string;sourceCommit:string|null};
+function portableTransport(value:ConnectorTransport):ConnectorTransport {
+  if(value.transport==='http')return {transport:'http',url:value.url};
+  return {transport:'stdio',command:value.command,args:value.args};
+}
+
 function snapshotKey(value:ResolvedConnector){const {name,...configuration}=value.connector;return JSON.stringify({configuration,sourceCommit:value.sourceCommit});}
 
 /** Provider-neutral registrations, immutable task snapshots, and authorization readiness. */
@@ -51,28 +56,41 @@ export class ConnectorService {
     this.store.transaction(()=>this.store.connectors.setAuth(id,auth));return this.get(id);
   }
   readiness(ids:string[]){for(const id of z.array(z.string().uuid()).max(20).parse(ids)){const value=this.get(id);if(!value.enabled)return {ready:false,reason:`Connection ${value.name} is disabled.`,connectorId:id};if(!value.readiness?.ready)return {ready:false,reason:value.readiness?.reason??'Connection credentials are required',connectorId:id};if(value.status!=='connected')return {ready:false,reason:`Test connection ${value.name} in Connections before running tasks that require it.`,connectorId:id};}return {ready:true};}
-  async createExample(){
-    const project=this.projects.create({name:'Local MCP example',description:'Managed local echo connector for verifying source, Git, and MCP.',origin:'created'});
-    const value=await this.managed.createSource(project.id,{kind:'connector',template:'connector'});
-    if(!value.manifest.mcp||value.manifest.mcp.transport!=='stdio')throw failure('The local example did not declare a stdio MCP server.');
-    return this.create({name:`Local example ${project.id.slice(0,8)}`,description:project.description,projectId:project.id,...value.manifest.mcp});
+  async createExample(raw:unknown={}){
+    const input=z.object({repositoryId:z.string().uuid(),packagePath:z.string().min(1).max(1000)}).strict().parse(raw);
+    const record=await this.managed.createPackage(input.repositoryId,{
+      kind:'connector',name:'Local MCP example',path:input.packagePath,template:'connector',
+      description:'Managed local echo connector for verifying source, Git, and MCP.',
+    });
+    await this.managed.materializePackage(record);
+    return this.registerProject(record.id,`Local example ${record.id.slice(0,8)}`);
   }
-  async registerProject(id:string){
-    const project=this.projects.get(id),value=await this.managed.readSource(id);
+  private synchronizeTransport(id:string,manifest:ConnectorTransport){
+    const record=this.get(id);
+    const transport=portableTransport(manifest);
+    if(JSON.stringify(portableTransport(record))===JSON.stringify(transport))return record;
+    if(record.auth)throw failure('The package changed its MCP destination or command. Remove the credential binding, review and register the new transport, then authorize it in Connections.',409);
+    this.store.transaction(()=>this.store.connectors.updatePortableTransport(record.id,transport));
+    return this.get(record.id);
+  }
+  async registerProject(id:string,name?:string){
+    const project=this.projects.get(id),value=await this.managed.readReleaseSource(id);
     if(!value.manifest.mcp)throw failure('The package manifest needs an mcp configuration.');
     const existing=this.list().find(item=>item.projectId===id);
-    if(existing)return existing;
-    return this.create({name:project.name,description:project.description,projectId:id,...value.manifest.mcp});
+    if(existing)return this.synchronizeTransport(existing.id,value.manifest.mcp);
+    return this.create({name:name??project.name,description:project.description,projectId:id,...value.manifest.mcp});
   }
   private async resolve(id:string):Promise<ResolvedConnector>{
-    const record=this.get(id);if(!record.enabled)throw failure('Enable this connection before using its tools.',409);
-    if(record.auth){if(!this.vault)throw failure('Configure connection credentials in Connections.',409);await this.vault.ensure(record.auth,id);}
+    let record=this.get(id);if(!record.enabled)throw failure('Enable this connection before using its tools.',409);
     let connector:ConnectorSnapshot,sourceCommit:string|null=null;
-    if(record.projectId&&this.projects.get(record.projectId).source){
-      const value=await this.managed.readSource(record.projectId),mcp=value.manifest.mcp;
+    const projectId=record.projectId;
+    if(projectId&&this.projects.get(projectId).source){
+      const value=await this.managed.readReleaseSource(projectId),mcp=value.manifest.mcp;
       if(!mcp)throw failure('The managed package no longer declares an MCP server.');
+      record=this.synchronizeTransport(id,mcp);
+      if(!record.enabled)throw failure('Enable this connection before using its tools.',409);
       if(mcp.transport==='stdio'){
-        const release=await this.managed.prepareExport(record.projectId,value);
+        const release=await this.managed.prepareExport(projectId,value);
         connector=connectorSnapshotSchema.parse({id,name:record.name,transport:'stdio',command:mcp.command,args:mcp.args,cwd:release.releaseDirectory});
       }else{
         connector=connectorSnapshotSchema.parse({id,name:record.name,transport:'http',url:mcp.url});
@@ -81,7 +99,11 @@ export class ConnectorService {
     }else{
       connector=connectorSnapshotSchema.parse({id,name:record.name,...(record.transport==='stdio'?{transport:'stdio',command:record.command,args:record.args??[],...(record.cwd?{cwd:record.cwd}:{})}:{transport:'http',url:record.url})});
     }
-    if(record.auth)connector=connectorSnapshotSchema.parse({...connector,auth:record.auth,credentialRevision:this.vault!.get(record.auth.credentialId).revision});
+    if(record.auth){
+      if(!this.vault)throw failure('Configure connection credentials in Connections.',409);
+      await this.vault.ensure(record.auth,id);
+      connector=connectorSnapshotSchema.parse({...connector,auth:record.auth,credentialRevision:this.vault.get(record.auth.credentialId).revision});
+    }
     return {connector,sourceCommit,updatedAt:record.updatedAt};
   }
   private current(value:ResolvedConnector){

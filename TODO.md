@@ -1,6 +1,34 @@
 # Operator implementation slices
 
-Generated projects, connectors, and skills belong to this repository for the POC. Source is committed under `generated/` on an operator-managed branch/worktree; deployments, credentials, databases, dependencies, and logs remain outside Git. Operator workers may author generated packages while the operator core remains owner-maintained by prompt.
+Projects, connectors, and skills belong to registered Git repositories under `APP_PROJECTS_DIR/repositories/`, with required remote URLs and automatic local commits. Deployments, credentials, databases, dependencies, and logs remain outside source Git. Operator workers author assigned package folders; the operator core remains owner-maintained by prompt. Remote pushes are disabled.
+
+## Repository-backed packages v1
+
+- [x] Repository registry and local create/clone flows with required remote URL, explicit branch/default-branch handling and an `operator/work` branch. No push operation.
+- [x] Strict `operator-package.json` v1 with canonical UUID, project/connector/skill kind, semantic package version and kind-specific metadata; skills retain matching `SKILL.md`.
+- [x] Bounded committed-manifest discovery, preview, selected import, explicit remote-update fetch, and adoption of folders without executing package commands.
+- [x] SQLite repositories/packages/import journal; schema/package/commit versions tracked independently, interrupted attempts recorded, repeat imports idempotent, failed batches preserve last success, canonical moves and cross-repository ID conflicts handled.
+- [x] Project, connector and skill authoring flows require registered source; model-callable repository tools and existing source tools work with selected repositories/folders and make local commits.
+- [x] Durable repository writing leases span task execution and source finalization; different repositories can progress concurrently, same-repository projects serialize.
+- [x] Immutable Git snapshots support binary assets/executable files independently of editor limits. Runtime checks/build/deploy remain separate from import.
+- [x] Explicit legacy source migration preserves UUID, runtime directories, service records, conversations and old Git history.
+- [x] Repositories UI with create/clone/adopt/discover/import, exact versions, import history, local changes/ahead state, registration notices and package links; source migration and required repository selectors.
+- [x] Final corrective regressions, complete checks and requirement-by-requirement delivery audit.
+
+Verified on 2026-11-18 with **343 passing backend tests and 53 passing browser tests**. The optional network device sign-in test was skipped. Type-check, the production build and `git diff HEAD --check` passed. The repository has no separate lint script.
+
+| Requirement | Implementation and evidence |
+| --- | --- |
+| Required Git remote; work stays local | `src/packages/service.ts` registration, dedicated checkouts, local commits and local-ref status; `packages`, `package-integration` and real browser workflows. No push command/action was added or run. |
+| Canonical v1 package config | Strict `operator-package.json`, UUID/kind/semantic version and kind rules, UTF-8/64 KB bound; all three package kinds created and imported in real temporary Git repositories. |
+| Monorepo discovery/import/adoption | Committed-object preview, select/import, explicit fetch, default branches, safe folder adoption and root packages; duplicate/fork/move/conflict, stale-write, binary and collision regressions. Import never starts package commands. |
+| SQLite outcome and version history | Migrations 010–012, independent format/release/commit versions, interrupted and failed attempts, idempotency and preservation of last successful imports; mixed invalid batches update no selected packages. |
+| Reuse existing application workflows | Project source editor/build/deploy, connector registration/test and skill candidate validation/publication use imported source. Skill rename preserves immutable history; old-candidate validation cannot rewrite newer source; unsupported skill files produce explicit notices. |
+| Automatic source persistence and recovery | Repository leases plus generic per-package finalization cover projects and skill authoring, multiple packages per task, restart/idempotent recovery, failed commits, independent repositories and atomic journal/lease release; nine dedicated `package-finalization` tests. |
+| Existing installation migration | Explicit legacy migration preserves identity, runtime data, service/components and conversations. Root-created source files under external project roots return to controller ownership without following links. |
+| UI usable for local testing | Desktop and phone browser coverage for repository registration, preview, import, adoption, version history, source selection, migration, and editor save conflicts. |
+
+Package release builds use only files inside that package's folder. Shared monorepo root build inputs require making the package self-contained. Runtime skill candidates retain their existing complete-text bundle limits and require representative checks before publication. Real provider operations, paid model inference and live systemd deployment were not performed; these remain host/application acceptance work. All implementation acceptance used local disposable repositories and configured remotes without pushes.
 
 ## Delivered platform expansion: worker pools and repeatable applications
 
@@ -37,7 +65,7 @@ The objective is the complete reusable platform needed to later build applicatio
 
 ## Delivery decisions
 
-- One Git repository and an isolated managed branch/worktree; automatic commits do not publish or merge changes into the development checkout.
+- Registered Git repositories and isolated operator branches; automatic commits stay local and leave the operator development checkout untouched. The former single-repository `generated/` layout remains available for explicit migration.
 - Project/package identity and source paths are portable so packages can move into separate repositories later.
 - Existing adopted projects retain their runtime paths. Source management is added explicitly.
 - MCP connections support local stdio and remote HTTP, with explicit owner-managed credential grants. A provider-specific connector remains ordinary generated package code.

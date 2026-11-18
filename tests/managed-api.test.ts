@@ -49,16 +49,17 @@ async function fixture(){
   const config:Config={stateDir,repositoryPath,projectsDir:join(stateDir,'projects'),runtimeHome:join(stateDir,'runtime'),socketPath:join(stateDir,'worker.sock'),bridgeSocket:join(stateDir,'bridge.sock'),ipcToken:'',controllerUid:process.getuid!(),codexBin:'unused',host:'127.0.0.1',port:3001,origins:['http://localhost:5173'],adminPassword:'managed-api-fixture-password',secureCookie:false,improvementEnabled:false,improvementTimeoutMs:1000,improvementMaxTurns:1,allowTempState:true,requireRootWorker:true};
   initState(config);const worker=new ManagedWorker(config),ctl=await createController(config,{client:worker as unknown as WorkerClient,startQueue:false,startBridge:false});
   ctl.brain.skillAction('skill-maintenance','disable');
+  const repository=await ctl.managed.packages.register({name:'Fixture packages',remoteUrl:'https://example.test/managed-api.git',mode:'create'});
   const login=await ctl.app.inject({method:'POST',url:'/api/login',headers:{origin:config.origins[0]},payload:{password:config.adminPassword}}),headers={origin:config.origins[0],cookie:String(login.headers['set-cookie']).split(';')[0],'x-csrf-token':login.json().csrfToken};
-  return {root,config,worker,ctl,headers,ownerStatus,ownerHead,ownerIndex,async close(){await ctl.close();await worker.runtime.close();rmSync(root,{recursive:true,force:true});}};
+  return {root,config,worker,ctl,repository,headers,ownerStatus,ownerHead,ownerIndex,async close(){await ctl.close();await worker.runtime.close();rmSync(root,{recursive:true,force:true});}};
 }
 
 test('managed project API commits source, separates runtime revisions, and preserves owner Git work',async()=>{
   const f=await fixture();
   try{
     assert.equal((await f.ctl.app.inject({method:'GET',url:'/api/connectors'})).statusCode,401);
-    let response=await f.ctl.app.inject({method:'POST',url:'/api/projects',headers:f.headers,payload:{name:'Managed service',managed:true,template:'service'}});
-    assert.equal(response.statusCode,200,response.body);const project=response.json();assert.match(project.source.path,/^generated\/projects\//);assert.match(project.source.commit,/^[a-f0-9]{40,64}$/);
+    let response=await f.ctl.app.inject({method:'POST',url:'/api/projects',headers:f.headers,payload:{name:'Managed service',managed:true,template:'service',repositoryId:f.repository.id,packagePath:'apps/service'}});
+    assert.equal(response.statusCode,200,response.body);const project=response.json();assert.equal(project.source.path,'apps/service');assert.match(project.source.commit,/^[a-f0-9]{40,64}$/);
     assert.notEqual(project.source.workspacePath,project.directory);
     response=await f.ctl.app.inject({method:'GET',url:`/api/projects/${project.id}/source`,headers:f.headers});assert.equal(response.statusCode,200,response.body);const original=response.json();
     response=await f.ctl.app.inject({method:'PUT',url:`/api/projects/${project.id}/source`,headers:f.headers,payload:{files:{'README.md':'Updated source\n'},message:'Document generated service'}});assert.equal(response.statusCode,200,response.body);assert.notEqual(response.json().source.commit,original.source.commit);
@@ -76,16 +77,24 @@ test('managed project API commits source, separates runtime revisions, and prese
     assert.equal(f.ctl.projects.get(project.id).deployment?.commit,source.commit);
     assert.equal(git(f.config.repositoryPath!,'status','--porcelain'),f.ownerStatus);assert.equal(git(f.config.repositoryPath!,'rev-parse','HEAD'),f.ownerHead);assert.equal(git(f.config.repositoryPath!,'diff','--cached'),f.ownerIndex);
     assert.equal((await f.ctl.app.inject({method:'POST',url:`/api/projects/${project.id}/deployment/stop`,headers:f.headers,payload:{}})).json().status,'stopped');
+    writeFileSync(join(project.source.workspacePath,'operator-package.json'),'{"schemaVersion":99}');
+    git(f.repository.directory,'add','.');
+    git(f.repository.directory,'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','Unimportable revision');
+    const failed=await f.ctl.managed.packages.importPackages(f.repository.id,{paths:[project.source.path]});
+    assert.equal(failed.imports[0]?.status,'failed');
+    response=await f.ctl.app.inject({method:'POST',url:`/api/projects/${project.id}/deploy`,headers:f.headers,payload:{}});
+    assert.equal(response.statusCode,200,response.body);
+    assert.equal(response.json().commit,deployment.commit,'Redeployment uses the last successfully imported revision');
   }finally{await f.close();}
 });
 
 test('managed connector source is committed, real MCP discovery/calls work, and project tasks receive snapshots',async()=>{
   const f=await fixture();
   try{
-    let response=await f.ctl.app.inject({method:'POST',url:'/api/connectors/examples',headers:f.headers,payload:{}});assert.equal(response.statusCode,200,response.body);const connector=response.json();assert(connector.source.commit);assert.equal(connector.status,'untested');
+    let response=await f.ctl.app.inject({method:'POST',url:'/api/connectors/examples',headers:f.headers,payload:{repositoryId:f.repository.id,packagePath:'connectors/echo'}});assert.equal(response.statusCode,200,response.body);const connector=response.json();assert(connector.source.commit);assert.equal(connector.status,'untested');
     response=await f.ctl.app.inject({method:'POST',url:`/api/connectors/${connector.id}/test`,headers:f.headers,payload:{}});assert.equal(response.statusCode,200,response.body);assert.equal(response.json().tools[0].name,'echo');
     response=await f.ctl.app.inject({method:'POST',url:`/api/connectors/${connector.id}/call`,headers:f.headers,payload:{name:'echo',arguments:{text:'Verified through operator UI API'}}});assert.equal(response.statusCode,200,response.body);assert.equal(response.json().content[0].text,'Verified through operator UI API');
-    response=await f.ctl.app.inject({method:'POST',url:'/api/projects',headers:f.headers,payload:{name:'Task source',managed:true,template:'empty'}});assert.equal(response.statusCode,200,response.body);const project=response.json();
+    response=await f.ctl.app.inject({method:'POST',url:'/api/projects',headers:f.headers,payload:{name:'Task source',managed:true,template:'empty',repositoryId:f.repository.id,packagePath:'apps/task'}});assert.equal(response.statusCode,200,response.body);const project=response.json();
     response=await f.ctl.app.inject({method:'PUT',url:`/api/projects/${project.id}/connectors`,headers:f.headers,payload:{connectorIds:[connector.id]}});assert.equal(response.statusCode,200,response.body);
     response=await f.ctl.app.inject({method:'POST',url:`/api/projects/${project.id}/conversations`,headers:f.headers,payload:{}});const conversation=response.json();
     const run=f.ctl.store.enqueue(conversation.id,'Write a generated module','managed-fixture-request');await f.ctl.queue.tick();assert.equal(f.worker.submissions.length,1);const submission=f.worker.submissions[0];assert.equal(submission.cwd,project.source.workspacePath);assert.equal(submission.connectors[0].id,connector.id);assert.match(submission.connectors[0].cwd,/\/releases\//);
@@ -101,7 +110,7 @@ test('managed connector source is committed, real MCP discovery/calls work, and 
 test('source API rejects a stale editor save and runtime responses cannot claim a different deployed revision',async()=>{
   const f=await fixture();
   try{
-    const project=await f.ctl.managed.createProject({name:'Reviewed source',managed:true,template:'service'});
+    const project=await f.ctl.managed.createProject({name:'Reviewed source',managed:true,template:'service',repositoryId:f.repository.id,packagePath:'apps/reviewed'});
     const initial=await f.ctl.managed.readSource(project.id);
     const saved=await f.ctl.managed.writeSource(project.id,{files:{'README.md':'Newer owner source\n'},expectedCommit:initial.source.commit});
     let response=await f.ctl.app.inject({method:'PUT',url:`/api/projects/${project.id}/source`,headers:f.headers,payload:{files:{'README.md':'Stale editor source\n'},expectedCommit:initial.source.commit}});
@@ -123,7 +132,7 @@ test('connector calls require testing the exact source revision and disabled con
   const f=await fixture();
   let release=()=>{};
   try{
-    const connector=await f.ctl.connectors.createExample();await f.ctl.connectors.test(connector.id);
+    const connector=await f.ctl.connectors.createExample({repositoryId:f.repository.id,packagePath:'connectors/echo'});await f.ctl.connectors.test(connector.id);
     await f.ctl.managed.writeSource(connector.projectId!,{files:{'README.md':'Connector revision changed\n'}});
     assert.equal(f.ctl.connectors.get(connector.id).status,'untested');assert.deepEqual(f.ctl.connectors.get(connector.id).tools,[]);
     const request=f.worker.request.bind(f.worker);let calls=0;

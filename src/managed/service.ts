@@ -1,27 +1,51 @@
 import { z } from 'zod';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { lstatSync, readFileSync } from 'node:fs';
 import type { Config } from '../config.ts';
 import type { Store } from '../store.ts';
 import type { WorkerClient } from '../ipc.ts';
 import type { ProjectService } from '../projects/service.ts';
 import { projectCreateInput, projectId } from '../projects/schemas.ts';
-import { ManagedRepository } from './repository.ts';
+import { ManagedRepository,scaffold } from './repository.ts';
+import { PackageService } from '../packages/service.ts';
+import { packageManifestSchema,type PackageRecord } from '../packages/schemas.ts';
+import { acquireRepository,assertRepositoryWritable } from '../packages/leases.ts';
+import { createGitSnapshot } from './snapshot.ts';
 import { RuntimeReceipts } from '../runtime-receipts.ts';
 import {sourceCreateInput,sourceWriteInput,sourceCommitInput,managedPreparedResult,managedDeploymentResult,managedStatusResult,managedLogsResult,type ManagedExport} from './schemas.ts';
 
 const fail=(message:string,statusCode=400)=>Object.assign(new Error(message),{statusCode});
+type ReleaseSource=Pick<ManagedExport,'source'|'manifest'>&{files?:ManagedExport['files']};
 
 /** Source/Git belongs to the controller; builds and deployments belong to the worker. */
 export class ManagedService {
   readonly repository:ManagedRepository;
+  readonly packages:PackageService;
   private sourceCreations=new Map<string,Promise<ManagedExport>>();
   private receipts:RuntimeReceipts;
-  constructor(config:Config,private store:Store,private projects:ProjectService,client:WorkerClient,receipts?:RuntimeReceipts){this.repository=new ManagedRepository(config);this.receipts=receipts??new RuntimeReceipts(store.db,client,config.projectsDir??join(config.stateDir,'projects'));}
+  constructor(private config:Config,private store:Store,private projects:ProjectService,client:WorkerClient,receipts?:RuntimeReceipts){
+    this.repository=new ManagedRepository(config);this.packages=new PackageService(config,store.db);
+    this.packages.setWriteGuard((repositoryId,runId)=>{
+      assertRepositoryWritable(store.db,repositoryId,runId);
+      if(!runId)return;
+      const run=store.run(runId);
+      if(!run||(!['running','waiting'].includes(run.status)&&!store.managed.hasPendingFinalization(runId)))throw fail('Package changes require an active task or its pending source finalization.',409);
+      acquireRepository(store.db,repositoryId,runId);
+    });
+    this.packages.setWriteScope((repositoryId,runId)=>store.managed.writablePackagePaths(repositoryId,runId));
+    this.packages.setImportGuard(manifest=>{
+      if(store.managed.ownsLegacyId(manifest.id))throw fail('This package ID already belongs to a legacy registration. Migrate its source explicitly or assign the independent package a new UUID.',409);
+    });
+    this.receipts=receipts??new RuntimeReceipts(store.db,client,config.projectsDir??join(config.stateDir,'projects'));
+  }
   async createProject(raw:unknown,conversationId?:string){
     const input=projectCreateInput.parse(raw);
-    if(input.origin==='adopted'&&input.managed)throw fail('Register an existing project first, then add managed source explicitly.');
+    if(!input.repositoryId||!input.packagePath)throw fail('Select a registered repository and package folder. Register its remote URL in Repositories first.');
+    this.packages.repository(input.repositoryId);
     const project=conversationId?this.projects.createForConversation(input,conversationId):this.projects.create(input);
-    if(input.managed)await this.createSource(project.id,{kind:'project',template:input.template??'empty'});
+    try{await this.createSource(project.id,{kind:'project',template:input.template??'empty',repositoryId:input.repositoryId,packagePath:input.packagePath});}
+    catch(error){if(!this.row(project.id))this.store.projects.discardUninitialized(project.id);throw error;}
     return this.projects.get(project.id);
   }
   private row(id:string){
@@ -36,43 +60,145 @@ export class ManagedService {
   }
   private async createSourceOnce(id:string,input:z.infer<typeof sourceCreateInput>):Promise<ManagedExport>{
     const project=this.projects.get(id),existing=this.row(id);
-    if(existing){if(existing.kind!==input.kind)throw fail('Managed source already exists with a different package kind.',409);return this.readSource(id);}
-    const previous=await this.repository.source(input.kind,id);
-    const value=previous.commit?await this.repository.export(input.kind,id):await this.repository.create({id,kind:input.kind,name:project.name,description:project.description,template:input.template});
+    if(existing){
+      if(existing.kind!==input.kind)throw fail('Managed source already exists with a different package kind.',409);
+      if(input.repositoryId&&!existing.source.repositoryId)return this.migrateSource(id,input);
+      if((input.repositoryId&&input.repositoryId!==existing.source.repositoryId)||(input.packagePath&&input.packagePath!==existing.source.path))throw fail('This package already belongs to another repository folder. Import a committed canonical move instead of rebinding it.',409);
+      return this.readSource(id);
+    }
+    if(!input.repositoryId||!input.packagePath)throw fail('A repository and package folder are required for all new source packages.');
+    const recovered=this.packages.store.package(id);
+    if(recovered){if(recovered.kind!==input.kind||recovered.repositoryId!==input.repositoryId||recovered.path!==input.packagePath)throw fail('The canonical package ID already belongs to another source location.',409);const value=await this.packageExport(id);this.store.managed.saveSource(id,input.kind,value.source);return value;}
+    const initial=scaffold({id,kind:input.kind,name:project.name,description:project.description,template:input.template});
+    const manifest=packageManifestSchema.parse({...initial.manifest,version:'0.1.0'});
+    await this.packages.createPackage(input.repositoryId,{path:input.packagePath,manifest,files:initial.files});
+    const value=await this.packageExport(id);
     this.store.managed.saveSource(id,input.kind,value.source);return value;
+  }
+  async migrateSource(id:string,input:{repositoryId?:string;packagePath?:string}){
+    const row=this.row(id);if(!row)throw fail('This project has no legacy source to migrate.',404);
+    if(!input.repositoryId||!input.packagePath)throw fail('Choose the destination repository and package folder.');
+    if(row.source.repositoryId){
+      if(row.source.repositoryId===input.repositoryId&&row.source.path===input.packagePath)return this.readSource(id);
+      throw fail('This package already belongs to another registered repository folder.',409);
+    }
+    const old=await this.repository.export(row.kind,row.packageId);
+    if(old.source.dirty)throw fail('Commit or resolve legacy source changes before migrating.',409);
+    const manifest=packageManifestSchema.parse({...old.manifest,version:old.manifest.version??'0.1.0'});
+    const files:Record<string,string>={...old.files,'operator-package.json':JSON.stringify(manifest,null,2)+'\n'};
+    const existing=this.packages.store.package(row.packageId);
+    if(existing&&(existing.repositoryId!==input.repositoryId||existing.path!==input.packagePath||existing.kind!==row.kind))throw fail('This package UUID already belongs to another source location.',409);
+    if(!existing){
+      // Creating a root package normally preserves the repository README. A migration must preserve the legacy README itself.
+      if(input.packagePath==='.'&&files['README.md']!==undefined){
+        const readme=join(this.packages.repository(input.repositoryId).directory,'README.md');
+        const expected=files['README.md'];
+        try{const stat=lstatSync(readme);if(!stat.isFile()||stat.size!==Buffer.byteLength(expected)||readFileSync(readme,'utf8')!==expected)throw fail('The repository README differs from this package. Choose a new folder to preserve both files.',409);}
+        catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      }
+      await this.packages.createPackage(input.repositoryId,{path:input.packagePath,manifest,files});
+    }
+    const value=await this.packageExport(row.packageId);
+    if(value.source.dirty||value.source.workspaceDiverged||Object.entries(files).some(([path,content])=>value.files[path]!==content)){
+      throw fail('The destination differs from the committed legacy package. Review the destination before completing migration.',409);
+    }
+    this.store.managed.saveSource(id,row.kind,value.source,row.packageId);
+    return value;
+  }
+  async materializePackage(record:PackageRecord){
+    if(record.kind==='skill')return;
+    const source=this.packages.source(record.id);
+    if(source.commit!==record.lastImportedCommit||source.path!==record.path)throw fail('A newer package revision was imported during registration. Import the current revision again to refresh runtime metadata.',409);
+    const prior=this.store.managed.source(record.id);
+    if(prior&&!prior.source.repositoryId)throw fail('Migrate the existing legacy source explicitly before attaching this package.',409);
+    const project=this.projects.materializePackage(record);
+    this.store.managed.saveSource(project.id,record.kind,source,record.id);return this.projects.get(project.id);
+  }
+  async createPackage(repositoryId:string,input:{path:string;kind:'project'|'connector'|'skill';name:string;description?:string;version?:string;template?:'service'|'connector'|'empty';adopt?:boolean;mcp?:ManagedExport['manifest']['mcp'];run?:ManagedExport['manifest']['run']}){
+    const initial=scaffold({id:randomUUID(),kind:input.kind,name:input.name,description:input.description??'',template:input.template??(input.kind==='connector'?'connector':'empty')});
+    const manifest=packageManifestSchema.parse({...initial.manifest,version:input.version??'0.1.0',...(input.mcp?{mcp:input.mcp}:{}),...(input.run?{run:input.run}:{})});
+    if(input.kind==='skill')initial.files['SKILL.md']=`---\nname: ${input.name}\ndescription: ${input.description||input.name}\n---\n\n# ${input.name}\n\nDescribe when and how this skill should be used.\n`;
+    const record=input.adopt?await this.packages.adoptPackage(repositoryId,{path:input.path,manifest}):await this.packages.createPackage(repositoryId,{path:input.path,manifest,files:initial.files});
+    return record;
+  }
+  async packageExport(packageId:string):Promise<ManagedExport>{
+    const revision=this.packageRevision(packageId);
+    return {...revision,files:this.packages.readTextFiles(packageId,revision.source.commit??undefined)};
+  }
+  private packageRevision(packageId:string) {
+    const source=this.packages.source(packageId);
+    return {source,manifest:this.packages.manifest(packageId,source.commit??undefined)};
+  }
+  /** Registered releases use Git objects and need no editor preview. */
+  async readReleaseSource(id:string):Promise<ReleaseSource> {
+    const row=this.row(id);
+    if(!row)throw fail('This project has no managed source yet.',404);
+    const revision=row.source.repositoryId?this.packageRevision(row.packageId):await this.repository.export(row.kind,row.packageId);
+    this.store.managed.saveSource(id,row.kind,revision.source,row.packageId);
+    return revision;
   }
   async readSource(id:string):Promise<ManagedExport>{
     const row=this.row(id);if(!row)throw fail('This project has no managed source yet.',404);
-    const value=await this.repository.export(row.kind,row.packageId);this.store.managed.saveSource(id,row.kind,value.source);return value;
+    const value=row.source.repositoryId?await this.packageExport(row.packageId):await this.repository.export(row.kind,row.packageId);this.store.managed.saveSource(id,row.kind,value.source,row.packageId);return value;
   }
   async writeSource(id:string,raw:unknown){
     const input=sourceWriteInput.parse(raw),row=this.row(id);if(!row)throw fail('Add managed source before saving files.',409);
-    const value=await this.repository.write(row.kind,row.packageId,input.files,input.removedFiles??[],{message:input.message,expectedCommit:input.expectedCommit});this.store.managed.saveSource(id,row.kind,value.source);return value;
+    if(!row.source.repositoryId)throw fail('Migrate this legacy package to a registered repository before editing source.',409);
+    await this.packages.writeTextFiles(row.packageId,input.files,input.removedFiles??[],{message:input.message,expectedCommit:input.expectedCommit,createOnly:input.createOnly});
+    const value=await this.packageExport(row.packageId);this.store.managed.saveSource(id,row.kind,value.source,row.packageId);return value;
   }
   async commitSource(id:string,raw:unknown={},runId?:string){
     const input=sourceCommitInput.parse(raw),row=this.row(id);if(!row)throw fail('This project has no managed source yet.',404);
-    const source=await this.repository.commit(row.kind,row.packageId,input.message??'Save generated project changes',runId);this.store.managed.saveSource(id,row.kind,source);return source;
+    const source=row.source.repositoryId?await this.packages.commit(row.packageId,input.message??'Save project changes',runId):await this.repository.commit(row.kind,row.packageId,input.message??'Save generated project changes',runId);this.store.managed.saveSource(id,row.kind,source,row.packageId);return source;
   }
   async executionDirectory(conversationId:string):Promise<string|undefined>{
     const project=this.store.projects.forConversation(conversationId);if(!project)return;
     const row=this.row(project.id);if(!row)return project.directory;
-    const source=await this.repository.source(row.kind,row.packageId);this.store.managed.saveSource(project.id,row.kind,source);return source.workspacePath;
+    if(!row.source.repositoryId)throw fail('Migrate this legacy package to a registered repository before starting new coding tasks.',409);
+    const source=this.packages.source(row.packageId);
+    if(source.workspaceDiverged)throw fail('Import the committed changes in this package before starting a task in its workspace.',409);
+    this.store.managed.saveSource(project.id,row.kind,source,row.packageId);
+    return source.workspacePath;
   }
   async finishRun(run:{id:string;conversationId:string;status:string}){
     if(!['completed','failed','interrupted'].includes(run.status))return;
-    const project=this.store.projects.forConversation(run.conversationId);if(!project||!this.row(project.id))return;
-    this.store.managed.beginFinalization(run.id,project.id);
-    if(this.store.managed.finalizationCommitted(run.id))return;
-    try{
-      const source=await this.commitSource(project.id,{message:`Save generated changes from ${run.status} task ${run.id}`},run.id);
-      if(!source.commit)throw new Error('Managed source did not produce a commit.');
-      this.store.sourceFinalized(run.id,source.commit,source);
-    }catch(error){
-      this.store.managed.finalizationFailed(run.id,String((error as Error).message));throw error;
+    const project=this.store.projects.forConversation(run.conversationId);
+    if(project&&this.row(project.id)){
+      this.store.managed.beginFinalization(run.id,project.id);
+      if(!this.store.managed.finalizationCommitted(run.id))try{
+        const source=await this.commitSource(project.id,{message:`Save generated changes from ${run.status} task ${run.id}`},run.id);
+        if(!source.commit)throw new Error('Managed source did not produce a commit.');
+        this.store.sourceFinalized(run.id,source.commit,source);
+      }catch(error){this.store.managed.finalizationFailed(run.id,String((error as Error).message));throw error;}
     }
+    for(const {packageId} of this.store.managed.pendingPackages(run.id)){
+      const record=this.packages.store.package(packageId);
+      if(!record){this.store.transaction(()=>{this.store.managed.packageFinalized(run.id,packageId,null);this.store.releaseProject(run.id);});continue;}
+      try{
+        const source=await this.packages.commit(packageId,`Save package changes from ${run.status} task ${run.id}`,run.id);
+        this.store.transaction(()=>{
+          this.store.managed.refreshPackageSource(packageId,source);
+          this.store.managed.packageFinalized(run.id,packageId,source.commit);
+          this.store.releaseProject(run.id);
+        });
+        this.store.addEvent('checkpoint',{summary:`Package source committed at ${source.commit?.slice(0,12)}.`,source},run.id);
+      }catch(error){this.store.managed.packageFinalizationFailed(run.id,packageId,String((error as Error).message));throw error;}
+    }
+    this.store.releaseProject(run.id);
+  }
+  trackPackage(packageId:string,runId?:string,repositoryId?:string){
+    if(!runId)return;const run=this.store.run(runId);if(!run||!['running','waiting'].includes(run.status))throw fail('Package authoring requires an active task.',409);
+    const record=this.packages.store.package(packageId),repository=record?.repositoryId??repositoryId;
+    if(record&&this.packages.source(packageId).workspaceDiverged)throw fail('Import the committed changes in this package before authoring source.',409);
+    this.store.transaction(()=>{if(repository)acquireRepository(this.store.db,repository,runId);this.store.managed.trackPackage(runId,packageId);});
+  }
+  trackProject(id:string,runId?:string,repositoryId?:string){
+    const row=this.store.managed.source(id);this.trackPackage(row?.packageId??id,runId,repositoryId);
   }
   async recoverSource(){
-    for(const run of this.store.managed.pendingFinalizations())await this.finishRun(run);
+    const errors:string[]=[];
+    for(const run of this.store.managed.pendingFinalizations())try{await this.finishRun(run);}catch(error){errors.push(`${run.id}: ${(error as Error).message}`);}
+    if(errors.length)throw fail(`Source recovery needs attention: ${errors.join('; ')}`,409);
   }
   private response<T>(schema:z.ZodType<T>,raw:unknown):T {
     const result=schema.safeParse(raw);if(!result.success)throw fail('The worker returned an invalid managed runtime response.',502);return result.data;
@@ -85,21 +211,27 @@ export class ManagedService {
     if(incomplete||wrongDirectory||wrongCommit)throw fail('The worker returned an unexpected managed release revision or directory.',502);
   }
   async prepare(id:string){
-    return this.prepareExport(id,await this.readSource(id));
+    return this.prepareExport(id,await this.readReleaseSource(id));
   }
-  async prepareExport(id:string,value:ManagedExport){
+  private releaseInput(value:ReleaseSource){
+    const {source,manifest}=value;
+    if(!source.commit||source.dirty)throw fail('Commit source changes before preparing a release.',409);
+    const content=source.repositoryId?{snapshot:createGitSnapshot(this.config,source.repositoryPath,source.commit,source.path)}:{files:value.files};
+    return {source:{commit:source.commit,path:source.path},manifest,...content};
+  }
+  async prepareExport(id:string,value:ReleaseSource){
     const project=this.projects.get(id);
-    if(!value.source.commit||value.source.dirty)throw fail('Commit source changes before preparing a release.',409);
-    const prepared=this.response(managedPreparedResult,await this.receipts.request('managed/prepare',{project:{id,directory:project.directory},source:{commit:value.source.commit,path:value.source.path},manifest:value.manifest,files:value.files}));
-    this.verifyRelease(project,prepared,value.source.commit);return prepared;
+    const input=this.releaseInput(value);
+    const prepared=this.response(managedPreparedResult,await this.receipts.request('managed/prepare',{project:{id,directory:project.directory},...input}));
+    this.verifyRelease(project,prepared,input.source.commit);return prepared;
   }
   async deploy(id:string){
-    const project=this.projects.get(id),value=await this.readSource(id);
-    if(!value.source.commit||value.source.dirty)throw fail('Commit source changes before deploying.',409);
+    const project=this.projects.get(id),value=await this.readReleaseSource(id);
     if(!value.manifest.run)throw fail('The package manifest needs a run command before it can be deployed.');
     const environment=this.store.projects.environment(id);
-    const deployed=this.response(managedDeploymentResult,await this.receipts.request('managed/deploy',{project:{id,directory:project.directory},source:{commit:value.source.commit,path:value.source.path},manifest:value.manifest,files:value.files,...(environment?{environment}:{})}));
-    this.verifyRelease(project,deployed,value.source.commit);
+    const input=this.releaseInput(value);
+    const deployed=this.response(managedDeploymentResult,await this.receipts.request('managed/deploy',{project:{id,directory:project.directory},...input,...(environment?{environment}:{})}));
+    this.verifyRelease(project,deployed,input.source.commit);
     this.store.managed.saveDeployment(id,deployed);
     this.registerService(id,deployed.unitName);
     return deployed;

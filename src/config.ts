@@ -15,7 +15,7 @@ export interface Config {
   improvementMaxTurns: number; allowTempState: boolean;
   requireRootWorker?: boolean;
   projectsDir?: string;
-  /** Git repository used for generated packages; runtime state remains outside it. */
+  /** Legacy generated-source checkout, retained for explicit migration only. */
   repositoryPath?: string;
   workerId?:string;workerDir?:string;workerMode?:WorkerRecord['mode'];effort?:WorkerRecord['effort'];
 }

@@ -12,6 +12,132 @@ async function nextPaint(page: Page) {
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
+async function browserRepository(page: Page) {
+  const session = await (await page.request.get('/api/session')).json();
+  const response = await page.request.post('/api/repositories', { headers: { 'x-csrf-token': session.csrfToken, origin: new URL(page.url()).origin }, data: { name: `Browser repository ${randomUUID().slice(0, 8)}`, remoteUrl: `https://example.invalid/local-${randomUUID()}.git`, mode: 'create' } });
+  expect(response.ok(), await response.text()).toBe(true);
+  return response.json();
+}
+
+test('Repositories creates three package kinds in one local checkout and reimports exact revisions', async ({ page }, testInfo) => {
+  const suffix = randomUUID().slice(0, 8), name = `Package repository ${suffix}`;
+  const pageErrors: string[] = [];
+  page.on('pageerror', cause => pageErrors.push(cause.message));
+  await login(page);
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await page.getByLabel('Repository name', { exact: true }).fill(name);
+  await expect(page.getByRole('button', { name: 'Register repository', exact: true })).toBeDisabled();
+  await page.getByLabel('Remote URL', { exact: true }).fill(`https://example.invalid/operator-${suffix}.git`);
+  await page.getByRole('button', { name: 'Register repository', exact: true }).click();
+  await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
+  await expect(page.getByText('Commits are saved locally. Remote pushes are disabled.')).toBeVisible();
+  for (const kind of ['project', 'connector', 'skill']) {
+    await page.getByRole('button', { name: 'Create package', exact: true }).click();
+    const editor = page.locator('.repository-package-editor');
+    await editor.getByLabel('Package kind', { exact: true }).selectOption(kind);
+    await editor.getByLabel('Package name', { exact: true }).fill(`browser-${kind}-${suffix}`);
+    await editor.getByLabel('Folder in repository', { exact: true }).fill(`${kind}s/${suffix}`);
+    await editor.getByLabel('Package version', { exact: true }).fill('1.2.3');
+    await editor.getByRole('button', { name: 'Create package', exact: true }).click();
+    await expect(page.locator('.repository-package').filter({ hasText: `browser-${kind}-${suffix}` })).toContainText('v1.2.3');
+  }
+  await expect(page.locator('.repository-package')).toHaveCount(3);
+  await page.getByRole('button', { name: 'Discover packages', exact: true }).click();
+  const discovery = page.getByRole('region', { name: 'Discovered packages' });
+  await expect(discovery.locator('.package-candidate')).toHaveCount(3);
+  await expect(discovery.getByRole('checkbox')).toHaveCount(3);
+  await discovery.getByRole('button', { name: 'Import selected (3)', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Selected packages imported.' })).toBeVisible();
+  await page.getByRole('button', { name: 'Discover packages', exact: true }).click();
+  await discovery.getByRole('button', { name: 'Import selected (3)', exact: true }).click();
+  await expect(page.locator('.repository-package')).toHaveCount(3);
+  const project = page.locator('.repository-package').filter({ hasText: `browser-project-${suffix}` });
+  await project.getByRole('button', { name: 'Import history', exact: true }).click();
+  await expect(project.getByLabel('Package import history')).toContainText('1.2.3');
+  await expect(project.getByLabel('Package import history')).toContainText('Schema 1');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('repository-packages-phone.png'), fullPage: true, animations: 'disabled' });
+  expect(pageErrors).toEqual([]);
+});
+
+test('Repository import preview isolates invalid manifests and preserves last imported package after a failed update', async ({ page }) => {
+  const id = randomUUID(), packageId = randomUUID(), commit = 'a'.repeat(40);
+  const repository = { id, name: 'Review packages', remoteUrl: 'https://example.invalid/review.git', directory: '/tmp/review', branch: 'operator/work', status: 'ready' };
+  const manifest = { schemaVersion: 1, id: packageId, kind: 'project', name: 'Known project', version: '1.0.0' };
+  const item = { id: packageId, repositoryId: id, path: 'apps/known', kind: 'project', name: manifest.name, version: manifest.version, manifest, lastImportedCommit: commit, lastImportedAt: '2026-11-18T10:00:00Z' };
+  let submitted: unknown, importCalls = 0, remoteFetches = 0;
+  await page.route('**/api/repositories', route => route.fulfill({ json: [repository] }));
+  await page.route('**/api/packages', route => route.fulfill({ json: [item] }));
+  await page.route(`**/api/repositories/${id}/discover`, route => {
+    if (route.request().method() === 'POST') {
+      remoteFetches++;
+      expect(route.request().postDataJSON()).toEqual({ refresh: true });
+      expect(route.request().headers()['x-csrf-token']).toBeTruthy();
+    }
+    return route.fulfill({ json: { repository, commit, packages: [{ path: item.path, manifest, imported: true }, { path: 'apps/broken', error: 'schemaVersion must be 1' }], errors: [] } });
+  });
+  await page.route(`**/api/repositories/${id}/import`, route => { submitted = route.request().postDataJSON(); importCalls++; return route.fulfill({ json: importCalls === 1 ? { packages: [], imports: [{ id: 'failed-current', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit, error: 'Duplicate canonical package ID in another repository.' }] } : { packages: [item], imports: [], registrations: [{ packageId, notice: 'Source imported; runtime registration needs attention: worker unavailable.' }] } }); });
+  await page.route(`**/api/repositories/${id}/imports`, route => route.fulfill({ json: [{ id: 'failed', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit: 'b'.repeat(40), error: 'Duplicate canonical package ID in another repository.', createdAt: '2026-11-18T11:00:00Z' }, { id: 'success', packageId, path: item.path, status: 'imported', packageVersion: '1.0.0', schemaVersion: 1, commit, createdAt: item.lastImportedAt }] }));
+  await login(page);
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('button', { name: 'Discover packages', exact: true }).click();
+  await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
+  expect(remoteFetches).toBe(0);
+  await page.getByRole('button', { name: 'Fetch & preview remote' }).click();
+  await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
+  expect(remoteFetches).toBe(1);
+  await expect(page.getByText('schemaVersion must be 1', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Duplicate canonical package ID');
+  expect(submitted).toEqual({ paths: ['apps/known'], expectedCommit: commit });
+  await expect(page.locator('.repository-package')).toContainText('v1.0.0');
+  await page.getByRole('button', { name: 'Import history', exact: true }).click();
+  const history = page.getByLabel('Package import history');
+  await expect(history).toContainText('v2.0.0');
+  await expect(history).toContainText('failed');
+  await expect(history).toContainText('v1.0.0');
+  await expect(history).toContainText('imported');
+  await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'runtime registration needs attention' })).toContainText('worker unavailable');
+});
+
+test('Repositories clones a selected remote and adopts connector metadata without running it', async ({ page }) => {
+  const id = randomUUID(), packageId = randomUUID(), commit = 'c'.repeat(40);
+  const repository = { id, name: 'Cloned tools', remoteUrl: 'git@example.invalid:owner/tools.git', directory: '/tmp/cloned-tools', branch: 'operator/work', sourceBranch: 'master', status: 'ready' };
+  let registered = false, adopted = false, cloneInput: unknown, adoptInput: unknown;
+  await page.route('**/api/repositories', route => {
+    if (route.request().method() === 'POST') { cloneInput = route.request().postDataJSON(); registered = true; return route.fulfill({ json: repository }); }
+    return route.fulfill({ json: registered ? [repository] : [] });
+  });
+  const item = { id: packageId, repositoryId: id, kind: 'connector', name: 'analytics-tools', version: '0.1.0', path: 'tools/analytics', lastImportedCommit: commit, lastImportedAt: '2026-11-18T12:00:00Z' };
+  await page.route('**/api/packages', route => route.fulfill(adopted ? { status: 503, json: { error: 'Temporary status refresh failure.' } } : { json: [] }));
+  await page.route(`**/api/repositories/${id}/packages`, route => { adoptInput = route.request().postDataJSON(); adopted = true; return route.fulfill({ json: { ...item, notice: 'Source imported; runtime registration needs attention: account authorization required.' } }); });
+  await login(page);
+  await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await page.getByLabel('Repository name', { exact: true }).fill(repository.name);
+  await page.getByLabel('Remote URL', { exact: true }).fill(repository.remoteUrl);
+  await page.getByLabel('Start with', { exact: true }).selectOption('clone');
+  await page.getByRole('button', { name: 'Register repository', exact: true }).click();
+  await expect(page.getByRole('heading', { name: repository.name, exact: true })).toBeVisible();
+  expect(cloneInput).toEqual({ name: repository.name, remoteUrl: repository.remoteUrl, mode: 'clone' });
+  await page.getByRole('button', { name: 'Adopt folder', exact: true }).click();
+  await page.getByLabel('Package kind', { exact: true }).selectOption('connector');
+  await page.getByLabel('Package name', { exact: true }).fill('analytics-tools');
+  await page.getByLabel('Folder in repository', { exact: true }).fill('tools/analytics');
+  await page.getByLabel('MCP command', { exact: true }).fill('python3');
+  await page.getByLabel('MCP arguments (one per line)', { exact: true }).fill('server.py\n--stdio');
+  await expect(page.locator('.repository-package-editor')).toContainText('No build, check, or start command is executed.');
+  await page.locator('.repository-package-editor').getByRole('button', { name: 'Adopt folder', exact: true }).click();
+  await expect(page.locator('.repository-package')).toContainText('analytics-tools');
+  await expect(page.locator('.repository-package-editor')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Changes saved. Could not refresh repository status.');
+  await expect(page.getByRole('status').filter({ hasText: 'runtime registration needs attention' })).toContainText('account authorization required');
+  expect(adoptInput).toEqual({ kind: 'connector', name: 'analytics-tools', path: 'tools/analytics', version: '0.1.0', description: '', adopt: true, template: 'empty', mcp: { transport: 'stdio', command: 'python3', args: ['server.py', '--stdio'] } });
+});
+
 test('authenticated workspace persists queued work, memory revisions, and owner instructions', async ({ page, context }, testInfo) => {
   const pageErrors: string[] = [];
   page.on('pageerror', error => pageErrors.push(error.message));
@@ -205,12 +331,15 @@ test('sending a task preserves a new draft typed while its response is pending',
 
 test('Projects registers durable website context and opens a linked operator conversation', async ({ page }) => {
   await login(page);
+  const repository = await browserRepository(page);
   await page.getByRole('button', { name: 'Projects', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Create project', exact: true }).click();
   const projectEditor = page.locator('.project-editor');
   await projectEditor.getByLabel('Project name', { exact: true }).fill('Browser project website');
   await projectEditor.getByLabel('Description', { exact: true }).fill('Keep the website and its operating context together.');
+  await projectEditor.getByLabel('Git repository', { exact: true }).selectOption(repository.id);
+  await projectEditor.getByLabel('Folder in repository', { exact: true }).fill('apps/browser-website');
   await projectEditor.getByRole('button', { name: 'Create project', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Browser project website', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Add component', exact: true }).click();
@@ -293,7 +422,7 @@ test('managed source saves a commit before deployment and distinguishes the runn
   await page.setViewportSize({ width: 390, height: 844 });
   const id = '27c0f87b-a744-4ffc-bfa5-12950b49345b';
   const connectorId = 'f207c528-e775-4aa0-a939-d8776b487660';
-  const source = { repositoryPath: '/tmp/browser-repository', branch: 'operator/generated', path: `generated/projects/${id}`, workspacePath: `/tmp/browser-workspace/generated/projects/${id}`, commit: 'a'.repeat(40), dirty: false };
+  const source = { repositoryId: randomUUID(), packageId: id, repositoryPath: '/tmp/browser-repository', branch: 'operator/work', path: `projects/${id}`, workspacePath: `/tmp/browser-workspace/generated/projects/${id}`, commit: 'a'.repeat(40), dirty: false };
   const project = { id, name: 'Managed service fixture', description: 'Fixture source and release', origin: 'created', directory: `/srv/projects/${id}`, createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z', status: 'running', lastCheckedAt: null, conversationIds: [], runs: [], components: [], connectorIds: [] as string[], source, deployment: { commit: 'b'.repeat(40), unitName: 'fixture-managed.service', releaseDirectory: '/srv/projects/releases/previous', status: 'running', detail: 'Fixture service is running.', checkedAt: new Date().toISOString() } };
   const connector = { id: connectorId, name: 'Fixture echo', description: 'Echo test tool', transport: 'stdio', command: 'node', args: ['server.mjs'], enabled: true, tools: [{ name: 'echo', inputSchema: { type: 'object' } }], status: 'connected', detail: 'Fixture', checkedAt: null };
   let files: Record<string, string> = { 'operator-package.json': JSON.stringify({ schemaVersion: 1, id, kind: 'project', name: project.name }), 'server.mjs': 'export const message = "before";\n' };
@@ -371,8 +500,10 @@ test('Connections creates a local demo, discovers tools, validates JSON, and sho
   const id = '9d995377-c583-485e-aedf-48b2abbc2cd4';
   const connector = { id, name: 'Local echo fixture', description: 'HTTP fixture for the local demo flow', transport: 'stdio', command: 'node', args: ['server.mjs'], enabled: true, tools: [] as { name: string; description: string; inputSchema: unknown }[], status: 'untested', detail: 'Test to discover tools.', checkedAt: null as string | null };
   let registered = false, calls = 0;
+  const repository = { id: '9d88b607-ffef-4783-9f70-fe350a90d3b0', name: 'Demo repository', remoteUrl: 'https://example.invalid/demo.git', directory: '/tmp/demo', branch: 'operator/work', status: 'ready' };
+  await page.route('**/api/repositories', route => route.fulfill({ json: [repository] }));
   await page.route('**/api/connectors', route => route.fulfill({ json: registered ? [connector] : [] }));
-  await page.route('**/api/connectors/examples', route => { registered = true; return route.fulfill({ json: connector }); });
+  await page.route('**/api/connectors/examples', route => { expect(route.request().postDataJSON()).toEqual({ repositoryId: repository.id, packagePath: 'connectors/echo' }); registered = true; return route.fulfill({ json: connector }); });
   await page.route(`**/api/connectors/${id}/test`, route => {
     connector.status = 'connected'; connector.detail = 'Discovered 1 MCP tool.'; connector.checkedAt = '2026-11-15T10:00:00Z';
     connector.tools = [{ name: 'echo', description: 'Echo a text value', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }];
@@ -386,6 +517,9 @@ test('Connections creates a local demo, discovers tools, validates JSON, and sho
   await login(page);
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await page.locator('.management-heading-actions').getByRole('button', { name: 'Create local demo' }).click();
+  await page.getByLabel('Git repository', { exact: true }).selectOption(repository.id);
+  await page.getByLabel('Folder in repository', { exact: true }).fill('connectors/echo');
+  await page.getByRole('button', { name: 'Create demo package', exact: true }).click();
   await expect(page.getByRole('heading', { name: connector.name, exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Test connection', exact: true }).click();
   await expect(page.getByLabel('Tool to test', { exact: true })).toHaveValue('echo');
@@ -429,9 +563,9 @@ test('Connections registers an HTTP server without credential fields', async ({ 
   expect(submitted).toEqual({ name: connector.name, description: '', transport: 'http', projectId: null, enabled: true, url: connector.url });
 });
 
-async function sourceReviewFixture(page: Page) {
+async function sourceReviewFixture(page: Page, mode: 'legacy' | 'diverged' | 'current' = 'current') {
   const id = '944396de-488a-4412-9ad7-ac98f9abe875';
-  const source = { repositoryPath: '/tmp/review-repository', branch: 'operator/generated', path: `generated/projects/${id}`, workspacePath: `/tmp/review-workspace/${id}`, commit: '1'.repeat(40), dirty: false };
+  const source = { workspaceDiverged: mode === 'diverged', repositoryId: mode === 'legacy' ? undefined : randomUUID(), packageId: id, repositoryPath: '/tmp/review-repository', branch: 'operator/work', path: `projects/${id}`, workspacePath: `/tmp/review-workspace/${id}`, commit: '1'.repeat(40), dirty: false };
   const manifest = { schemaVersion: 1, id, kind: 'project', name: 'Source review fixture', description: '', run: { command: 'node', args: ['server.mjs'] } };
   const files: Record<string, string> = { 'server.mjs': 'export const value = "original";\n', 'operator-package.json': JSON.stringify(manifest) };
   const project = { id, name: manifest.name, description: '', origin: 'created', directory: `/tmp/review-projects/${id}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'ready', lastCheckedAt: null, conversationIds: [], runs: [], components: [], connectorIds: [] as string[], source };
@@ -446,6 +580,61 @@ async function sourceReviewFixture(page: Page) {
   await page.route(`**/api/projects/${id}/source`, route => route.fulfill({ json: { source, manifest, files } }));
   return { project, projects, source, files, manifest, connectors };
 }
+
+test('legacy source remains readable and migration unlocks editing', async ({ page }) => {
+  const { source, manifest, files, project } = await sourceReviewFixture(page, 'legacy');
+  const repositoryId = randomUUID();
+  await page.route('**/api/repositories', route => route.fulfill({ json: [{ id: repositoryId, name: 'Migration target', status: 'ready' }] }));
+  await page.route(`**/api/projects/${project.id}/source/migrate`, route => {
+    expect(route.request().postDataJSON()).toEqual({ repositoryId, packagePath: 'apps/service' });
+    source.repositoryId = repositoryId;
+    source.path = 'apps/service';
+    return route.fulfill({ json: { source, manifest, files } });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const workspace = page.getByRole('region', { name: 'Source and deployment' });
+  await workspace.getByLabel('Source file', { exact: true }).selectOption('server.mjs');
+  await expect(workspace.getByLabel('Source code')).not.toBeEditable();
+  await workspace.getByText('Move legacy source into a registered repository').click();
+  await workspace.getByLabel('Git repository', { exact: true }).selectOption(repositoryId);
+  await workspace.getByLabel('Folder in repository').fill('apps/service');
+  await workspace.getByRole('button', { name: 'Migrate source' }).click();
+  await expect(workspace.getByLabel('Source code')).toBeEditable();
+});
+
+test('a divergent checkout blocks source writes and permits deploying the imported revision', async ({ page }) => {
+  await sourceReviewFixture(page, 'diverged');
+  await login(page);
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const workspace = page.getByRole('region', { name: 'Source and deployment' });
+  await expect(workspace.getByRole('status')).toContainText('checkout differs from the imported revision');
+  await expect(workspace.getByLabel('Source code')).not.toBeEditable();
+  await expect(workspace.getByRole('button', { name: 'Add file', exact: true })).toBeDisabled();
+  await expect(workspace.getByRole('button', { name: 'Deploy committed source', exact: true })).toBeEnabled();
+});
+
+test('adding a filename from the text editor preserves an existing binary asset and the rejected draft', async ({ page }) => {
+  const { source, project, manifest, files } = await sourceReviewFixture(page);
+  let submitted: unknown;
+  await page.route(`**/api/projects/${project.id}/source`, route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { source, manifest, files } });
+    submitted = route.request().postDataJSON();
+    return route.fulfill({ status: 409, json: { error: 'This path exists in the package. Choose a different filename.' } });
+  });
+  await login(page);
+  await page.getByRole('button', { name: 'Projects', exact: true }).click();
+  const workspace = page.getByRole('region', { name: 'Source and deployment' });
+  await workspace.getByLabel('Source file', { exact: true }).selectOption('server.mjs');
+  await workspace.getByLabel('Source code').fill('first edit');
+  await workspace.getByLabel('New source file path').fill('assets/logo.png');
+  await workspace.getByRole('button', { name: 'Add file', exact: true }).click();
+  await workspace.getByLabel('Source code').fill('new draft');
+  await workspace.getByRole('button', { name: 'Save & commit', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Choose a different filename');
+  expect(submitted).toEqual({ expectedCommit: source.commit, files: { 'assets/logo.png': 'new draft', 'server.mjs': 'first edit' }, createOnly: ['assets/logo.png'] });
+  await expect(workspace.getByLabel('Source code')).toHaveValue('new draft');
+});
 
 function deferred() {
   let resolve!: () => void;

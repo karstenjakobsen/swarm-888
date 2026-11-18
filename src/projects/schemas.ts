@@ -21,6 +21,7 @@ export const projectCreateInput = z.object({
   name, description:description.default(''), origin:z.enum(['created','adopted']).default('created'),
   directory:z.string().min(1).max(2000).optional(),
   managed:z.boolean().optional(),template:z.enum(['service','empty']).optional(),
+  repositoryId:z.string().uuid().optional(),packagePath:z.string().min(1).max(1000).optional(),
 }).strict().refine(value => value.origin === 'adopted' || value.directory === undefined, 'Created projects receive a server-assigned directory');
 export const projectUpdateInput = z.object({name:name.optional(),description:description.optional(),defaultWorkerId:workerId.nullable().optional()}).strict();
 export const componentInput = z.object({

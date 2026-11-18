@@ -13,19 +13,22 @@ import { markCleanupUncertain, markExternalEffects, signalOwned, spawnOwned, ter
 import { projectEnvironmentSchema } from '../credentials/schemas.ts';
 import { resolveProjectSecrets } from '../credentials/runtime.ts';
 import { serviceConfiguration,serviceDescriptorPath,serviceLaunchSchema,type ServiceLaunch } from './service-launch.ts';
+import { gitSnapshotSchema, openGitSnapshot, copyGitSnapshot, verifySnapshotRelease, snapshotText } from '../managed/snapshot.ts';
 
-export const managedPrepareInput=z.object({
+const managedSnapshotInput=z.object({
   project:projectReferenceSchema,source:z.object({commit:z.string().regex(/^[0-9a-f]{40,64}$/),path:z.string().max(2000)}).strict(),
-  manifest:managedManifestSchema,files:managedFilesSchema,
+  manifest:managedManifestSchema,files:managedFilesSchema.optional(),snapshot:gitSnapshotSchema.optional(),
 }).strict();
-export const managedDeployInput=managedPrepareInput.extend({environment:projectEnvironmentSchema.nullable().optional()});
+const oneSnapshot=(input:{files?:unknown;snapshot?:unknown})=>Boolean(input.files)!==Boolean(input.snapshot);
+export const managedPrepareInput=managedSnapshotInput.refine(oneSnapshot,'Provide exactly one committed files map or Git snapshot.');
+export const managedDeployInput=managedSnapshotInput.extend({environment:projectEnvironmentSchema.nullable().optional()}).refine(oneSnapshot,'Provide exactly one committed files map or Git snapshot.');
 export const managedLifecycleInput=z.object({project:projectReferenceSchema}).strict();
 type PrepareInput=z.infer<typeof managedPrepareInput>;
 type LifecycleInput=z.infer<typeof managedLifecycleInput>;
 export type ManagedCommand=(command:string,args:string[],options:{cwd?:string;timeoutMs:number;signal:AbortSignal})=>Promise<{stdout:string;stderr:string;exitCode:number;truncated:boolean}>;
 export interface ManagedServiceHost {isRoot:()=>boolean;writeUnit:(name:string,content:string)=>void}
 const metadataName='.operator-release.json';
-const marker=z.object({commit:z.string().regex(/^[0-9a-f]{40,64}$/),path:z.string(),digest:z.string().regex(/^[0-9a-f]{64}$/)}).strict();
+const marker=z.object({commit:z.string().regex(/^[0-9a-f]{40,64}$/),path:z.string(),digest:z.string().regex(/^[0-9a-f]{64}$/),packageId:z.string().uuid().optional(),kind:z.enum(['project','connector','skill']).optional()}).strict();
 type Status=z.infer<typeof managedStatusResult>;
 
 /** Every helper owns a separate process group so timeouts also terminate descendants. */
@@ -51,7 +54,7 @@ export function managedCommand(config:Config):ManagedCommand {
 }
 
 function digest(input:PrepareInput):string {
-  return createHash('sha256').update(JSON.stringify({manifest:input.manifest,files:Object.entries(input.files).sort(([a],[b])=>a<b?-1:a>b?1:0)})).digest('hex');
+  return createHash('sha256').update(JSON.stringify({manifest:input.manifest,files:Object.entries(input.files??{}).sort(([a],[b])=>a<b?-1:a>b?1:0)})).digest('hex');
 }
 function safeFile(name:string):boolean { return name.length<=2000&&!name.startsWith('/')&&!name.includes('\\')&&!name.includes('\0')&&name.split('/').every(piece=>piece&&piece!=='.'&&piece!=='..')&&name!==metadataName; }
 function readReleaseFile(path:string,limit:number):string {
@@ -111,24 +114,27 @@ export class ManagedRuntime {
   }
   private prepareSnapshot(input:PrepareInput):{releaseDirectory:string;commit:string;checkedAt:string} {
     validateProjectReference(this.config,input.project);
-    if(input.manifest.id!==input.project.id||input.source.path!==managedPath(input.manifest.kind,input.manifest.id))throw new Error('Managed source identity does not match its project and package manifest.');
-    const names=Object.keys(input.files);if(!names.length||names.some(name=>!safeFile(name)))throw new Error('Release files must use relative paths inside the committed package.');
+    if(input.manifest.id!==input.project.id||(!input.snapshot&&input.source.path!==managedPath(input.manifest.kind,input.manifest.id)))throw new Error('Managed source identity does not match its project and package manifest.');
+    const snapshot=input.snapshot?openGitSnapshot(this.config,input.snapshot,input.source):undefined,files=input.files??{};
+    const names=Object.keys(files);if(!snapshot&&(!names.length||names.some(name=>!safeFile(name))))throw new Error('Release files must use relative paths inside the committed package.');
     let exportedManifest;
-    try{exportedManifest=managedManifestSchema.parse(JSON.parse(input.files['operator-package.json']??''));}catch{throw new Error('Committed source must include a valid operator-package.json.');}
+    try{exportedManifest=managedManifestSchema.parse(JSON.parse(snapshot?snapshotText(snapshot,'operator-package.json'):files['operator-package.json']??''));}catch{throw new Error('Committed source must include a valid operator-package.json.');}
     if(JSON.stringify(exportedManifest)!==JSON.stringify(input.manifest))throw new Error('Committed package manifest differs from the deployment manifest.');
     prepareExecutionDirectory(this.config,input.project.directory);
     const releases=join(input.project.directory,'releases');prepareExecutionDirectory(this.config,releases);
-    const releaseDirectory=join(releases,input.source.commit),expected={commit:input.source.commit,path:input.source.path,digest:digest(input)};
+    const releaseDirectory=join(releases,input.source.commit),expected={commit:input.source.commit,path:input.source.path,digest:input.snapshot?.digest??digest(input),...(snapshot?{packageId:input.manifest.id,kind:input.manifest.kind}:{})};
     if(existsSync(releaseDirectory)){
       if(realpathSync(releaseDirectory)!==releaseDirectory||!lstatSync(releaseDirectory).isDirectory())throw new Error('Release directory must remain canonical.');
       if(JSON.stringify(marker.parse(JSON.parse(readReleaseFile(join(releaseDirectory,metadataName),8000))))!==JSON.stringify(expected))throw new Error('This committed revision already has a different runtime snapshot.');
-      for(const [name,content] of Object.entries(input.files)){
+      if(snapshot)verifySnapshotRelease(snapshot,releaseDirectory);
+      for(const [name,content] of Object.entries(files)){
         const path=join(releaseDirectory,name);if(readReleaseFile(path,Buffer.byteLength(content))!==content)throw new Error('Existing release source differs from its committed snapshot.');
       }
     }else{
       const staging=join(releases,`.prepare-${randomUUID()}`);mkdirSync(staging,{mode:0o700});
       try{
-        for(const [name,content] of Object.entries(input.files)){
+        if(snapshot)copyGitSnapshot(snapshot,staging);
+        for(const [name,content] of Object.entries(files)){
           const path=join(staging,name);mkdirSync(dirname(path),{recursive:true,mode:0o700});writeFileSync(path,content,{flag:'wx',mode:0o600});
         }
         writeFileSync(join(staging,metadataName),JSON.stringify(expected),{flag:'wx',mode:0o600});renameSync(staging,releaseDirectory);
@@ -190,7 +196,7 @@ export class ManagedRuntime {
     const directory=state.WorkingDirectory,releases=join(input.project.directory,'releases');
     if(!directory||!inside(releases,directory)||realpathSync(directory)!==directory)throw new Error('Managed service working directory does not match this project release.');
     const revision=marker.parse(JSON.parse(readReleaseFile(join(directory,metadataName),8000)));
-    if(![managedPath('project',input.project.id),managedPath('connector',input.project.id)].includes(revision.path))throw new Error('Managed service release identity does not match this project.');
+    if(revision.packageId?revision.packageId!==input.project.id||!['project','connector'].includes(revision.kind??''):![managedPath('project',input.project.id),managedPath('connector',input.project.id)].includes(revision.path))throw new Error('Managed service release identity does not match this project.');
     return {...base,status:['active','reloading'].includes(state.ActiveState)?'running':state.ActiveState==='failed'?'failed':state.ActiveState==='inactive'?'stopped':'unknown',detail:`Service is ${state.ActiveState}/${state.SubState??'unknown'}.${state.Result&&state.Result!=='success'?` Result: ${state.Result}.`:''}`,releaseDirectory:directory,commit:revision.commit};
   }
   status(raw:unknown):Promise<Status> { const input=managedLifecycleInput.parse(raw);return this.observation(()=>this.observe(input)); }

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { storedRun } from '../persistence/runs.ts';
 import { transaction } from '../persistence/transaction.ts';
+import { acquireRepository,projectRepository } from '../packages/leases.ts';
 import { componentObservation, type ComponentInput, type ComponentObservation, type Project, type ProjectComponent, type ProjectStatus, type ProjectDeployment } from './schemas.ts';
 
 type ProjectRow = Pick<Project,'id'|'name'|'description'|'directory'|'origin'|'createdAt'|'updatedAt'>;
@@ -27,6 +28,14 @@ export class ProjectStore {
     this.db.prepare('INSERT INTO projects(id,name,description,directory,origin,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)').run(row.id,row.name,row.description,row.directory,row.origin,row.createdAt,row.updatedAt);
     return this.get(row.id)!;
   }
+  discardUninitialized(id:string):void {
+    this.transaction(()=>{
+      if(this.db.prepare('SELECT 1 FROM project_sources WHERE projectId=? UNION ALL SELECT 1 FROM project_components WHERE projectId=? UNION ALL SELECT 1 FROM project_deployments WHERE projectId=? LIMIT 1').get(id,id,id))throw failure('Project initialization cannot be rolled back after source or runtime resources were registered.',409);
+      this.db.prepare('DELETE FROM project_conversations WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM project_leases WHERE projectId=?').run(id);
+      this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
+    });
+  }
   update(id:string,input:{name?:string;description?:string;defaultWorkerId?:string|null}):Project {
     const project=this.get(id);if(!project)throw failure('Project not found',404);
     if(input.defaultWorkerId&&input.defaultWorkerId!=='default'&&!this.db.prepare('SELECT 1 FROM workers WHERE id=?').get(input.defaultWorkerId))throw failure('Default worker is not registered',404);
@@ -47,6 +56,8 @@ export class ProjectStore {
       )`;
       if(this.db.prepare(`${affected} SELECT r.id FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId JOIN affected_projects a ON a.id=pc.projectId WHERE r.status IN ('queued','running','waiting','uncertain') LIMIT 1`).get(id,id))throw failure('Finish or reconcile tasks for this project and projects using its connections before removing it.',409);
       if(this.db.prepare(`${affected} SELECT sf.runId FROM source_finalizations sf JOIN affected_projects a ON a.id=sf.projectId WHERE sf.state='pending' LIMIT 1`).get(id,id))throw failure('Finish pending source commits before removing this project.',409);
+      const repositoryId=projectRepository(this.db,id);
+      if(repositoryId&&this.db.prepare('SELECT 1 FROM repository_leases WHERE repositoryId=?').get(repositoryId))throw failure('Finish or reconcile the task writing this repository before removing its project.',409);
       // Connector receipts may have no project ID, so every unacknowledged result
       // must be recovered before registrations can be removed.
       if(this.db.prepare('SELECT operationId FROM runtime_receipts WHERE acknowledgedAt IS NULL LIMIT 1').get())throw failure('Acknowledge pending runtime result receipts before removing project registrations.',409);
@@ -98,6 +109,7 @@ export class ProjectStore {
       if(linked){if(linked.projectId!==projectId)throw failure('Conversation already belongs to another project',409);return;}
       const active=this.db.prepare("SELECT id,attemptId FROM runs WHERE conversationId=? AND status IN ('running','waiting','uncertain') LIMIT 1").get(conversationId);
       if(active){
+        const repositoryId=projectRepository(this.db,projectId);if(repositoryId)acquireRepository(this.db,repositoryId,String(active.id));
         const conflict=this.db.prepare("SELECT 1 FROM project_leases WHERE projectId=? AND runId<>? UNION ALL SELECT 1 FROM runs r JOIN project_conversations pc ON pc.conversationId=r.conversationId WHERE pc.projectId=? AND r.id<>? AND r.status IN ('running','waiting','uncertain') UNION ALL SELECT 1 FROM source_finalizations WHERE projectId=? AND state='pending' LIMIT 1").get(projectId,active.id,projectId,active.id,projectId);
         if(conflict)throw failure('Another task owns this project until execution and source finalization finish.',409);
         this.db.prepare('INSERT INTO project_leases(projectId,runId,attemptId,acquiredAt) VALUES(?,?,?,?) ON CONFLICT(projectId) DO NOTHING').run(projectId,active.id,active.attemptId??'legacy',new Date().toISOString());

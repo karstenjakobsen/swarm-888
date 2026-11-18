@@ -91,6 +91,23 @@ test('parallel connector registrations preserve both additions to the accepted t
   }finally{release();await f.close();}
 });
 
+test('chat-created connector packages use the same task grants as newly registered connections',async()=>{
+  const f=await fixture(true);
+  try{
+    const repository=await f.ctl.managed.packages.register({name:'Task connectors',remoteUrl:'https://example.test/task.git',mode:'create'});
+    for(const explicit of [false,true]){
+      const conversation=f.ctl.store.newConversation();
+      const run=f.ctl.store.enqueue(conversation.id,'Create a connector',randomUUID(),'user',null,explicit?{requiredConnectorIds:[]}:{});
+      f.ctl.store.claim(run.id,{id:'default'},f.worker.health());
+      const path=explicit?'explicit':'inherited';
+      const record=await f.tool(run.id,'package_create',{repositoryId:repository.id,path,kind:'connector',name:path}) as {connection:{id:string}};
+      assert.deepEqual(f.ctl.store.run(run.id)?.grantedConnectorIds,explicit?[]:[record.connection.id]);
+      f.ctl.store.transition(run.id,'interrupted');
+      await f.ctl.managed.finishRun(f.ctl.store.run(run.id)!);
+    }
+  }finally{await f.close();}
+});
+
 test('failed journal synchronization expires the owning attempt without reassigning it',async()=>{
   const f=await fixture();try{
     const conversation=f.ctl.store.newConversation(),run=f.ctl.store.enqueue(conversation.id,'Bounded fixture',randomUUID());await f.ctl.queue.tick();assert.equal(f.ctl.store.run(run.id)?.status,'running');

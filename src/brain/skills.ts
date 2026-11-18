@@ -105,7 +105,7 @@ export class SkillStore {
       .map(r => ({id:r.id,version:Number(r.version),runId:r.run_id,outcome:r.outcome,summary:r.summary,metrics:r.metrics ? JSON.parse(r.metrics) : null,createdAt:r.created_at}));
     return {...summary,versions,usage};
   }
-  create(raw:unknown) {
+  create(raw:unknown,source?:ManagedSource) {
     const {input,meta}=this.checkCandidate(raw);
     const version=Number((this.db.prepare('SELECT COALESCE(MAX(version),0)+1 AS version FROM skill_versions WHERE name=?').get(input.name) as Row).version);
     const target=path.join(this.root,'staging',`${input.name}-v${version}`), temporary=`${target}.${randomUUID()}.tmp`,now=new Date().toISOString();
@@ -119,6 +119,7 @@ export class SkillStore {
         this.db.prepare(`INSERT INTO skills(name,description,state,active_version,created_at,updated_at) VALUES(?,?,'candidate',NULL,?,?)
           ON CONFLICT(name) DO UPDATE SET updated_at=excluded.updated_at`).run(input.name,meta.description,now,now);
         this.db.prepare(`INSERT INTO skill_versions(name,version,state,path,description,created_at) VALUES(?,?,'candidate',?,?,?)`).run(input.name,version,target,meta.description,now);
+        if(source)this.db.prepare('INSERT INTO skill_version_sources(name,version,source) VALUES(?,?,?)').run(input.name,version,JSON.stringify(source));
         this.db.exec('COMMIT');
       } catch(error) { this.db.exec('ROLLBACK'); fs.rmSync(target,{recursive:true,force:true}); throw error; }
     } catch(error) { fs.rmSync(temporary,{recursive:true,force:true}); throw error; }
@@ -141,9 +142,24 @@ export class SkillStore {
     if(meta.name!==input.name) throw new Error('Skill name and SKILL.md metadata must match');
     return {input,meta};
   }
-  candidate(name:string,version:number){const row=this.version(name,version),manifest=JSON.parse(fs.readFileSync(path.join(row.path,'manifest.json'),'utf8'));return {name,files:Object.fromEntries((manifest.files as string[]).map(file=>[file,fs.readFileSync(path.join(row.path,safeRelative(file)),'utf8')])),checks:manifest.checks};}
+  sourceBinding(name:string) {
+    const row=this.db.prepare('SELECT packageId,source FROM skill_sources WHERE name=?').get(name) as {packageId:string;source:string}|undefined;
+    return row && { packageId:row.packageId, source:JSON.parse(row.source) as ManagedSource|null };
+  }
+
+  bindSource(name:string,packageId:string,source:ManagedSource):string|undefined {
+    const prior=this.db.prepare('SELECT name FROM skill_sources WHERE packageId=?').get(packageId) as {name:string}|undefined;
+    this.db.prepare(`INSERT INTO skill_sources(name,packageId,source) VALUES(?,?,?)
+      ON CONFLICT(packageId) DO UPDATE SET name=excluded.name,source=excluded.source`).run(name,packageId,JSON.stringify(source));
+    if(prior && prior.name!==name)return prior.name;
+  }
+
+  hasImportedSource(packageId:string,commit:string|null):boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM skill_version_sources WHERE json_extract(source,'$.packageId')=?
+      AND json_extract(source,'$.commit')=? LIMIT 1`).get(packageId,commit));
+  }
+
   source(name:string,version:number):ManagedSource|undefined {const row=this.db.prepare('SELECT source FROM skill_version_sources WHERE name=? AND version=?').get(name,version) as {source:string}|undefined;return row?JSON.parse(row.source):undefined;}
-  recordSource(name:string,version:number,source:ManagedSource){this.db.prepare('INSERT OR REPLACE INTO skill_version_sources(name,version,source) VALUES(?,?,?)').run(name,version,JSON.stringify(source));}
   private version(name:string,version:number) {
     skillName.parse(name);
     const row=this.db.prepare('SELECT * FROM skill_versions WHERE name=? AND version=?').get(name,version) as Row | undefined;
