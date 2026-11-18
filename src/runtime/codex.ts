@@ -14,6 +14,7 @@ import type { LoginAccountResponse } from './generated/v2/LoginAccountResponse.j
 import type { CancelLoginAccountParams } from './generated/v2/CancelLoginAccountParams.js';
 import type { CancelLoginAccountResponse } from './generated/v2/CancelLoginAccountResponse.js';
 import type { AccountLoginCompletedNotification } from './generated/v2/AccountLoginCompletedNotification.js';
+import type { ErrorNotification } from './generated/v2/ErrorNotification.js';
 import { executionCommand, executionEnvironment, prepareExecutionProfile } from './execution.ts';
 import { createToolProxy } from './tool-proxy.ts';
 import { connectorEnvironment } from '../connectors/client.ts';
@@ -28,6 +29,7 @@ const threadResponse = z.object({ thread: z.object({ id: z.string() }).passthrou
 export const deltaSchema = z.object({ threadId: z.string(), turnId: z.string(), itemId: z.string(), delta: z.string() });
 export const turnCompletedSchema = z.object({ threadId: z.string(), turn: z.object({ id: z.string(), status: z.enum(['completed', 'interrupted', 'failed', 'inProgress']), error: z.unknown().nullable().optional() }).passthrough() });
 const loginCompletedSchema = z.object({ loginId: z.string().nullable(), success: z.boolean(), error: z.string().nullable() }) satisfies z.ZodType<Pick<AccountLoginCompletedNotification, 'loginId' | 'success' | 'error'>>;
+const errorNotificationSchema = z.object({ threadId: z.string(), turnId: z.string(), willRetry: z.boolean(), error: z.object({ message: z.string() }) }) satisfies z.ZodType<Pick<ErrorNotification, 'threadId' | 'turnId' | 'willRetry'> & { error: Pick<ErrorNotification['error'], 'message'> }>;
 export type DeviceLogin = Extract<LoginAccountResponse, { type: 'chatgptDeviceCode' }>;
 const clarificationSchema = z.object({ threadId: z.string(), turnId: z.string(), itemId: z.string(), questions: z.array(z.object({ id: z.string(), question: z.string(), header: z.string(), isSecret: z.boolean().optional(), options: z.array(z.object({ label: z.string(), description: z.string() })).nullable().optional() }).passthrough()) }).passthrough();
 
@@ -227,6 +229,11 @@ export class CodexAdapter extends EventEmitter {
       // The requested full-access/never policy should not ask for routine approvals.
       this.send({ id: frame.id, error: { code: -32601, message: 'Unexpected runtime request under unrestricted execution configuration' } });
       this.emit('event', 'activity', { method: frame.method, error: 'Runtime requested an unsupported permission/auth interaction. Check host policy and server-side credentials.' }); return;
+    }
+    if (frame.method === 'error') {
+      // A provider error can precede a native retry. Only turn/completed determines
+      // the terminal result; provider diagnostic fields are never journaled here.
+      this.emit('event', 'activity', { method: 'error', ...errorNotificationSchema.parse(frame.params) }); return;
     }
     if (frame.method === 'item/agentMessage/delta') {
       const params = deltaSchema.parse(frame.params); this.emit('event', 'delta', { text: params.delta, itemId: params.itemId }); return;

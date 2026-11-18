@@ -12,6 +12,39 @@ async function nextPaint(page: Page) {
   await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
+test('runtime errors show retry status until execution resumes or the task finishes', async ({ page }) => {
+  const now = new Date().toISOString();
+  const conversation = { id: 'runtime_retry_conversation', title: 'Runtime retry fixture', threadId: null, createdAt: now, updatedAt: now };
+  const run: any = { id: 'runtime_retry_run', conversationId: conversation.id, prompt: 'Inspect the fixture.', status: 'running', kind: 'user', summary: '', createdAt: now, startedAt: now, finishedAt: null, error: null, requestId: 'runtime_retry_request', parentRunId: null };
+  const event = (seq: number, type: string, data: Record<string, unknown>) => ({ seq, type, data, runId: run.id, conversationId: conversation.id, createdAt: now });
+  const events = [
+    event(1, 'activity', { method: 'error', willRetry: true, error: { message: 'Reconnecting… 2/5' } }),
+    event(2, 'activity', { method: 'thread/tokenUsage/updated' }),
+  ];
+  const state = { worker: null, workerError: null, maintenance: false, queue: [run] };
+  await page.route('**/api/status', route => route.fulfill({ json: state }));
+  await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(state)}\n\n` }));
+  await page.route('**/api/conversations', route => route.fulfill({ json: [conversation] }));
+  await page.route(`**/api/conversations/${conversation.id}`, route => route.fulfill({ json: { conversation, messages: [], runs: [run], events } }));
+  await login(page);
+  await expect(page.getByTestId('runtime-notice')).toHaveText('Runtime retry: Reconnecting… 2/5');
+  await expect(page.locator('.run-status-row')).toContainText('Working');
+
+  events.push(event(3, 'delta', { itemId: 'response', text: 'Execution resumed.' }));
+  await page.reload();
+  await expect(page.getByTestId('message-assistant')).toContainText('Execution resumed.');
+  await expect(page.getByTestId('runtime-notice')).toHaveCount(0);
+
+  events.push(event(4, 'activity', { method: 'error', willRetry: false, error: { message: 'The runtime could not continue.' } }));
+  await page.reload();
+  await expect(page.getByTestId('runtime-notice')).toHaveText('Runtime error: The runtime could not continue.');
+  run.status = 'failed'; run.error = 'The runtime could not continue.';
+  await page.reload();
+  await expect(page.locator('.run-status-row')).toContainText('Failed');
+  await expect(page.getByTestId('runtime-notice')).toHaveCount(0);
+  await expect(page.locator('.run-block .inline-error')).toContainText('The runtime could not continue.');
+});
+
 async function browserRepository(page: Page) {
   const session = await (await page.request.get('/api/session')).json();
   const response = await page.request.post('/api/repositories', { headers: { 'x-csrf-token': session.csrfToken, origin: new URL(page.url()).origin }, data: { name: `Browser repository ${randomUUID().slice(0, 8)}`, remoteUrl: `https://example.invalid/local-${randomUUID()}.git`, mode: 'create' } });
