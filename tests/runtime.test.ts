@@ -38,6 +38,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   const text=m.params.input[0].text;
   if(text==='budget')setTimeout(()=>send({method:'item/started',params:{threadId:'thread-1',turnId:turn,item:{id:'tool1',type:'commandExecution',command:'fixture'}}}),20);
   else if(text==='clarify')send({id:500,method:'item/tool/requestUserInput',params:{threadId:'thread-1',turnId:turn,itemId:'q1',questions:[{id:'target',header:'Target',question:'Which target?',isSecret:false,options:null}],isBlocking:true}});
+  else if(text==='retry-error'||text==='fatal-error')send({method:'error',params:{threadId:'thread-1',turnId:turn,willRetry:text==='retry-error',error:{message:'Provider temporarily unavailable',codexErrorInfo:'serverOverloaded',additionalDetails:'private provider diagnostics',misalignment:null,unexpected:'private nested field'},method:'untrusted override',unexpected:'private notification field'}});
   else if(text!=='wait')setTimeout(()=>{
    send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'a1',delta:'Real protocol fixture response'}});
    send({method:'item/completed',params:{threadId:'thread-1',turnId:turn,item:{type:'commandExecution',command:'printf fixture',exitCode:0}}});
@@ -45,6 +46,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   },30);
  }
  if(m.method==='turn/interrupt')send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:'interrupted',error:null}}});
+ if(m.method==='fixture/complete'){
+  if(m.params.status==='completed')send({method:'item/agentMessage/delta',params:{threadId:'thread-1',turnId:turn,itemId:'a1',delta:'Response after native retry'}});
+  send({method:'turn/completed',params:{threadId:'thread-1',turn:{id:turn,status:m.params.status,error:m.params.status==='failed'?{message:'Provider could not complete the request'}:null}}});
+ }
 });
 `;
 function setup(): { config: Config; directory: string } {
@@ -63,6 +68,30 @@ test('adapter handles generated-protocol lifecycle, deltas, and observed interru
     await adapter.run({ runId: 'run-1', conversationId: 'c1', threadId: 'thread-1', prompt: 'wait', cwd: directory, bootstrap: '', skills: [] }); await adapter.interrupt(); await interrupted;
   } finally { await adapter.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+for (const { prompt, willRetry, status } of [
+  { prompt: 'retry-error', willRetry: true, status: 'completed' },
+  { prompt: 'fatal-error', willRetry: false, status: 'failed' },
+] as const) {
+  test(`adapter forwards ${willRetry ? 'retryable' : 'nonretryable'} provider errors while awaiting the ${status} terminal result`, async () => {
+    const { config, directory } = setup(), adapter = new CodexAdapter(config, 'provider-error');
+    try {
+      await adapter.start();
+      const events: Array<{ type: string; data: any }> = [], faults: Error[] = [];
+      adapter.on('event', (type, data) => events.push({ type, data })); adapter.on('fault', error => faults.push(error));
+      const notification = new Promise<any>(resolve => adapter.on('event', (type, data) => { if (type === 'activity' && data.method === 'error') resolve(data); }));
+      const completed = new Promise<any>(resolve => adapter.on('event', (type, data) => { if (type === 'completed') resolve(data); }));
+      await adapter.run({ runId: 'provider-error', conversationId: 'fixture', prompt, cwd: directory, bootstrap: '', skills: [] });
+      assert.deepEqual(await notification, { method: 'error', threadId: 'thread-1', turnId: 'turn-1', willRetry, error: { message: 'Provider temporarily unavailable' } });
+      assert(!events.some(event => event.type === 'completed'), 'The notification must not terminate the turn, even when willRetry is false');
+      assert.deepEqual(faults, []);
+      await adapter.request('fixture/complete', { status });
+      assert.deepEqual(await completed, status === 'failed' ? { status, error: { message: 'Provider could not complete the request' } } : { status });
+      assert.equal(events.filter(event => event.type === 'completed').length, 1);
+      if (willRetry) assert(events.some(event => event.type === 'delta' && event.data.text === 'Response after native retry'));
+    } finally { await adapter.close(); rmSync(directory, { recursive: true, force: true }); }
+  });
+}
 
 test('Codex startup cannot execute before its run process identity is durably captured',async()=>{
   const {config,directory}=setup(),marker=join(directory,'unrecorded-app-server-start');

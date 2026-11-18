@@ -208,6 +208,8 @@ A controller restart reconciles each worker's ledger and reattaches to surviving
 
 Interrupt requests reach `turn/interrupt`; the UI waits for the observed outcome. Worker shutdown terminates its owned runtime group. Deliberately detached applications/services with their own process session can continue independently; the agent is instructed to identify these. Browser, agent and application lifetimes are separate.
 
+Structured runtime error notifications appear in execution activity and on active task cards. A retry notice clears when execution resumes; it does not mark the task complete or repeat its actions. Native task deadlines still apply. Codex 0.166.0 can suppress its first WebSocket retry notification, so an upstream capacity backoff may initially show only as a running task. Runtime stderr and raw provider diagnostics remain excluded.
+
 Artifact downloads require an administrator session and stay within the canonical `artifacts/` root, including symlink checks. Files download as attachments. Host tool paths intentionally remain broad. Model output renders as text, not executable HTML. Mutating browser requests require an allowed Origin, a live HttpOnly/SameSite session and its CSRF token; event streams require the same session. Runtime stderr and account/config events are excluded from execution logs; known credentials are redacted from persisted tool/runtime events.
 
 ## Snapshot and restore
