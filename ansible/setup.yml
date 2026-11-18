@@ -61,6 +61,7 @@
         - "{{ operator_state_dir }}"
         - "{{ operator_projects_dir }}"
         - "{{ operator_node_dir }}"
+        - "{{ operator_env_file }}"
 
     - name: Validate durable state and project locations
       ansible.builtin.assert:
@@ -102,7 +103,7 @@
         path: "{{ item }}"
       loop:
         - "{{ operator_checkout }}/package.json"
-        - "{{ operator_checkout }}/.env"
+        - "{{ operator_env_file }}"
         - "{{ operator_node_dir }}/bin/node"
         - "{{ operator_state_dir }}/workers/{{ operator_root_worker_id }}/registration.json"
       register: operator_existing

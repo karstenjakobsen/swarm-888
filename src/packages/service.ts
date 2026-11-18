@@ -10,7 +10,7 @@ import type { Config } from '../config.ts';
 import { managedFilePath } from '../managed/repository.ts';
 import type { ManagedSource } from '../managed/schemas.ts';
 import { PackageStore } from './store.ts';
-import { packageImportInput, packageManifestMaxBytes, packageManifestSchema, packagePath, repositoryInput, type PackageDiscovery, type PackageManifest, type PackageRecord, type RepositoryRecord } from './schemas.ts';
+import { packageImportInput, packageManifestMaxBytes, packageManifestSchema, packagePath, repositoryBranchSchema, repositoryInput, type PackageDiscovery, type PackageManifest, type PackageRecord, type RepositoryRecord } from './schemas.ts';
 
 const manifestFile='operator-package.json',failure=(message:string,statusCode=409)=>Object.assign(new Error(message),{statusCode});
 const textLimit=8_000_000;
@@ -191,10 +191,12 @@ export class PackageService {
     const counts=new Map<string,number>();for(const item of result.packages)if(item.manifest)counts.set(item.manifest.id,(counts.get(item.manifest.id)??0)+1);
     for(const item of result.packages)if(item.manifest&&(counts.get(item.manifest.id)??0)>1)item.error='Duplicate canonical package identifier appears in this repository';return result;
   }
-  async discover(id:string,options:{refresh?:boolean}={}):Promise<PackageDiscovery>{return this.exclusive(id,async()=>{
+  async discover(id:string,options:{refresh?:boolean;branch?:string}={}):Promise<PackageDiscovery>{return this.exclusive(id,async()=>{
+    if(options.branch!==undefined&&!options.refresh)throw failure('Choose a remote branch when fetching a preview.',400);
     const repository=this.checkedRepository(id);let commit=this.head(repository);
-    if(options.refresh){this.assertWritable(id);await this.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','origin',repository.sourceBranch]);commit=this.git(repository.directory,['rev-parse','FETCH_HEAD']).trim();}
-    return this.discoverAt(repository,commit);
+    const branch=options.refresh?(options.branch===undefined?repository.sourceBranch:repositoryBranchSchema.parse(options.branch)):undefined;
+    if(options.refresh){this.assertWritable(id);await this.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','origin',`refs/heads/${branch}`]);commit=this.git(repository.directory,['rev-parse','FETCH_HEAD']).trim();}
+    return {...this.discoverAt(repository,commit),...(branch?{remoteBranch:branch}:{})};
   });}
   private validatePackage(repository:RepositoryRecord,path:string,commit:string,manifest:PackageManifest):void {
     const prefix=path==='.'?'':`${path}/`,entries=this.tree(repository,commit).filter(entry=>entry.path.startsWith(prefix));let skill=false;

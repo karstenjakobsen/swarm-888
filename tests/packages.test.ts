@@ -48,6 +48,29 @@ test('cloned discovery is metadata only and imports are idempotent with exact ve
   }finally{f.close();}
 });
 
+test('repositories without main clone a selected branch and preview another remote branch before importing it',async()=>{
+  const f=fixture();try{
+    const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','release/stable');const packageManifest=manifest();mkdirSync(join(origin,'app'));writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify(packageManifest));git(origin,'add','.');git(origin,'commit','-qm','Stable package');const stable=git(origin,'rev-parse','HEAD').trim();
+    git(origin,'tag','preview/packages');git(origin,'checkout','-qb','preview/packages');writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify({...packageManifest,version:'0.2.0'}));git(origin,'add','.');git(origin,'commit','-qm','Preview package');const previewCommit=git(origin,'rev-parse','HEAD').trim();
+    assert.equal(git(origin,'branch','--list','main').trim(),'');
+    const repository=await f.service.register({name:'Release packages',remoteUrl:origin,mode:'clone',branch:'release/stable'});assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,stable);
+    const initial=await f.service.discover(repository.id,{refresh:true});assert.equal(initial.commit,stable);assert.equal(initial.remoteBranch,'release/stable');
+    const preview=await f.service.discover(repository.id,{refresh:true,branch:'preview/packages'});assert.equal(preview.commit,previewCommit);assert.equal(preview.remoteBranch,'preview/packages');assert.equal(preview.packages[0].manifest!.version,'0.2.0');
+    assert.equal(git(repository.directory,'rev-parse','HEAD').trim(),stable);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD').trim(),repository.branch);assert.equal(f.service.repository(repository.id).sourceBranch,'release/stable');assert.equal(git(repository.directory,'status','--porcelain').trim(),'');
+    const imported=await f.service.importPackages(repository.id,{paths:['app'],expectedCommit:preview.commit});assert.equal(imported.packages[0].version,'0.2.0');assert.equal(imported.packages[0].lastImportedCommit,previewCommit);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD').trim(),repository.branch);assert.equal(f.service.repository(repository.id).sourceBranch,'release/stable');
+  }finally{f.close();}
+});
+
+test('missing, invalid and tag-only preview branches preserve local source and the registered branch',async()=>{
+  const f=fixture();try{
+    const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','release/stable');writeFileSync(join(origin,'README.md'),'Stable repository\n');git(origin,'add','.');git(origin,'commit','-qm','Stable source');git(origin,'tag','tag-only');
+    const repository=await f.service.register({name:'Safe branch previews',remoteUrl:origin,mode:'clone'}),head=git(repository.directory,'rev-parse','HEAD').trim();writeFileSync(join(repository.directory,'owner-note.txt'),'Keep unfinished owner work\n');
+    for(const branch of ['missing','tag-only','release/../escape','release//empty','release/.hidden','release/topic.lock/next','-upload-pack=evil'])await assert.rejects(f.service.discover(repository.id,{refresh:true,branch}));
+    await assert.rejects(f.service.discover(repository.id,{branch:'release/stable'}),/when fetching/);
+    assert.equal(readFileSync(join(repository.directory,'owner-note.txt'),'utf8'),'Keep unfinished owner work\n');assert.equal(git(repository.directory,'rev-parse','HEAD').trim(),head);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD').trim(),repository.branch);assert.equal(f.service.repository(repository.id).sourceBranch,'release/stable');assert.equal(git(repository.directory,'diff','--cached').trim(),'');
+  }finally{f.close();}
+});
+
 test('failed imports keep the last successful revision and capture invalid manifest versions',async()=>{
   const f=fixture();try{
     const repository=await f.service.register({name:'Failure recovery',remoteUrl:'https://example.invalid/recovery.git'}),created=await f.service.createPackage(repository.id,{path:'app',manifest:manifest()});

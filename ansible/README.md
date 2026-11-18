@@ -46,6 +46,24 @@ For an SSH alias such as `server-212`, Ansible can use your existing SSH config:
 uv run ansible-playbook ansible/setup.yml -i server-212, -e @ansible/vars.local.yml
 ```
 
+For the existing `server-212` installation, use its checked-in
+[server profile](vars/server-212.yml):
+
+```sh
+uv run ansible-playbook ansible/setup.yml -i server-212, \
+  -e @ansible/vars/server-212.yml --check
+# Apply the previewed setup changes:
+uv run ansible-playbook ansible/setup.yml -i server-212, \
+  -e @ansible/vars/server-212.yml
+```
+
+This profile selects `/home/swarm/swarm-888/.env` on the remote host through
+`operator_env_file` and preserves that file. It contains deployment settings only;
+the administrator password and other environment secrets stay on the server.
+No password variable is needed while the existing environment file is retained.
+The playbook builds the checkout already on the server; these commands do not
+transfer local source changes or select a new application revision.
+
 The trailing comma makes this a one-host inventory. Add `--ask-become-pass` if
 the remote account requires a sudo password. The target also needs Git access to
 the configured repository when creating a checkout; a private repository may
@@ -72,6 +90,7 @@ Defaults are in [vars/defaults.yml](vars/defaults.yml), with editable examples i
 | --- | --- |
 | Controller account | `swarm` |
 | Checkout | `/home/swarm/swarm-888` |
+| Environment file | `/home/swarm/swarm-888/.env` |
 | Persistent state | `/home/swarm/.local/share/vps-ai-operator` |
 | Project workspaces | `/home/swarm/packages` |
 | Node runtime | `/opt/node-v26.13.1` |
@@ -87,9 +106,10 @@ application uses the pinned TypeScript loader.
 Build inputs are fingerprinted, so changed source automatically rebuilds on the
 next run. Finish work and stop the services before updating a live checkout.
 
-An existing `.env` is preserved. Inventory changes to environment settings take
-effect when you set `operator_replace_env: true`; provide the administrator
-password again when regenerating it. Existing application state, worker profiles,
+`operator_env_file` selects the target host's environment file and defaults to
+`{{ operator_checkout }}/.env`. An existing file is preserved. Inventory changes
+to environment settings take effect when you set `operator_replace_env: true`;
+provide the administrator password again when regenerating it. Existing application state, worker profiles,
 and saved authentication remain in their persistent directories. Existing named
 worker model, effort, and permission mode must match the requested settings.
 

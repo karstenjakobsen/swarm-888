@@ -18,6 +18,7 @@ operator_node_arch: "{{ {'x86_64': 'x64', 'aarch64': 'arm64'}[ansible_facts.arch
 operator_runtime_path: "{{ operator_checkout }}/node_modules/.bin:{{ operator_node_dir }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Existing .env files are preserved unless replacement is explicitly requested.
+operator_env_file: "{{ operator_checkout }}/.env"
 operator_replace_env: false
 operator_admin_password: ""
 operator_host: 127.0.0.1

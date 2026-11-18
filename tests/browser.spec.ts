@@ -97,7 +97,7 @@ test('Repositories creates three package kinds in one local checkout and reimpor
 
 test('Repository import preview isolates invalid manifests and preserves last imported package after a failed update', async ({ page }) => {
   const id = randomUUID(), packageId = randomUUID(), commit = 'a'.repeat(40);
-  const repository = { id, name: 'Review packages', remoteUrl: 'https://example.invalid/review.git', directory: '/tmp/review', branch: 'operator/work', status: 'ready' };
+  const repository = { id, name: 'Review packages', remoteUrl: 'https://example.invalid/review.git', directory: '/tmp/review', branch: 'operator/work', sourceBranch: 'release/stable', status: 'ready' };
   const manifest = { schemaVersion: 1, id: packageId, kind: 'project', name: 'Known project', version: '1.0.0' };
   const item = { id: packageId, repositoryId: id, path: 'apps/known', kind: 'project', name: manifest.name, version: manifest.version, manifest, lastImportedCommit: commit, lastImportedAt: '2026-11-18T10:00:00Z' };
   let submitted: unknown, importCalls = 0, remoteFetches = 0;
@@ -106,10 +106,10 @@ test('Repository import preview isolates invalid manifests and preserves last im
   await page.route(`**/api/repositories/${id}/discover`, route => {
     if (route.request().method() === 'POST') {
       remoteFetches++;
-      expect(route.request().postDataJSON()).toEqual({ refresh: true });
+      expect(route.request().postDataJSON()).toEqual({ refresh: true, branch: 'feature/review' });
       expect(route.request().headers()['x-csrf-token']).toBeTruthy();
     }
-    return route.fulfill({ json: { repository, commit, packages: [{ path: item.path, manifest, imported: true }, { path: 'apps/broken', error: 'schemaVersion must be 1' }], errors: [] } });
+    return route.fulfill({ json: { repository, commit, ...(route.request().method() === 'POST' ? { remoteBranch: 'feature/review' } : {}), packages: [{ path: item.path, manifest, imported: true }, { path: 'apps/broken', error: 'schemaVersion must be 1' }], errors: [] } });
   });
   await page.route(`**/api/repositories/${id}/import`, route => { submitted = route.request().postDataJSON(); importCalls++; return route.fulfill({ json: importCalls === 1 ? { packages: [], imports: [{ id: 'failed-current', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit, error: 'Duplicate canonical package ID in another repository.' }] } : { packages: [item], imports: [], registrations: [{ packageId, notice: 'Source imported; runtime registration needs attention: worker unavailable.' }] } }); });
   await page.route(`**/api/repositories/${id}/imports`, route => route.fulfill({ json: [{ id: 'failed', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit: 'b'.repeat(40), error: 'Duplicate canonical package ID in another repository.', createdAt: '2026-11-18T11:00:00Z' }, { id: 'success', packageId, path: item.path, status: 'imported', packageVersion: '1.0.0', schemaVersion: 1, commit, createdAt: item.lastImportedAt }] }));
@@ -118,8 +118,11 @@ test('Repository import preview isolates invalid manifests and preserves last im
   await page.getByRole('button', { name: 'Discover packages', exact: true }).click();
   await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
   expect(remoteFetches).toBe(0);
+  await expect(page.getByLabel('Remote branch to fetch', { exact: true })).toHaveValue('release/stable');
+  await page.getByLabel('Remote branch to fetch', { exact: true }).fill('feature/review');
   await page.getByRole('button', { name: 'Fetch & preview remote' }).click();
   await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
+  await expect(page.getByLabel('Discovered packages')).toContainText('feature/review');
   expect(remoteFetches).toBe(1);
   await expect(page.getByText('schemaVersion must be 1', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();

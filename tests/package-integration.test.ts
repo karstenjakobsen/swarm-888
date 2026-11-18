@@ -68,6 +68,20 @@ test('repository APIs require a remote and every new project or package gets a c
   }finally{await f.close();}
 });
 
+test('repository fetch API previews a selected non-main branch and imports its exact commit',async()=>{
+  const f=await fixture();
+  try{
+    const remote=join(f.root,'branch-remote');mkdirSync(remote);git(remote,'init','-q','-b','release/stable');const manifest={schemaVersion:1,id:randomUUID(),kind:'project',name:'Branch package',version:'1.0.0',description:'Package without a main branch'};
+    write(remote,'app/operator-package.json',JSON.stringify(manifest));git(remote,'add','.');git(remote,'commit','-qm','Stable package');const initial=git(remote,'rev-parse','HEAD');
+    git(remote,'checkout','-qb','feature/new-package');write(remote,'app/operator-package.json',JSON.stringify({...manifest,version:'1.1.0'}));git(remote,'add','.');git(remote,'commit','-qm','Feature package');const feature=git(remote,'rev-parse','HEAD');
+    const repository=await f.api('POST','/api/repositories',{name:'Branch packages',remoteUrl:remote,branch:'release/stable',mode:'clone'});assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,initial);
+    const preview=await f.api('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'feature/new-package'});assert.equal(preview.commit,feature);assert.equal(preview.remoteBranch,'feature/new-package');assert.equal(preview.packages[0].manifest.version,'1.1.0');assert.equal(preview.repository.sourceBranch,'release/stable');assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);
+    assert.equal((await f.request('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'release/../escape'})).statusCode,400);assert.equal((await f.request('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'missing'})).statusCode,409);assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);assert.equal(git(repository.directory,'status','--porcelain'),'');
+    const imported=await f.api('POST',`/api/repositories/${repository.id}/import`,{paths:['app'],expectedCommit:preview.commit});assert.equal(imported.packages[0].lastImportedCommit,feature);assert.equal(imported.packages[0].version,'1.1.0');assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);
+    const local=await f.api('GET',`/api/repositories/${repository.id}/discover`);assert.equal(local.remoteBranch,undefined);assert.equal(local.repository.sourceBranch,'release/stable');assert.equal(local.commit,feature);
+  }finally{await f.close();}
+});
+
 test('clone, discovery and selected import register all package kinds without executing code, retain failed import history and prepare binary releases',async()=>{
   const f=await fixture();let executed=0;
   try{

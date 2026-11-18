@@ -8,6 +8,8 @@ operator_user: swarm
 operator_group: swarm
 operator_home: /home/swarm
 operator_checkout: /home/swarm/swarm-888
+# This path is on the target host. Existing contents are preserved by default.
+operator_env_file: /home/swarm/swarm-888/.env
 operator_state_dir: /home/swarm/.local/share/vps-ai-operator
 operator_projects_dir: /home/swarm/packages
 

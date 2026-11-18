@@ -3,11 +3,12 @@ import { z } from 'zod';
 import type { PackageRegistration } from './registration.ts';
 import type { PackageService } from './service.ts';
 import { createPackageInput } from './inputs.ts';
+import { repositoryBranchSchema } from './schemas.ts';
 
 const idParams = z.object({ id: z.string().uuid() });
 const routeId = (req: FastifyRequest) => idParams.parse(req.params).id;
 const discoveryQuery = z.object({ refresh: z.enum(['true','false']).optional() }).strict();
-const refreshRequest = z.object({ refresh: z.literal(true) }).strict();
+const refreshRequest = z.object({ refresh: z.literal(true), branch: repositoryBranchSchema.optional() }).strict();
 
 interface PackageRoutes {
   packages: PackageService;

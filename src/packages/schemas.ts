@@ -34,10 +34,11 @@ export const remoteUrlSchema=z.string().trim().min(1).max(2000).refine(value=>{
   if(/^[\w.-]+@[\w.-]+:[\w./~-]+$/.test(value))return true;
   try{const url=new URL(value);return ['https:','http:','ssh:','git:','file:'].includes(url.protocol)&&!url.password&&!url.search&&!url.hash&&(!url.username||url.protocol==='ssh:')&&(url.protocol!=='file:'||(!url.hostname&&!url.username));}catch{return false;}
 },'Use a Git remote URL without embedded credentials, query parameters, or fragments');
-export const repositoryInput=z.object({name:z.string().trim().min(1).max(120),remoteUrl:remoteUrlSchema,branch:z.string().min(1).max(200).regex(/^[\w][\w./-]*$/).refine(value=>!value.includes('..')&&!value.endsWith('/')&&!value.endsWith('.lock')).optional(),mode:z.enum(['create','clone']).default('create')}).strict();
+export const repositoryBranchSchema=z.string().min(1).max(200).regex(/^[\w][\w./-]*$/).refine(value=>!value.includes('..')&&value.split('/').every(piece=>piece&&!piece.startsWith('.')&&!piece.endsWith('.')&&!piece.endsWith('.lock')),'Use a Git branch name such as release/packages');
+export const repositoryInput=z.object({name:z.string().trim().min(1).max(120),remoteUrl:remoteUrlSchema,branch:repositoryBranchSchema.optional(),mode:z.enum(['create','clone']).default('create')}).strict();
 export const packageImportInput=z.object({paths:z.array(packagePathSchema).min(1).max(200),expectedCommit:z.string().regex(/^[0-9a-f]{40,64}$/).optional()}).strict();
 
 export interface RepositoryRecord {id:string;name:string;remoteUrl:string;directory:string;branch:string;sourceBranch:string;status:'ready'|'error';error:string|null;createdAt:string;updatedAt:string;head?:string|null;dirty?:boolean;ahead?:number;behind?:number;hasRemoteBranch?:boolean;localOnly?:boolean}
 export interface PackageRecord {id:string;repositoryId:string;path:string;kind:PackageKind;name:string;version:string;description:string;manifest:PackageManifest;lastImportedCommit:string;lastImportedAt:string;createdAt:string;updatedAt:string}
 export interface PackageImport {id:string;repositoryId:string;packageId:string|null;path:string;schemaVersion:number|null;packageVersion:string|null;commit:string;status:'pending'|'importing'|'imported'|'failed';error:string|null;createdAt:string;startedAt:string|null;finishedAt:string|null}
-export interface PackageDiscovery {repository:RepositoryRecord;commit:string;packages:Array<{path:string;manifest?:PackageManifest;error?:string;imported?:boolean}>;errors:string[]}
+export interface PackageDiscovery {repository:RepositoryRecord;commit:string;remoteBranch?:string;packages:Array<{path:string;manifest?:PackageManifest;error?:string;imported?:boolean}>;errors:string[]}

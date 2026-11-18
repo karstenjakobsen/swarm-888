@@ -17,6 +17,8 @@ uv run ansible-playbook ansible/setup.yml -i server-212, -e @ansible/vars.local.
 
 Existing configuration, persistent data, and worker sign-ins are retained. New profiles require **Workers → Sign in** after installation. See the guide for configuration, rebuilding, and validation with `make ops-check`.
 
+For the existing `server-212` installation, use `-e @ansible/vars/server-212.yml`. This profile reads `/home/swarm/swarm-888/.env` on the remote host and preserves its credentials. Add `--check` to preview setup changes.
+
 ## Prerequisites and first start
 
 Verified with Ubuntu 24.04, **Node 26.13.1**, npm 11.16.0, **Codex CLI 0.166.0**, and Chromium 159 through Playwright 1.65.1. Dependencies are pinned in `package-lock.json`. The maintained Node `node:sqlite` binding supplies SQLite, FTS5, WAL and the online backup API; no database server is needed.
@@ -159,6 +161,8 @@ Open **Repositories → Add repository** first. A remote URL is required: **Crea
 To remove an obsolete entry, open **Projects**, select it, choose **Remove project**, and confirm. This removes its registry entry and project-owned connection registrations, including their assignments to other projects. Conversations, source files, Git history, and runtime files are retained; existing services continue running. Removal works for missing directories and projects outside the current `APP_PROJECTS_DIR`, without a worker connection. Finish or reconcile pending work before removing its registration.
 
 The controller owns checkouts at `APP_PROJECTS_DIR/repositories/<repository-id>` on an operator branch, normally `operator/work`. A repository can contain several projects, connectors and skills, each in a separate folder. Registered folders cannot overlap. Use `.` when the repository contains a single root package. **Discover packages** previews committed manifests (up to 200 manifests/50,000 tracked repository files), then **Import selected** registers them without running check/build/run commands. **Fetch & preview remote** explicitly reads remote updates; importing them only fast-forwards clean local history. Divergence requires manual reconciliation. One writing task holds the repository through source finalization; tasks in different repositories can run concurrently. Git must be installed.
+
+Set **Remote branch to fetch** before fetching a preview to inspect another branch, such as `release/stable` or `operator/work`. It defaults to the repository's registered source branch; a `main` branch is optional. The preview shows the selected branch and exact commit. Fetching preserves the working branch and registered source branch; importing still requires a clean checkout and compatible history.
 
 Every package has a strict v1 `operator-package.json`:
 

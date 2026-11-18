@@ -38,7 +38,7 @@
 - name: Preview environment changes without exposing secrets
   ansible.builtin.template:
     src: operator.env.j2
-    dest: "{{ operator_checkout }}/.env"
+    dest: "{{ operator_env_file }}"
     force: "{{ operator_replace_env | bool }}"
     owner: "{{ operator_user }}"
     group: "{{ operator_group }}"
@@ -52,7 +52,7 @@
   ansible.builtin.command:
     argv:
       - "{{ operator_node_dir }}/bin/node"
-      - "--env-file={{ operator_checkout }}/.env"
+      - "--env-file={{ operator_env_file }}"
       - --input-type=module
       - -e
       - >-
@@ -112,7 +112,7 @@
       ansible.builtin.command:
         argv:
           - "{{ operator_node_dir }}/bin/node"
-          - "--env-file-if-exists={{ operator_checkout }}/.env"
+          - "--env-file-if-exists={{ operator_env_file }}"
           - --import
           - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
           - /usr/local/lib/swarm-888/worker-maintenance.mjs
@@ -136,7 +136,7 @@
     - name: Write the application environment
       ansible.builtin.template:
         src: operator.env.j2
-        dest: "{{ operator_checkout }}/.env"
+        dest: "{{ operator_env_file }}"
         force: "{{ operator_replace_env | bool }}"
         owner: "{{ operator_user }}"
         group: "{{ operator_group }}"
@@ -168,7 +168,13 @@
 
     - name: Initialize a fresh database as the controller user
       ansible.builtin.command:
-        argv: ["{{ operator_node_dir }}/bin/npm", run, init]
+        argv:
+          - "{{ operator_node_dir }}/bin/node"
+          - "--env-file={{ operator_env_file }}"
+          - --import
+          - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
+          - "{{ operator_checkout }}/src/cli.ts"
+          - init
         chdir: "{{ operator_checkout }}"
         creates: "{{ operator_state_dir }}/operator.sqlite"
       become: true
@@ -201,7 +207,7 @@
       ansible.builtin.command:
         argv:
           - "{{ operator_node_dir }}/bin/node"
-          - "--env-file-if-exists={{ operator_checkout }}/.env"
+          - "--env-file-if-exists={{ operator_env_file }}"
           - --import
           - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
           - /usr/local/lib/swarm-888/worker-maintenance.mjs
@@ -254,7 +260,7 @@
   ansible.builtin.command:
     argv:
       - "{{ operator_node_dir }}/bin/node"
-      - "--env-file={{ operator_checkout }}/.env"
+      - "--env-file={{ operator_env_file }}"
       - --import
       - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
       - /usr/local/lib/swarm-888/worker-maintenance.mjs

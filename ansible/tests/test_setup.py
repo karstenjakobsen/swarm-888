@@ -49,6 +49,16 @@ class TemplateIntegrationTests(unittest.TestCase):
                     "loop": cls.units,
                 },
                 {
+                    "name": "Render services using an external environment file",
+                    "ansible.builtin.template": {
+                        "src": str(ANSIBLE / "templates/operator.service.j2"),
+                        "dest": str(cls.directory / "custom-{{ item.kind }}.service"),
+                        "mode": "0600",
+                    },
+                    "vars": {"operator_env_file": str(cls.directory / "custom.env")},
+                    "loop": cls.units,
+                },
+                {
                     "name": "Render quoted environment values",
                     "ansible.builtin.template": {
                         "src": str(ANSIBLE / "templates/operator.env.j2"),
@@ -127,6 +137,22 @@ class TemplateIntegrationTests(unittest.TestCase):
                 self.assertIn(f"--env-file={REPO}/.env", arguments)
                 entry = "controller" if kind == "controller" else "worker"
                 self.assertIn(f"{REPO}/src/{entry}.ts", arguments)
+
+    def test_custom_environment_file_is_used_by_all_services(self):
+        for unit in self.units:
+            kind = unit["kind"]
+            with self.subTest(kind=kind):
+                lines = (self.directory / f"custom-{kind}.service").read_text().splitlines()
+                arguments = shlex.split(
+                    next(
+                        line.removeprefix("ExecStart=")
+                        for line in lines
+                        if line.startswith("ExecStart=")
+                    )
+                )
+                self.assertIn(f"--env-file={self.directory}/custom.env", arguments)
+                self.assertNotIn(f"--env-file={REPO}/.env", arguments)
+                self.assertIn(f"WorkingDirectory={REPO}", lines)
 
     def test_worker_identities_and_root_command(self):
         for unit in self.units:
