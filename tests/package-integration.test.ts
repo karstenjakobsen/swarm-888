@@ -68,6 +68,24 @@ test('repository APIs require a remote and every new project or package gets a c
   }finally{await f.close();}
 });
 
+test('owner-authenticated push settings enable publication while model tools cannot enable or retarget it',async()=>{
+  const f=await fixture();try{
+    const remote=join(f.root,'publish-api.git');mkdirSync(remote);git(remote,'init','--quiet','--bare');
+    const repository=await f.api('POST','/api/repositories',{name:'Publish API',remoteUrl:remote,mode:'create'}),url=`/api/repositories/${repository.id}/push-settings`,settings={enabled:true,autoPush:true,branch:'release/api'};
+    await assert.rejects(f.ctl.brain.callTool('repository_push',{id:repository.id}),/disabled/);
+    assert.equal((await f.ctl.app.inject({method:'PATCH',url,headers:{origin:f.config.origins[0]},payload:settings})).statusCode,401);
+    assert.equal((await f.ctl.app.inject({method:'PATCH',url,headers:{...f.headers,'x-csrf-token':'invalid'},payload:settings})).statusCode,403);
+    const enabled=await f.api('PATCH',url,settings);assert.equal(enabled.push.enabled,true);assert.equal(enabled.push.pushUrl,remote);assert.equal(enabled.push.branch,'release/api');
+    await assert.rejects(f.ctl.brain.callTool('repository_push',{id:repository.id,pushUrl:'https://other.invalid/repo.git'}));
+    assert.equal((await f.request('POST',`/api/repositories/${repository.id}/push`,{branch:'another-branch'})).statusCode,400);
+    const record=await f.api('POST',`/api/repositories/${repository.id}/packages`,{kind:'project',name:'Published package',path:'apps/published',version:'1.0.0',template:'empty'});
+    const queued=await f.ctl.brain.callTool('repository_push',{id:repository.id});assert.equal(queued.push.state,'pending');
+    await f.ctl.managed.packages.flushPushes();await f.ctl.managed.packages.flushPushes();
+    const observed=await f.api('GET',`/api/repositories/${repository.id}`);assert.equal(observed.push.state,'pushed');assert.equal(observed.push.pushedCommit,record.lastImportedCommit);assert.equal(git(remote,'rev-parse','refs/heads/release/api'),record.lastImportedCommit);
+    assert.equal(git(repository.directory,'remote','get-url','origin'),remote);
+  }finally{await f.close();}
+});
+
 test('repository fetch API previews a selected non-main branch and imports its exact commit',async()=>{
   const f=await fixture();
   try{

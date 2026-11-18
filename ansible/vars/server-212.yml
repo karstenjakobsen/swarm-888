@@ -9,9 +9,10 @@ operator_env_file: /home/swarm/swarm-888/.env
 operator_state_dir: /home/swarm/.local/share/vps-ai-operator
 operator_projects_dir: /home/swarm/packages
 
-# Keep the deployed checkout and its private configuration in place.
-# This profile does not upload local source changes or migrate persistent state.
-operator_manage_checkout: false
+# Deploy the latest published main, preserving the private configuration and state.
+operator_manage_checkout: true
+operator_repo_url: https://github.com/karstenjakobsen/swarm-888.git
+operator_repo_version: main
 operator_replace_env: false
 operator_rebuild: false
 
@@ -29,3 +30,9 @@ operator_root_worker_enabled: true
 operator_root_worker_id: root
 operator_root_worker_model: gpt-6.1-sol
 operator_root_worker_effort: high
+
+operator_github_ssh_known_hosts: true
+operator_git_ssh_keys:
+  - name: packages-888
+    path: /home/swarm/.ssh/id_ed25519_packages_888
+    repository_dir: /home/swarm/packages/repositories/909fd5b9-6395-4f72-900a-ce7af984ba1a

@@ -1,0 +1,57 @@
+---
+- name: Inspect the deployed source revision
+  ansible.builtin.command:
+    argv: [git, -C, "{{ operator_checkout }}", rev-parse, HEAD]
+  become: true
+  become_user: "{{ operator_user }}"
+  changed_when: false
+  check_mode: false
+  register: operator_current_revision
+
+- name: Check for local source changes before planning an update
+  ansible.builtin.command:
+    argv: [git, -c, core.fsmonitor=false, -C, "{{ operator_checkout }}", status, --porcelain, --untracked-files=all]
+  become: true
+  become_user: "{{ operator_user }}"
+  changed_when: false
+  check_mode: false
+  register: operator_source_status
+
+- name: Preserve local source changes
+  ansible.builtin.assert:
+    that: operator_source_status.stdout | length == 0
+    fail_msg: Commit or remove local source changes before deploying. Ansible will not overwrite them.
+
+# clone=false with no destination resolves the configured remote without fetching
+# objects or changing the live checkout. Disable Git diff, which can fetch objects.
+- name: Resolve the requested remote revision without changing deployed files
+  ansible.builtin.git:
+    repo: "{{ operator_repo_url }}"
+    version: "{{ operator_repo_version }}"
+    clone: false
+    update: true
+  become: true
+  become_user: "{{ operator_user }}"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+  check_mode: true
+  diff: false
+  changed_when: false
+  register: operator_remote_revision
+
+- name: Pin this deployment to the resolved commit
+  ansible.builtin.set_fact:
+    operator_current_commit: "{{ operator_current_revision.stdout | trim }}"
+    operator_target_commit: "{{ operator_remote_revision.after }}"
+    operator_source_changed: "{{ operator_current_revision.stdout | trim != operator_remote_revision.after }}"
+
+- name: Require a resolved Git commit before entering maintenance
+  ansible.builtin.assert:
+    that: operator_target_commit is match('^([0-9a-f]{40}|[0-9a-f]{64})$')
+    fail_msg: The requested branch, tag or commit could not be resolved. Check operator_repo_version before deploying.
+
+- name: Show the source deployment plan
+  ansible.builtin.debug:
+    msg: >-
+      {{ operator_repo_version }} resolves to {{ operator_target_commit }};
+      deployed commit {{ operator_current_commit }}; update needed: {{ operator_source_changed }}.

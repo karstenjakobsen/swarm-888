@@ -13,9 +13,11 @@ operator_env_file: /home/swarm/swarm-888/.env
 operator_state_dir: /home/swarm/.local/share/vps-ai-operator
 operator_projects_dir: /home/swarm/packages
 
-# Use false for a checkout you already manage, including this repo on localhost.
+# Managed checkouts clone when absent and update to this remote revision on each run.
+# Use false to build local source that you manage yourself, including on localhost.
 operator_manage_checkout: true
 operator_repo_url: https://github.com/karstenjakobsen/swarm-888.git
+# A branch, tag, or full commit SHA. Ansible pins its exact commit for deployment.
 operator_repo_version: main
 
 operator_origins:

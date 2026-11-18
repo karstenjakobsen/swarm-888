@@ -27,6 +27,7 @@ import { ownWorkerConfig } from './workers/config.ts';
 import { WorkerModelCatalogService } from './workers/models.ts';
 import { registerProjectEnvironmentRoutes } from './projects/environment.ts';
 import { registerPackageRoutes } from './packages/routes.ts';
+import { release } from './release.ts';
 
 function equal(a:string,b:string){const x=createHash('sha256').update(a).digest(),y=createHash('sha256').update(b).digest();return timingSafeEqual(x,y);}
 const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
@@ -88,7 +89,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
     if(req.headers['sec-fetch-site']==='cross-site')throw fail('Cross-site access is not permitted',403);
     reply.header('cache-control','no-store').header('x-content-type-options','nosniff');
     if(req.method!=='GET'&&req.method!=='HEAD'&&(!origin||!config.origins.includes(origin)))throw fail('A configured Origin is required',403);
-    if(req.url.split('?')[0]==='/api/login'||req.url.split('?')[0]==='/api/session')return;
+    if(['/api/login','/api/session','/api/version'].includes(req.url.split('?')[0]!))return;
     const current=session(req);if(!current)throw fail('Administrator login required',401);
     if(!['GET','HEAD'].includes(req.method)&&!equal(String(req.headers['x-csrf-token']??''),current.csrf))throw fail('CSRF token is missing or invalid',403);
   });
@@ -113,6 +114,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
   registerCredentialRoutes(app,{vault,connectors,config,session,writable});
   registerProjectEnvironmentRoutes(app,{vault,projects,store,writable});
   registerPackageRoutes(app,{packages:managed.packages,registration,writable});
+  app.get('/api/version',async()=>release);
   app.get('/api/session',async req=>{const current=session(req);return {authenticated:Boolean(current),...(current?{csrfToken:current.csrf}:{})};});
   app.post('/api/login',async(req,reply)=>{
     const {password}=z.object({password:z.string().max(4096)}).parse(req.body);
@@ -267,6 +269,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
     for(const socket of bridgeSockets)socket.destroy();
     if(bridge?.listening)await new Promise<void>((ok,no)=>bridge!.close(error=>error?no(error):ok()));
     await Promise.allSettled([...toolCalls]);
+    await managed.packages.closePublishing();
     if(bridgeOwned&&existsSync(config.bridgeSocket))unlinkSync(config.bridgeSocket);
     await app.close();store.close();
   })();
@@ -299,6 +302,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
         if(project&&typeof target==='string'&&target!==project.id)throw fail('Project tools are scoped to the current task project',403);
         if(project&&params.name==='package_create'&&args.repositoryId!==project.source?.repositoryId)throw fail('Create packages in the repository assigned to this project, or use a generic conversation.',403);
         if(project&&params.name==='repository_import')throw fail('Import repository packages from a generic conversation or the Repositories UI; this task is scoped to its existing project.',403);
+        if(project&&params.name==='repository_push'&&args.id!==project.source?.repositoryId)throw fail('Publish only the repository assigned to this task project.',403);
         if(['connector_call','connector_test','connector_update'].includes(params.name)&&typeof args.id==='string'&&!granted.includes(args.id))throw fail('This connection is outside the task grant',403);
         if(params.name==='project_connectors'&&Array.isArray(args.connectorIds)&&args.connectorIds.some(id=>!granted.includes(String(id))))throw fail('Project assignments cannot expand the accepted task connection grant',403);
         const charged=store.db.prepare("UPDATE runs SET toolCalls=toolCalls+1 WHERE id=? AND toolCalls<maxToolCalls AND status IN ('running','waiting')").run(run.id);
@@ -322,7 +326,7 @@ export async function createController(config:Config, options:{client?:WorkerCli
     await new Promise<void>((ok,no)=>{bridge!.once('error',no);bridge!.listen(config.bridgeSocket,ok);});
     bridgeOwned=true;chmodSync(config.bridgeSocket,0o600);
   }
-  if(options.startQueue!==false){jobs.start();await queue.start();}
+  if(options.startQueue!==false){jobs.start();await queue.start();managed.packages.startPublishing();}
 
   return {app,store,brain,queue,agentConnection,projects,managed,connectors,vault,tasks,jobs,close,get pendingTools(){return pendingTools;}};
   }catch(error){await close();throw error;}

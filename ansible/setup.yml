@@ -151,7 +151,7 @@
   tasks:
     - name: Install host packages
       ansible.builtin.apt:
-        name: [acl, ca-certificates, git, libatomic1, xz-utils]
+        name: [acl, ca-certificates, git, libatomic1, openssh-client, xz-utils]
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -248,6 +248,10 @@
         group: root
         mode: "0644"
       loop: [source_fingerprint.py, worker-maintenance.mjs]
+
+    - name: Configure controller-owned Git SSH identities
+      ansible.builtin.include_tasks: tasks/git-auth.yml
+      when: operator_git_ssh_keys | length > 0
 
     - name: Configure, build, and enable services
       ansible.builtin.include_tasks: tasks/deploy.yml

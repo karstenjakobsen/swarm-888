@@ -23,6 +23,15 @@ export function registerPackageRoutes(app: FastifyInstance, { packages, registra
     return packages.register(req.body);
   });
   app.get('/api/repositories/:id', async req => packages.repository(routeId(req)));
+  app.patch('/api/repositories/:id/push-settings', async req => {
+    writable();
+    return packages.setPushSettings(routeId(req), req.body);
+  });
+  app.post('/api/repositories/:id/push', async req => {
+    writable();
+    z.object({}).strict().parse(req.body ?? {});
+    return packages.requestPush(routeId(req));
+  });
   const discover = async (req: FastifyRequest) => {
     if (discoveryQuery.parse(req.query).refresh === 'true') {
       throw Object.assign(new Error('Use POST discover to fetch remote changes.'), { statusCode: 405 });

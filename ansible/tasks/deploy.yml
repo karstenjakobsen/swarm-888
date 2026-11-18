@@ -2,6 +2,15 @@
 - name: Collect existing service states
   ansible.builtin.service_facts:
 
+- name: Default to retaining an unmanaged checkout
+  ansible.builtin.set_fact:
+    operator_source_changed: false
+    operator_runtime_mismatch: false
+
+- name: Plan an update from the configured Git revision
+  ansible.builtin.include_tasks: source-plan.yml
+  when: operator_manage_checkout | bool
+
 - name: Inspect dependencies, build output, database and deployment fingerprint
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -29,7 +38,7 @@
 - name: Plan dependency installation and build
   ansible.builtin.set_fact:
     operator_build_required: >-
-      {{ operator_rebuild | bool or
+      {{ operator_source_changed or operator_rebuild | bool or
          not operator_installation.results[0].stat.exists or
          not operator_installation.results[1].stat.exists or
          (operator_source.stdout | trim) + ':' + operator_node_version !=
@@ -86,6 +95,30 @@
          if operator_existing.results[1].stat.exists and not operator_replace_env | bool
          else operator_port }}
 
+- name: Inspect the release reported by an already running controller
+  ansible.builtin.uri:
+    url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/version"
+    status_code: 200
+    timeout: 5
+  vars:
+    operator_health_address: >-
+      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
+         '[::1]' if operator_health_host == '::' else
+         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
+  check_mode: false
+  failed_when: false
+  register: operator_running_before
+  when: >-
+    operator_manage_checkout | bool and
+    ansible_facts.services.get('swarm-888.service', {}).get('state') == 'running'
+
+- name: Plan restart for a mismatched running release
+  ansible.builtin.set_fact:
+    operator_runtime_mismatch: >-
+      {{ operator_running_before.status | default(0) != 200 or
+         (operator_running_before.json | default({})).get('commit') != operator_target_commit }}
+  when: operator_running_before is not skipped
+
 - name: Preview service definitions
   ansible.builtin.template:
     src: operator.service.j2
@@ -100,7 +133,7 @@
 - name: Determine whether maintenance is needed
   ansible.builtin.set_fact:
     operator_maintenance_required: >-
-      {{ operator_build_required or operator_env_plan.changed or operator_unit_plan.changed or
+      {{ operator_runtime_mismatch or operator_build_required or operator_env_plan.changed or operator_unit_plan.changed or
          (operator_units | rejectattr('enabled') | map(attribute='name') | list |
           intersect(ansible_facts.services | dict2items | selectattr('value.state', 'equalto', 'running') |
           map(attribute='key') | list) | length > 0) }}
@@ -132,6 +165,27 @@
         state: stopped
       loop: "{{ operator_units }}"
       when: item.name in ansible_facts.services
+
+    - name: Restore controller ownership after any manual root checkout
+      ansible.builtin.file:
+        path: "{{ operator_checkout }}"
+        state: directory
+        owner: "{{ operator_user }}"
+        group: "{{ operator_group }}"
+        recurse: true
+        follow: false
+      when: operator_manage_checkout | bool
+
+    - name: Update source only after managed services have stopped
+      ansible.builtin.include_tasks: source-update.yml
+      when: operator_source_changed | bool
+
+    - name: Fingerprint the selected release source
+      ansible.builtin.script:
+        cmd: "files/source_fingerprint.py {{ operator_checkout | quote }}"
+        executable: /usr/bin/python3
+      changed_when: false
+      register: operator_release_source
 
     - name: Write the application environment
       ansible.builtin.template:
@@ -196,7 +250,7 @@
 
     - name: Record the successful build inputs
       ansible.builtin.copy:
-        content: "{{ operator_source.stdout | trim }}:{{ operator_node_version }}\n"
+        content: "{{ operator_release_source.stdout | trim }}:{{ operator_node_version }}\n"
         dest: "{{ operator_state_dir }}/deployment.sha256"
         owner: "{{ operator_user }}"
         group: "{{ operator_group }}"
@@ -284,3 +338,50 @@
   ansible.builtin.debug:
     msg: "{{ operator_worker_health.stdout_lines + ['Sign in to new profiles from Workers in the web UI.'] }}"
   when: not ansible_check_mode
+
+- name: Verify the selected checkout matches the deployment commit
+  ansible.builtin.command:
+    argv: [git, -C, "{{ operator_checkout }}", rev-parse, HEAD]
+  become: true
+  become_user: "{{ operator_user }}"
+  changed_when: false
+  register: operator_deployed_revision
+  when: not ansible_check_mode and operator_manage_checkout | bool
+
+- name: Require the checkout to match the requested release
+  ansible.builtin.assert:
+    that: operator_deployed_revision.stdout | trim == operator_target_commit
+    fail_msg: The checkout no longer matches the requested commit. Deployment verification failed.
+  when: not ansible_check_mode and operator_manage_checkout | bool
+
+- name: Verify the running controller started from the selected release
+  ansible.builtin.uri:
+    url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/version"
+    status_code: 200
+    return_content: true
+  vars:
+    operator_health_address: >-
+      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
+         '[::1]' if operator_health_host == '::' else
+         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
+  register: operator_running_release
+  until: >-
+    operator_running_release.status | default(0) == 200 and
+    operator_running_release.json.commit | default('') == operator_target_commit
+  retries: 15
+  delay: 2
+  when: not ansible_check_mode and operator_manage_checkout | bool
+
+- name: Record the verified deployed source commit
+  ansible.builtin.copy:
+    content: "{{ operator_target_commit }}\n"
+    dest: "{{ operator_state_dir }}/deployment.commit"
+    owner: "{{ operator_user }}"
+    group: "{{ operator_group }}"
+    mode: "0600"
+  when: not ansible_check_mode and operator_manage_checkout | bool
+
+- name: Show the verified deployed and running release
+  ansible.builtin.debug:
+    msg: "Verified checkout and running controller at {{ operator_target_commit }}."
+  when: not ansible_check_mode and operator_manage_checkout | bool

@@ -17,7 +17,7 @@ uv run ansible-playbook ansible/setup.yml -i server-212, -e @ansible/vars.local.
 
 Existing configuration, persistent data, and worker sign-ins are retained. New profiles require **Workers → Sign in** after installation. See the guide for configuration, rebuilding, and validation with `make ops-check`.
 
-For the existing `server-212` installation, use `-e @ansible/vars/server-212.yml`. This profile reads `/home/swarm/swarm-888/.env` on the remote host and preserves its credentials. Add `--check` to preview setup changes.
+For the existing `server-212` installation, push tested operator changes to `swarm-888/main`, then run the playbook locally with `-e @ansible/vars/server-212.yml`. It resolves the latest published `main` to an exact commit, reserves idle workers, stops services, updates `/home/swarm/swarm-888`, builds, restarts, and checks health. The server's `.env`, persistent data, and worker sign-ins are preserved. Add `--check` to preview deployment changes; a separate server login and `git pull` are no longer needed.
 
 ## Prerequisites and first start
 
@@ -156,13 +156,17 @@ Skill creation requires `SKILL.md` metadata, declared files, and deterministic c
 
 ## Managed source, deployments and MCP connections
 
-Open **Repositories → Add repository** first. A remote URL is required: **Create locally** initializes a checkout and configures `origin` without contacting it; **Clone existing** reads the remote and follows its default branch unless you select another. All work stays on this machine: the operator has no push action. New projects, connector code and reusable skills must belong to a registered repository. Existing runtime directories and services are preserved.
+Open **Repositories → Add repository** first. A remote URL is required: **Create locally** initializes a checkout and configures `origin` without contacting it; **Clone existing** reads the remote and follows its default branch unless you select another. Remote publishing starts disabled. New projects, connector code and reusable skills must belong to a registered repository. Existing runtime directories and services are preserved.
 
 To remove an obsolete entry, open **Projects**, select it, choose **Remove project**, and confirm. This removes its registry entry and project-owned connection registrations, including their assignments to other projects. Conversations, source files, Git history, and runtime files are retained; existing services continue running. Removal works for missing directories and projects outside the current `APP_PROJECTS_DIR`, without a worker connection. Finish or reconcile pending work before removing its registration.
 
 The controller owns checkouts at `APP_PROJECTS_DIR/repositories/<repository-id>` on an operator branch, normally `operator/work`. A repository can contain several projects, connectors and skills, each in a separate folder. Registered folders cannot overlap. Use `.` when the repository contains a single root package. **Discover packages** previews committed manifests (up to 200 manifests/50,000 tracked repository files), then **Import selected** registers them without running check/build/run commands. **Fetch & preview remote** explicitly reads remote updates; importing them only fast-forwards clean local history. Divergence requires manual reconciliation. One writing task holds the repository through source finalization; tasks in different repositories can run concurrently. Git must be installed.
 
 Set **Remote branch to fetch** before fetching a preview to inspect another branch, such as `release/stable` or `operator/work`. It defaults to the repository's registered source branch; a `main` branch is optional. The preview shows the selected branch and exact commit. Fetching preserves the working branch and registered source branch; importing still requires a clean checkout and compatible history.
+
+In **Remote publishing**, the owner can enable pushes, choose a push URL and branch, and turn on **Automatically push package commits**. A blank URL keeps the configured Git push URL, so HTTPS fetching can coexist with SSH publishing. The default push branch is the registered operator working branch. Configure SSH authentication for the normal controller account on the host; private keys and tokens do not belong in repository settings or conversations.
+
+Package creation and source saves remain committed locally before publishing. Automatic pushes use a durable queue and wait for task source finalization. **Push now** and the operator's `repository_push` tool queue the latest commit using the owner's saved destination. The UI shows queued, pushing, pushed and failed states with commit IDs. A failed remote push preserves the local package and commit; use **Retry push** after fixing access or network problems. Pushes do not force updates or rewrite remote history, and an operator cannot enable publishing or change its destination through a model tool.
 
 Every package has a strict v1 `operator-package.json`:
 

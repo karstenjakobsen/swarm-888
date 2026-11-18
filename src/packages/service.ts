@@ -10,6 +10,7 @@ import type { Config } from '../config.ts';
 import { managedFilePath } from '../managed/repository.ts';
 import type { ManagedSource } from '../managed/schemas.ts';
 import { PackageStore } from './store.ts';
+import { RepositoryPublisher } from './publishing.ts';
 import { packageImportInput, packageManifestMaxBytes, packageManifestSchema, packagePath, repositoryBranchSchema, repositoryInput, type PackageDiscovery, type PackageManifest, type PackageRecord, type RepositoryRecord } from './schemas.ts';
 
 const manifestFile='operator-package.json',failure=(message:string,statusCode=409)=>Object.assign(new Error(message),{statusCode});
@@ -43,13 +44,22 @@ function sourceFilePath(name:string):string {managedFilePath(name.split('/').map
 /** Repository-backed package source. Discovery reads Git objects and never executes package code. */
 export class PackageService {
   readonly store:PackageStore;
+  private publisher:RepositoryPublisher;
   private queues=new Map<string,Promise<unknown>>();
   private runContext=new AsyncLocalStorage<string>();
   private guard?:(repositoryId:string,runId?:string)=>void;
   private importGuard?:(manifest:PackageManifest)=>void;
   private writeScope?:(repositoryId:string,runId:string)=>string[];
   private secretGuard?:(value:unknown)=>void;
-  constructor(private config:Config,db:DatabaseSync){this.store=new PackageStore(db);this.store.recoverImports();}
+  constructor(private config:Config,db:DatabaseSync){
+    this.store=new PackageStore(db);this.store.recoverImports();
+    this.publisher=new RepositoryPublisher(db,{repository:id=>this.checkedRepository(id),exclusive:(id,operation)=>this.exclusive(id,operation),git:(directory,args)=>this.git(directory,args),remoteGit:(directory,args)=>this.remoteGit(directory,args,20_000),error:error=>this.safeDetail(error,'Remote publication failed')});
+  }
+  startPublishing():void{this.publisher.start();}
+  closePublishing():Promise<void>{return this.publisher.close();}
+  flushPushes():Promise<void>{return this.publisher.flush();}
+  async setPushSettings(id:string,input:unknown):Promise<RepositoryRecord>{this.assertNoSecrets(input);await this.publisher.configure(id,input);return this.repository(id);}
+  async requestPush(id:string):Promise<RepositoryRecord>{await this.publisher.request(id);return this.repository(id);}
   setImportGuard(guard:(manifest:PackageManifest)=>void):void{this.importGuard=guard;}
   setWriteGuard(guard:(repositoryId:string,runId?:string)=>void):void{this.guard=guard;}
   setWriteScope(scope:(repositoryId:string,runId:string)=>string[]):void{this.writeScope=scope;}
@@ -69,6 +79,7 @@ export class PackageService {
     return repository;
   }
   private observeRepository(repository:RepositoryRecord):RepositoryRecord {
+    repository={...repository,push:this.publisher.status(repository.id)};
     try{
       this.checkRepository(repository);const head=this.head(repository),dirty=Boolean(this.git(repository.directory,['status','--porcelain=v1','--untracked-files=all'])),remoteRef=`refs/remotes/origin/${repository.sourceBranch}`,hasRemoteBranch=Boolean(this.git(repository.directory,['show-ref','--verify',remoteRef],true));
       let ahead=0,behind=0;if(hasRemoteBranch){const counts=this.git(repository.directory,['rev-list','--left-right','--count',`HEAD...${remoteRef}`]).trim().split(/\s+/).map(Number);ahead=counts[0];behind=counts[1];}
@@ -87,12 +98,12 @@ export class PackageService {
       throw gitError(error);
     }
   }
-  private async remoteGit(directory:string,args:string[]):Promise<void>{
+  private async remoteGit(directory:string,args:string[],timeout=60_000):Promise<string>{
     const {argv,options}=gitOptions(directory,args);
     try{
-      const operation=runGitAsync('git',argv,options);
+      const operation=runGitAsync('git',argv,{...options,timeout});
       operation.child.stdin?.end();
-      await operation;
+      return (await operation).stdout;
     }catch(error){throw gitError(error);}
   }
   private object(repository:RepositoryRecord,spec:string):Buffer {
@@ -129,7 +140,7 @@ export class PackageService {
         if(value.mode==='create'){
           mkdirSync(directory,{mode:0o700});this.git(directory,['init','-q','-b',sourceBranch]);this.git(directory,['remote','add','origin',value.remoteUrl]);
           writeFileSync(join(directory,'.gitignore'),'node_modules/\ndist/\nbuild/\ncoverage/\n.env\n.env.*\n!.env.example\n*.log\n',{mode:0o600});
-          writeFileSync(join(directory,'README.md'),`# ${value.name}\n\nPackages managed locally by the operator. Remote pushes are disabled.\n`,{mode:0o600});
+          writeFileSync(join(directory,'README.md'),`# ${value.name}\n\nPackages managed by the operator. Remote publishing is configured in Repositories.\n`,{mode:0o600});
           this.git(directory,['add','--','.gitignore','README.md']);this.git(directory,['-c','user.name=AI Operator','-c','user.email=operator@localhost','commit','-qm','Initialize package repository']);
         }else{
           await this.remoteGit(dirname(directory),['clone','--quiet','--no-local','--no-hardlinks','--no-checkout','--single-branch',...(value.branch?['--branch',value.branch]:[]),'--',value.remoteUrl,directory]);
@@ -262,8 +273,8 @@ export class PackageService {
     return directory;
   }
   private importCreated(repository:RepositoryRecord,path:string,manifest:PackageManifest,commit:string):PackageRecord {
-    const prior=this.store.package(manifest.id);if(prior&&prior.repositoryId===repository.id&&prior.path===path&&prior.lastImportedCommit===commit)return prior;
-    const attempt=this.store.beginImport(repository.id,path,commit,manifest);this.store.importing(attempt.id);try{return this.store.finishImport(attempt.id,repository.id,path,commit,manifest);}catch(error){this.store.failImport(attempt.id,(error as Error).message);throw error;}
+    const prior=this.store.package(manifest.id);if(prior&&prior.repositoryId===repository.id&&prior.path===path&&prior.lastImportedCommit===commit){this.publisher.committed(repository.id,commit);return prior;}
+    const attempt=this.store.beginImport(repository.id,path,commit,manifest);this.store.importing(attempt.id);try{const record=this.store.finishImport(attempt.id,repository.id,path,commit,manifest);this.publisher.committed(repository.id,commit);return record;}catch(error){this.store.failImport(attempt.id,(error as Error).message);throw error;}
   }
   async createPackage(repositoryId:string,input:{path:string;manifest:unknown;files?:Record<string,string>}):Promise<PackageRecord>{return this.exclusive(repositoryId,()=>{
     const runId=this.runContext.getStore();this.assertWritable(repositoryId,runId);const repository=this.checkedRepository(repositoryId);const path=packagePath(input.path),manifest=packageManifestSchema.parse(input.manifest),directory=this.directory(repository,path);

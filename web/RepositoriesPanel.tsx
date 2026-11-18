@@ -42,6 +42,18 @@ export function RepositoriesPanel({ onError, onProject }: { onError: (message: s
       if (mounted.current && view === epoch.current) onError(`Changes saved. Could not refresh repository status. ${managementError(cause)}`);
     });
   };
+  useEffect(() => {
+    if (!selected || busy || !['pending', 'pushing'].includes(selected.push?.state ?? '')) return;
+    let cancelled = false;
+    const id = selected.id;
+    const timer = setInterval(() => {
+      const view = epoch.current, generation = loadGeneration.current;
+      void api<RepositoryRecord>(`/repositories/${encodeURIComponent(id)}`).then(repository => {
+        if (!cancelled && mounted.current && view === epoch.current && generation === loadGeneration.current) setRepositories(previous => previous.map(item => item.id === id ? repository : item));
+      }).catch(() => { /* A later refresh can recover a transient connection failure. */ });
+    }, 1500);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [selected?.id, selected?.push?.state, busy]);
   const choose = (id: string) => { epoch.current++; setSelectedId(id); setEditing(false); setPackageEditor(null); setDiscovery(null); setSelectedPaths([]); setHistory(null); setNotice(''); setRegistrationNotice(''); setBusy(''); };
   const discover = async (refresh = false) => {
     if (!selected || busy) return;
@@ -79,7 +91,7 @@ export function RepositoriesPanel({ onError, onProject }: { onError: (message: s
     loadGeneration.current++;
     setRepositories(previous => [...previous.filter(item => item.id !== repository.id), repository]);
     choose(repository.id);
-    setNotice('Repository registered. Changes and commits stay on this machine.');
+    setNotice('Repository registered. Enable remote publishing when you are ready to push commits.');
   };
   const acceptPackage = ({ notice: warning, ...item }: SavedPackage) => {
     loadGeneration.current++;
@@ -97,7 +109,8 @@ export function RepositoriesPanel({ onError, onProject }: { onError: (message: s
       <div className="project-content">{editing ? <RepositoryEditor onCancel={() => setEditing(false)} onError={onError} onSave={acceptRepository} /> : selected ? <>
         <div className="project-detail-heading"><div><div className="eyebrow">GIT REPOSITORY</div><h2>{selected.name}</h2><p>{repositoryPackages.length} registered {repositoryPackages.length === 1 ? 'package' : 'packages'}</p></div><button className="subtle-button" disabled={Boolean(busy)} onClick={() => void load().catch(cause => onError(managementError(cause)))}><Icon name="refresh" size={14} />Refresh</button></div>
         <dl className="project-component-facts repository-facts"><dt>Remote</dt><dd><code>{selected.remoteUrl}</code></dd><dt>Working branch</dt><dd><code>{selected.branch}</code></dd><dt>Source branch</dt><dd><code>{selected.sourceBranch}</code></dd><dt>Local checkout</dt><dd><code>{selected.directory}</code></dd><dt>State</dt><dd>{selected.status === 'ready' ? 'Ready' : 'Needs attention'}</dd></dl>
-        <p className="small-note">Commits are saved locally. Remote pushes are disabled.</p>{selected.error && <p className="management-warning" role="status">{selected.error}</p>}{selected.head && <p className="small-note repository-git-status"><code title={selected.head}>{shortCommit(selected.head)}</code> · {selected.hasRemoteBranch ? `${selected.ahead ?? 0} local commits · ${selected.behind ?? 0} behind` : 'No remote branch observed'}{selected.dirty ? ' · Uncommitted changes' : ''}</p>}
+        <p className="small-note">Commits are saved locally before remote publishing.</p>{selected.error && <p className="management-warning" role="status">{selected.error}</p>}{selected.head && <p className="small-note repository-git-status"><code title={selected.head}>{shortCommit(selected.head)}</code> · {selected.hasRemoteBranch ? `${selected.ahead ?? 0} local commits · ${selected.behind ?? 0} behind` : 'No remote branch observed'}{selected.dirty ? ' · Uncommitted changes' : ''}</p>}
+        <RepositoryPublishing key={selected.id} repository={selected} disabled={Boolean(busy)} onBusy={value => { if (value) epoch.current++; setBusy(value); }} onError={onError} onSave={(repository, message) => { loadGeneration.current++; setRepositories(previous => previous.map(item => item.id === repository.id ? repository : item)); setNotice(message); }} />
         <div><label htmlFor="repository-fetch-branch">Remote branch to fetch</label><input id="repository-fetch-branch" value={fetchBranch} disabled={Boolean(busy)} maxLength={200} placeholder={selected.sourceBranch} onChange={event => { setFetchBranch(event.target.value); setDiscovery(null); setSelectedPaths([]); }} /></div>
         <div className="connection-actions"><button className="primary-button" disabled={Boolean(busy)} onClick={() => void discover()}><Icon name="search" size={14} />{busy === 'discover' ? 'Discovering…' : 'Discover packages'}</button><button className="secondary-button" disabled={Boolean(busy)} onClick={() => void discover(true)}>Fetch &amp; preview remote</button><button className="secondary-button" disabled={Boolean(busy)} onClick={() => { setPackageEditor('create'); setDiscovery(null); }}>Create package</button><button className="secondary-button" disabled={Boolean(busy)} onClick={() => { setPackageEditor('adopt'); setDiscovery(null); }}>Adopt folder</button><button className="subtle-button" disabled={Boolean(busy)} onClick={() => void showHistory(null)}>Repository import history</button></div>
         {notice && <p className="management-notice" role="status">{notice}</p>}{registrationNotice && <p className="management-warning" role="status">{registrationNotice}</p>}{history?.packageId === null && <ImportHistory attempts={history.attempts} />}
@@ -106,6 +119,51 @@ export function RepositoriesPanel({ onError, onProject }: { onError: (message: s
         <section className="platform-section" aria-label="Registered packages"><h3>Packages</h3>{repositoryPackages.length ? <div className="repository-packages">{repositoryPackages.map(item => <article key={item.id} className="repository-package"><div className="project-component-heading"><span className="project-component-icon"><Icon name={item.kind === 'project' ? 'layers' : item.kind === 'skill' ? 'skill' : 'link'} size={17} /></span><div><div className="eyebrow">{packageNames[item.kind]}</div><h4>{item.name}</h4><p>v{item.version} · <code>{item.path || '.'}</code></p></div><span className="connection-status connected">Imported</span></div><dl className="project-component-facts"><dt>Package ID</dt><dd><code>{item.id}</code></dd><dt>Imported revision</dt><dd><code title={item.lastImportedCommit}>{shortCommit(item.lastImportedCommit)}</code></dd><dt>Imported at</dt><dd>{date(item.lastImportedAt)}</dd></dl><div className="connection-actions"><button className="subtle-button" disabled={Boolean(busy)} onClick={() => void showHistory(item.id)}>{busy === `history:${item.id}` ? 'Loading…' : 'Import history'}</button>{item.kind === 'project' && <button className="subtle-button" onClick={() => onProject(item.id)}>Open project<Icon name="chevron" size={12} /></button>}</div>{history?.packageId === item.id && <ImportHistory attempts={history.attempts} />}</article>)}</div> : <p className="small-note">Discover existing manifests or create the first package in this repository.</p>}</section>
       </> : <div className="project-welcome"><div className="resource-empty-icon"><Icon name="code" size={27} /></div><h2>A home for reusable code.</h2><p>Register one Git repository and keep each project, connector, or skill in its own folder with an operator-package.json manifest.</p><button className="primary-button" onClick={() => setEditing(true)}>Add your first repository</button></div>}</div>
     </div>
+  </section>;
+}
+
+function RepositoryPublishing({ repository, disabled, onBusy, onSave, onError }: { repository: RepositoryRecord; disabled: boolean; onBusy: (value: string) => void; onSave: (repository: RepositoryRecord, message: string) => void; onError: (message: string) => void }) {
+  const publishing = repository.push;
+  const [enabled, setEnabled] = useState(publishing?.enabled ?? false);
+  const [autoPush, setAutoPush] = useState(publishing?.autoPush ?? false);
+  const [pushUrl, setPushUrl] = useState(publishing?.pushUrl ?? '');
+  const [branch, setBranch] = useState(publishing?.branch ?? repository.branch);
+  const mounted = useRef(true), operation = useRef('');
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    setEnabled(publishing?.enabled ?? false); setAutoPush(publishing?.autoPush ?? false);
+    setPushUrl(publishing?.pushUrl ?? ''); setBranch(publishing?.branch ?? repository.branch);
+  }, [publishing?.enabled, publishing?.autoPush, publishing?.pushUrl, publishing?.branch, repository.branch]);
+  const run = async (kind: 'settings' | 'push') => {
+    if (disabled || operation.current) return;
+    operation.current = kind; onBusy(`push:${kind}`);
+    try {
+      const root = `/repositories/${encodeURIComponent(repository.id)}`;
+      const result = kind === 'settings'
+        ? await api<RepositoryRecord>(`${root}/push-settings`, { method: 'PATCH', body: JSON.stringify({ enabled, autoPush: enabled && autoPush, ...(pushUrl.trim() ? { pushUrl: pushUrl.trim() } : {}), ...(branch.trim() ? { branch: branch.trim() } : {}) }) })
+        : await post<RepositoryRecord>(`${root}/push`, {});
+      if (mounted.current) onSave(result, kind === 'settings' ? 'Remote publishing settings saved.' : 'Remote push queued. Local commits remain saved.');
+    } catch (cause) { if (mounted.current) onError(managementError(cause)); }
+    finally { operation.current = ''; if (mounted.current) onBusy(''); }
+  };
+  const state = publishing?.state ?? 'disabled';
+  const labels = { disabled: 'Disabled', idle: 'Ready', pending: 'Push queued', pushing: 'Pushing', pushed: 'Pushed', failed: 'Push failed' };
+  const pushing = state === 'pending' || state === 'pushing';
+  const settingsChanged = enabled !== (publishing?.enabled ?? false) || autoPush !== (publishing?.autoPush ?? false) || pushUrl !== (publishing?.pushUrl ?? '') || branch !== (publishing?.branch ?? repository.branch);
+  return <section className="platform-section" aria-label="Remote publishing">
+    <div className="project-detail-heading"><div><h3>Remote publishing</h3><p className="small-note">Choose where this repository can publish its commits. Existing remote history is preserved.</p></div><span className={`connection-status ${state === 'pushed' ? 'connected' : state === 'failed' ? 'error' : ''}`} role="status">{labels[state]}</span></div>
+    {publishing?.error && <p className="management-warning" role="status">{publishing.error} Local commits remain saved.</p>}
+    {(publishing?.commit || publishing?.pushedCommit) && <dl className="project-component-facts"><dt>Queued commit</dt><dd>{publishing.commit ? <code title={publishing.commit}>{shortCommit(publishing.commit)}</code> : '—'}</dd><dt>Published commit</dt><dd>{publishing.pushedCommit ? <code title={publishing.pushedCommit}>{shortCommit(publishing.pushedCommit)}</code> : '—'}</dd></dl>}
+    <form onSubmit={event => { event.preventDefault(); void run('settings'); }}>
+      <fieldset className="plain-fieldset" disabled={disabled}>
+        <label className="checkbox-label"><input type="checkbox" checked={enabled} onChange={event => { setEnabled(event.target.checked); if (!event.target.checked) setAutoPush(false); }} /><span>Allow remote pushes</span></label>
+        <label className="checkbox-label"><input type="checkbox" checked={autoPush} disabled={!enabled} onChange={event => setAutoPush(event.target.checked)} /><span>Automatically push package commits</span></label>
+        <label htmlFor="repository-push-url">Push remote URL</label><input id="repository-push-url" value={pushUrl} onChange={event => setPushUrl(event.target.value)} placeholder="Use the repository’s existing Git push URL" maxLength={2000} />
+        <p className="small-note">Leave blank to keep the configured push URL. Authentication is configured on the server.</p>
+        <label htmlFor="repository-push-branch">Push branch</label><input id="repository-push-branch" value={branch} onChange={event => setBranch(event.target.value)} placeholder={repository.branch} maxLength={200} required={enabled} />
+        <div className="connection-actions"><button className="secondary-button" type="submit">{operation.current === 'settings' ? 'Saving…' : 'Save publishing settings'}</button><button className="primary-button" type="button" disabled={!publishing?.enabled || pushing || settingsChanged} onClick={() => void run('push')}>{operation.current === 'push' ? 'Queuing…' : state === 'failed' ? 'Retry push' : 'Push now'}</button></div>
+      </fieldset>
+    </form>
   </section>;
 }
 
@@ -123,7 +181,7 @@ function RepositoryEditor({ onSave, onCancel, onError }: { onSave: (repository: 
     catch (cause) { if (mounted.current) onError(managementError(cause)); }
     finally { if (mounted.current) setSaving(false); }
   };
-  return <form className="project-editor" onSubmit={save}><div className="project-detail-heading"><div><div className="eyebrow">GIT SOURCE</div><h2>Add a repository</h2></div><button type="button" className="icon-button" aria-label="Close repository editor" onClick={onCancel}><Icon name="close" size={16} /></button></div><fieldset className="plain-fieldset" disabled={saving}><label htmlFor="repository-name">Repository name</label><input id="repository-name" value={name} onChange={event => setName(event.target.value)} maxLength={120} required autoFocus /><label htmlFor="repository-remote">Remote URL</label><input id="repository-remote" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="git@github.com:owner/repository.git" required /><p className="small-note">Use an SSH or HTTPS URL without a password or token. The remote is recorded; nothing is pushed.</p><label htmlFor="repository-mode">Start with</label><select id="repository-mode" value={mode} onChange={event => setMode(event.target.value as 'create' | 'clone')}><option value="create">A new local repository</option><option value="clone">Clone an existing repository</option></select><label htmlFor="repository-branch">{mode === 'clone' ? 'Source branch (optional)' : 'Branch (optional)'}</label><input id="repository-branch" value={branch} onChange={event => setBranch(event.target.value)} placeholder={mode === 'clone' ? 'Remote default branch' : 'main'} /><div className="editor-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving || !name.trim() || !remoteUrl.trim()}>{saving ? mode === 'clone' ? 'Cloning…' : 'Creating…' : 'Register repository'}</button></div></fieldset></form>;
+  return <form className="project-editor" onSubmit={save}><div className="project-detail-heading"><div><div className="eyebrow">GIT SOURCE</div><h2>Add a repository</h2></div><button type="button" className="icon-button" aria-label="Close repository editor" onClick={onCancel}><Icon name="close" size={16} /></button></div><fieldset className="plain-fieldset" disabled={saving}><label htmlFor="repository-name">Repository name</label><input id="repository-name" value={name} onChange={event => setName(event.target.value)} maxLength={120} required autoFocus /><label htmlFor="repository-remote">Remote URL</label><input id="repository-remote" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} placeholder="git@github.com:owner/repository.git" required /><p className="small-note">Use an SSH or HTTPS URL without a password or token. Remote publishing starts disabled.</p><label htmlFor="repository-mode">Start with</label><select id="repository-mode" value={mode} onChange={event => setMode(event.target.value as 'create' | 'clone')}><option value="create">A new local repository</option><option value="clone">Clone an existing repository</option></select><label htmlFor="repository-branch">{mode === 'clone' ? 'Source branch (optional)' : 'Branch (optional)'}</label><input id="repository-branch" value={branch} onChange={event => setBranch(event.target.value)} placeholder={mode === 'clone' ? 'Remote default branch' : 'main'} /><div className="editor-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={saving || !name.trim() || !remoteUrl.trim()}>{saving ? mode === 'clone' ? 'Cloning…' : 'Creating…' : 'Register repository'}</button></div></fieldset></form>;
 }
 
 function PackageEditor({ repository, mode, onSave, onCancel, onError }: { repository: RepositoryRecord; mode: 'create' | 'adopt'; onSave: (value: SavedPackage) => void; onCancel: () => void; onError: (message: string) => void }) {

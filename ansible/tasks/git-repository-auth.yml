@@ -1,0 +1,35 @@
+---
+- name: Resolve the registered package checkout
+  ansible.builtin.command:
+    argv: [git, -C, "{{ operator_git_identity.repository_dir }}", rev-parse, --show-toplevel]
+  become: true
+  become_user: "{{ operator_user }}"
+  check_mode: false
+  changed_when: false
+  register: operator_git_repository_root
+
+- name: Require the expected package checkout
+  ansible.builtin.assert:
+    that: operator_git_repository_root.stdout | trim == operator_git_identity.repository_dir
+    fail_msg: The SSH identity must refer to its canonical registered repository directory.
+
+- name: Inspect the repository SSH command
+  ansible.builtin.command:
+    argv: [git, -C, "{{ operator_git_identity.repository_dir }}", config, --local, --get, core.sshCommand]
+  become: true
+  become_user: "{{ operator_user }}"
+  check_mode: false
+  changed_when: false
+  failed_when: operator_git_ssh_command.rc not in [0, 1]
+  register: operator_git_ssh_command
+
+- name: Select the controller's dedicated identity for this repository
+  ansible.builtin.command:
+    argv: [git, -C, "{{ operator_git_identity.repository_dir }}", config, --local, core.sshCommand, "{{ operator_git_expected_ssh }}"]
+  vars:
+    operator_git_expected_ssh: >-
+      ssh -i {{ operator_git_identity.path }} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes
+  become: true
+  become_user: "{{ operator_user }}"
+  changed_when: true
+  when: operator_git_ssh_command.stdout | trim != operator_git_expected_ssh
