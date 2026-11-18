@@ -5,7 +5,7 @@ import { projectCreateInput, projectUpdateInput, componentInput, componentUpdate
 import { sourceCreateInput, sourceWriteInput, sourceCommitInput } from '../managed/schemas.ts';
 import { connectorPackageInput, connectorPatchInput, connectorAssignmentInput, connectorCall } from '../connectors/schemas.ts';
 import { createPackageInput } from '../packages/inputs.ts';
-import { repositoryInput,packageImportInput,packageVersion } from '../packages/schemas.ts';
+import { repositoryBranchSchema,repositoryInput,packageImportInput,packageVersion } from '../packages/schemas.ts';
 
 export const skillName = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 const fileMap = z.record(z.string(), z.string().max(1_000_000)).refine(v => Object.keys(v).length <= 100, 'At most 100 files');
@@ -39,7 +39,7 @@ export type CheckEvidence = { passed: boolean; checks: Array<{ name: string; exi
 export const toolSchemas = {
   repository_list:z.object({}).strict(),
   repository_register:repositoryInput,
-  repository_discover:z.object({id:z.string().uuid()}).strict(),
+  repository_discover:z.object({id:z.string().uuid(),refresh:z.boolean().optional(),branch:repositoryBranchSchema.optional()}).strict(),
   repository_push:z.object({id:z.string().uuid()}).strict(),
   repository_import:packageImportInput.extend({id:z.string().uuid()}),
   package_list:z.object({}).strict(),
@@ -96,7 +96,7 @@ export const toolSchemas = {
 export const toolDescriptions: Record<keyof typeof toolSchemas, string> = {
   repository_list:'List registered source Git repositories. Each code project, connector and reusable skill belongs to a registered repository.',
   repository_register:'Register a repository with its required remote URL. mode create initializes a local checkout and configures origin; clone reads an existing remote. Does not enable remote publication.',
-  repository_discover:'Discover and validate v1 operator-package.json manifests at a committed revision. Does not execute package code.',
+  repository_discover:'Discover v1 operator-package.json manifests locally, or fetch remote updates with refresh true and an optional branch. Returns the exact preview commit for repository_import.expectedCommit. Fetching preserves the working checkout and registered source branch; package code is not executed.',
   repository_push:'Queue the current committed repository revision for publication to its owner-enabled remote and branch. Cannot enable pushing, change destinations or force-push. Publication waits for source finalization; repository_list reports pending, pushed or failed status.',
   repository_import:'Import selected discovered folders at an expected Git commit. Preserves canonical UUIDs and records durable import history. Does not validate, deploy or execute code.',
   package_create:'Create a project, connector or skill package in a registered repository folder and commit it locally. Use a connector template for a new MCP server or adopt existing code with explicit transport metadata. Runtime tests and deployment are separate actions. Owner-enabled automatic publishing queues accepted commits.',

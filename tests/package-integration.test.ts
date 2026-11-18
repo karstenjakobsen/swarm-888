@@ -156,6 +156,28 @@ test('repository fetch API previews a selected non-main branch and imports its e
   }finally{await f.close();}
 });
 
+test('operator tools fetch a selected non-main branch and import its exact revision without switching the working branch',async()=>{
+  const f=await fixture();try{
+    const remote=join(f.root,'operator-branch-remote');mkdirSync(remote);git(remote,'init','-q','-b','release/stable');
+    const manifest={schemaVersion:1,id:randomUUID(),kind:'project',name:'Operator branch package',version:'1.0.0',description:'Imported through operator tools'};
+    write(remote,'apps/report/operator-package.json',JSON.stringify(manifest));git(remote,'add','.');git(remote,'commit','-qm','Stable source');
+    const initial=git(remote,'rev-parse','HEAD'),repository=await f.ctl.brain.callTool('repository_register',{name:'Operator source',remoteUrl:remote,branch:'release/stable',mode:'clone'});
+    git(remote,'checkout','-qb','feature/operator-import');write(remote,'apps/report/operator-package.json',JSON.stringify({...manifest,version:'1.1.0'}));git(remote,'add','.');git(remote,'commit','-qm','New remote package revision');
+    const latest=git(remote,'rev-parse','HEAD');
+    const local=await f.ctl.brain.callTool('repository_discover',{id:repository.id});assert.equal(local.commit,initial);assert.equal(local.remoteBranch,undefined);
+    await assert.rejects(f.ctl.brain.callTool('repository_discover',{id:repository.id,branch:'feature/operator-import'}),/refresh|branch/i);
+    await assert.rejects(f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true,branch:'release/../escape'}));
+    const stable=await f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true});assert.equal(stable.commit,initial);assert.equal(stable.remoteBranch,'release/stable');
+    const preview=await f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true,branch:'feature/operator-import'});
+    assert.equal(preview.commit,latest);assert.equal(preview.remoteBranch,'feature/operator-import');assert.equal(preview.packages[0].manifest.version,'1.1.0');
+    assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);
+    const imported=await f.ctl.brain.callTool('repository_import',{id:repository.id,paths:['apps/report'],expectedCommit:preview.commit});
+    assert.equal(imported.packages[0].lastImportedCommit,latest);assert.equal(imported.packages[0].version,'1.1.0');
+    assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);assert.equal(f.ctl.managed.packages.repository(repository.id).sourceBranch,'release/stable');
+    assert.equal(f.ctl.projects.get(manifest.id).source?.commit,latest);assert.equal(f.worker.requests.length,0);assert.equal(git(repository.directory,'status','--porcelain'),'');
+  }finally{await f.close();}
+});
+
 test('clone, discovery and selected import register all package kinds without executing code, retain failed import history and prepare binary releases',async()=>{
   const f=await fixture();let executed=0;
   try{
