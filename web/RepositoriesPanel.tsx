@@ -45,14 +45,17 @@ export function RepositoriesPanel({ onError, onProject }: { onError: (message: s
   useEffect(() => {
     if (!selected || busy || !['pending', 'pushing'].includes(selected.push?.state ?? '')) return;
     let cancelled = false;
+    let pending: AbortController | undefined;
     const id = selected.id;
     const timer = setInterval(() => {
+      if (pending) return;
+      const request = new AbortController(); pending = request;
       const view = epoch.current, generation = loadGeneration.current;
-      void api<RepositoryRecord>(`/repositories/${encodeURIComponent(id)}`).then(repository => {
+      void api<RepositoryRecord>(`/repositories/${encodeURIComponent(id)}`, { signal: AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]) }).then(repository => {
         if (!cancelled && mounted.current && view === epoch.current && generation === loadGeneration.current) setRepositories(previous => previous.map(item => item.id === id ? repository : item));
-      }).catch(() => { /* A later refresh can recover a transient connection failure. */ });
+      }).catch(() => { /* A later refresh can recover a transient connection failure. */ }).finally(() => { pending = undefined; });
     }, 1500);
-    return () => { cancelled = true; clearInterval(timer); };
+    return () => { cancelled = true; pending?.abort(); clearInterval(timer); };
   }, [selected?.id, selected?.push?.state, busy]);
   const choose = (id: string) => { epoch.current++; setSelectedId(id); setEditing(false); setPackageEditor(null); setDiscovery(null); setSelectedPaths([]); setHistory(null); setNotice(''); setRegistrationNotice(''); setBusy(''); };
   const discover = async (refresh = false) => {
@@ -140,7 +143,7 @@ function RepositoryPublishing({ repository, disabled, onBusy, onSave, onError }:
     try {
       const root = `/repositories/${encodeURIComponent(repository.id)}`;
       const result = kind === 'settings'
-        ? await api<RepositoryRecord>(`${root}/push-settings`, { method: 'PATCH', body: JSON.stringify({ enabled, autoPush: enabled && autoPush, ...(pushUrl.trim() ? { pushUrl: pushUrl.trim() } : {}), ...(branch.trim() ? { branch: branch.trim() } : {}) }) })
+        ? await api<RepositoryRecord>(`${root}/push-settings`, { method: 'PATCH', body: JSON.stringify({ enabled, autoPush: enabled && autoPush, pushUrl: pushUrl.trim() || null, ...(branch.trim() ? { branch: branch.trim() } : {}) }) })
         : await post<RepositoryRecord>(`${root}/push`, {});
       if (mounted.current) onSave(result, kind === 'settings' ? 'Remote publishing settings saved.' : 'Remote push queued. Local commits remain saved.');
     } catch (cause) { if (mounted.current) onError(managementError(cause)); }
@@ -159,7 +162,7 @@ function RepositoryPublishing({ repository, disabled, onBusy, onSave, onError }:
         <label className="checkbox-label"><input type="checkbox" checked={enabled} onChange={event => { setEnabled(event.target.checked); if (!event.target.checked) setAutoPush(false); }} /><span>Allow remote pushes</span></label>
         <label className="checkbox-label"><input type="checkbox" checked={autoPush} disabled={!enabled} onChange={event => setAutoPush(event.target.checked)} /><span>Automatically push package commits</span></label>
         <label htmlFor="repository-push-url">Push remote URL</label><input id="repository-push-url" value={pushUrl} onChange={event => setPushUrl(event.target.value)} placeholder="Use the repository’s existing Git push URL" maxLength={2000} />
-        <p className="small-note">Leave blank to keep the configured push URL. Authentication is configured on the server.</p>
+        <p className="small-note">Leave blank to use the repository’s Git push URL. Authentication is configured on the server.</p>
         <label htmlFor="repository-push-branch">Push branch</label><input id="repository-push-branch" value={branch} onChange={event => setBranch(event.target.value)} placeholder={repository.branch} maxLength={200} required={enabled} />
         <div className="connection-actions"><button className="secondary-button" type="submit">{operation.current === 'settings' ? 'Saving…' : 'Save publishing settings'}</button><button className="primary-button" type="button" disabled={!publishing?.enabled || pushing || settingsChanged} onClick={() => void run('push')}>{operation.current === 'push' ? 'Queuing…' : state === 'failed' ? 'Retry push' : 'Push now'}</button></div>
       </fieldset>

@@ -95,16 +95,18 @@
          if operator_existing.results[1].stat.exists and not operator_replace_env | bool
          else operator_port }}
 
+- name: Format the effective controller address for HTTP health checks
+  ansible.builtin.set_fact:
+    operator_health_address: >-
+      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
+         '[::1]' if operator_health_host == '::' else
+         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
+
 - name: Inspect the release reported by an already running controller
   ansible.builtin.uri:
     url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/version"
     status_code: 200
     timeout: 5
-  vars:
-    operator_health_address: >-
-      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
-         '[::1]' if operator_health_host == '::' else
-         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
   check_mode: false
   failed_when: false
   register: operator_running_before
@@ -287,11 +289,6 @@
   ansible.builtin.uri:
     url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/session"
     status_code: 200
-  vars:
-    operator_health_address: >-
-      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
-         '[::1]' if operator_health_host == '::' else
-         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
   register: operator_http_health
   until: operator_http_health.status | default(0) == 200
   retries: 20
@@ -359,11 +356,6 @@
     url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/version"
     status_code: 200
     return_content: true
-  vars:
-    operator_health_address: >-
-      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
-         '[::1]' if operator_health_host == '::' else
-         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
   register: operator_running_release
   until: >-
     operator_running_release.status | default(0) == 200 and

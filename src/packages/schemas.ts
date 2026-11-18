@@ -36,7 +36,7 @@ export const remoteUrlSchema=z.string().trim().min(1).max(2000).refine(value=>{
 },'Use a Git remote URL without embedded credentials, query parameters, or fragments');
 export const repositoryBranchSchema=z.string().min(1).max(200).regex(/^[\w][\w./-]*$/).refine(value=>!value.includes('..')&&value.split('/').every(piece=>piece&&!piece.startsWith('.')&&!piece.endsWith('.')&&!piece.endsWith('.lock')),'Use a Git branch name such as release/packages');
 export const repositoryInput=z.object({name:z.string().trim().min(1).max(120),remoteUrl:remoteUrlSchema,branch:repositoryBranchSchema.optional(),mode:z.enum(['create','clone']).default('create')}).strict();
-export const repositoryPushSettingsInput=z.object({enabled:z.boolean(),autoPush:z.boolean(),pushUrl:remoteUrlSchema.optional(),branch:repositoryBranchSchema.optional()}).strict().refine(value=>value.enabled||!value.autoPush,'Enable remote pushing before enabling automatic pushes');
+export const repositoryPushSettingsInput=z.object({enabled:z.boolean(),autoPush:z.boolean(),pushUrl:remoteUrlSchema.nullable().optional(),branch:repositoryBranchSchema.optional()}).strict().refine(value=>value.enabled||!value.autoPush,'Enable remote pushing before enabling automatic pushes');
 export const packageImportInput=z.object({paths:z.array(packagePathSchema).min(1).max(200),expectedCommit:z.string().regex(/^[0-9a-f]{40,64}$/).optional()}).strict();
 
 export interface RepositoryPushStatus {enabled:boolean;autoPush:boolean;pushUrl:string|null;branch:string|null;state:'disabled'|'idle'|'pending'|'pushing'|'pushed'|'failed';commit:string|null;pushedCommit:string|null;error:string|null;updatedAt:string|null}

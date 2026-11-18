@@ -11,25 +11,27 @@ export class ConnectorStore {
   }
   list():Connector[]{return (this.db.prepare('SELECT * FROM connectors ORDER BY name,id').all() as Row[]).map(row=>this.expand(row));}
   get(id:string):Connector|undefined {const row=this.db.prepare('SELECT * FROM connectors WHERE id=?').get(id) as Row|undefined;return row?this.expand(row):undefined;}
+  forPackage(packageId:string):Connector|undefined{
+    const row=this.db.prepare(`SELECT * FROM connectors WHERE packageId=? OR (packageId IS NULL AND projectId=?)
+      ORDER BY CASE WHEN packageId=? THEN 0 ELSE 1 END,name,id LIMIT 1`).get(packageId,packageId,packageId) as Row|undefined;
+    return row?this.expand(row):undefined;
+  }
   nameExists(name:string,except=''){return Boolean(this.db.prepare('SELECT id FROM connectors WHERE name=? AND id<>?').get(name,except));}
   create(value:Connector){
     const definition=value.transport==='stdio'?{transport:value.transport,command:value.command,args:value.args,...(value.cwd?{cwd:value.cwd}:{})}:{transport:value.transport,url:value.url};
     this.db.prepare('INSERT INTO connectors(id,name,description,enabled,definition,projectId,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)').run(value.id,value.name,value.description,value.enabled?1:0,JSON.stringify(definition),value.projectId,value.createdAt,value.updatedAt);
   }
   update(id:string,input:Pick<Connector,'name'|'description'|'enabled'>){
-    this.db.prepare('UPDATE connectors SET name=?,description=?,enabled=?,updatedAt=? WHERE id=?').run(input.name,input.description,input.enabled?1:0,new Date().toISOString(),id);
-  }
-  private packageConnection(packageId:string):{id:string}|undefined{
-    return this.db.prepare(`SELECT id FROM connectors WHERE packageId=? OR (packageId IS NULL AND projectId=?)
-      ORDER BY CASE WHEN packageId=? THEN 0 ELSE 1 END,name,id LIMIT 1`).get(packageId,packageId,packageId) as {id:string}|undefined;
+    const enabled=input.enabled?1:0;
+    this.db.prepare('UPDATE connectors SET name=?,description=?,enabled=?,updatedAt=? WHERE id=? AND (name<>? OR description<>? OR enabled<>?)').run(input.name,input.description,enabled,new Date().toISOString(),id,input.name,input.description,enabled);
   }
   assertPackageName(packageId:string,name:string){
-    const connection=this.packageConnection(packageId);
+    const connection=this.forPackage(packageId);
     if(connection&&this.nameExists(name,connection.id))throw Object.assign(new Error('That connection name is already registered'),{statusCode:409});
   }
   syncPackageDetails(packageId:string,input:{name:string;description:string}){
-    this.assertPackageName(packageId,input.name);const connection=this.packageConnection(packageId);
-    if(connection)this.db.prepare('UPDATE connectors SET name=?,description=?,updatedAt=? WHERE id=?').run(input.name,input.description,new Date().toISOString(),connection.id);
+    this.assertPackageName(packageId,input.name);const connection=this.forPackage(packageId);
+    if(connection)this.db.prepare('UPDATE connectors SET name=?,description=?,updatedAt=? WHERE id=? AND (name<>? OR description<>?)').run(input.name,input.description,new Date().toISOString(),connection.id,input.name,input.description);
   }
   attachPackage(id:string,packageId:string){
     this.db.prepare(`UPDATE connectors SET packageId=?,tools='[]',status='untested',checkedAt=NULL,

@@ -106,3 +106,75 @@ test('source metadata name conflicts fail before modifying source or accepting a
     assert.equal(git(f.repository.directory,'rev-parse','HEAD'),original.source.commit);assert.equal(f.connectors.get(connection.id).name,'Source connection');
   }finally{f.close();}
 });
+
+test('concurrent connector name changes reject conflicts before committing across repositories',async context=>{
+  for(const mode of ['project','source','commit'])await context.test(mode,async()=>{
+    const f=await fixture();try{
+      const second=await f.managed.packages.register({name:'Independent repository',remoteUrl:'https://example.test/independent.git',mode:'create'});
+      const connections=await Promise.all([f.repository,second].map((repository,index)=>f.connectors.createPackaged({name:`Connection ${index}`,transport:'http',url:'https://example.test/mcp',repositoryId:repository.id,packagePath:'connectors/service'})));
+      const initial=connections.map(connection=>({name:connection.name,commit:connection.source!.commit}));
+      const operations=connections.map(connection=>{
+        const id=connection.packageId!,manifest={...f.managed.packages.manifest(id),name:'Concurrent target'};
+        if(mode==='project')return f.managed.updateProject(id,{name:manifest.name});
+        if(mode==='source')return f.managed.writeSource(id,{files:{'operator-package.json':JSON.stringify(manifest,null,2)+'\n'}});
+        writeFileSync(join(connection.source!.workspacePath,'operator-package.json'),JSON.stringify(manifest,null,2)+'\n');
+        return f.managed.commitSource(id);
+      });
+      const results=await Promise.allSettled(operations);assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+      for(const [index,result] of results.entries()){
+        const connection=connections[index],id=connection.packageId!,accepted=f.managed.packages.manifest(id);
+        if(result.status==='rejected'){
+          assert.match(result.reason.message,/already registered/);assert.equal(result.reason.statusCode,409);
+          assert.equal(f.managed.packages.source(id).commit,initial[index].commit,'A rejected metadata edit must not create a Git commit');
+          assert.equal(accepted.name,initial[index].name);
+        }else assert.equal(accepted.name,'Concurrent target');
+        assert.equal(f.connectors.get(connection.id).name,accepted.name);assert.equal(f.projects.get(id).name,accepted.name);
+      }
+    }finally{f.close();}
+  });
+});
+
+test('connector name coordination covers creation and registration while independent names remain parallel',async()=>{
+  const f=await fixture();let release=()=>{};const operations:Promise<unknown>[]=[];
+  try{
+    const second=await f.managed.packages.register({name:'Independent names',remoteUrl:'https://example.test/independent-names.git',mode:'create'}),third=await f.managed.packages.register({name:'Incoming packages',remoteUrl:'https://example.test/incoming.git',mode:'create'});
+    const connections=await Promise.all([f.repository,second].map((repository,index)=>f.connectors.createPackaged({name:`Original ${index}`,transport:'http',url:'https://example.test/mcp',repositoryId:repository.id,packagePath:'connectors/service'})));
+    const pending=await f.managed.createPackage(third.id,{name:'Reserved target',kind:'connector',template:'empty',path:'connectors/imported',mcp:{transport:'http',url:'https://example.test/mcp'}});
+    await f.managed.materializePackage(pending);
+    let started=()=>{};const entered=new Promise<void>(resolve=>{started=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+    const write=f.managed.packages.writeTextFiles.bind(f.managed.packages);
+    f.managed.packages.writeTextFiles=async(id,...args)=>{if(id===connections[0].packageId){started();await gate;}return write(id,...args);};
+    const rename=f.managed.updateProject(connections[0].packageId!,{name:pending.name});operations.push(rename);await entered;
+    let independentFinished=false;
+    const independent=f.managed.updateProject(connections[1].packageId!,{name:'Independent target'}).then(value=>{independentFinished=true;return value;});operations.push(independent);
+    const competing=Promise.allSettled([
+      f.connectors.registerProject(pending.id),
+      f.connectors.createPackaged({name:pending.name,transport:'http',url:'https://example.test/mcp',repositoryId:third.id,packagePath:'connectors/new'}),
+    ]);operations.push(competing);
+    await new Promise<void>(resolve=>setImmediate(resolve));
+    assert(independentFinished,'An unrelated connector name in another repository must not wait for the blocked edit');
+    assert.equal(f.connectors.list().length,2);assert.equal(f.managed.packages.listPackages(third.id).length,1);
+    release();await Promise.all([rename,independent]);
+    const results=await competing;assert(results.every(result=>result.status==='rejected'&&result.reason.statusCode===409));
+    assert.equal(f.connectors.get(connections[0].id).name,pending.name);assert.equal(f.connectors.get(connections[1].id).name,'Independent target');
+    assert.equal(f.managed.packages.listPackages(third.id).length,1,'Rejected connection creation must not leave a committed package');
+  }finally{release();await Promise.allSettled(operations);f.close();}
+});
+
+test('queued description edits and adoptions reject a changed implicit connector name before committing',async()=>{
+  const f=await fixture();let release=()=>{};const operations:Promise<unknown>[]=[];
+  try{
+    const connection=await f.connectors.createPackaged({name:'Original name',transport:'http',url:'https://example.test/mcp',repositoryId:f.repository.id,packagePath:'connectors/renamed'});
+    let started=()=>{};const entered=new Promise<void>(resolve=>{started=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+    const held=f.managed.withConnectorName(connection.name,async()=>{started();await gate;});operations.push(held);await entered;
+    const description=f.managed.updateProject(connection.packageId!,{description:'Queued description'});operations.push(description);
+    const rejected=assert.rejects(description,error=>error instanceof Error&&/source changed/.test(error.message)&&(error as {statusCode?:number}).statusCode===409);
+    const adoption=f.connectors.adoptPackage(connection.id,{repositoryId:f.repository.id,packagePath:connection.source!.path});operations.push(adoption);
+    const rejectedAdoption=assert.rejects(adoption,error=>error instanceof Error&&/source changed/.test(error.message)&&(error as {statusCode?:number}).statusCode===409);
+    await f.managed.updateProject(connection.packageId!,{name:'New name'});
+    const renamedCommit=f.managed.packages.source(connection.packageId!).commit;
+    release();await Promise.all([held,rejected,rejectedAdoption]);
+    assert.equal(f.managed.packages.source(connection.packageId!).commit,renamedCommit);
+    assert.equal(f.managed.packages.manifest(connection.packageId!).description,'');assert.equal(f.connectors.get(connection.id).name,'New name');
+  }finally{release();await Promise.allSettled(operations);f.close();}
+});

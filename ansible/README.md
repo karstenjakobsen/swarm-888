@@ -134,6 +134,10 @@ selects each identity through that repository's local Git configuration. With
 `operator_github_ssh_known_hosts: true`, it installs the SSH host keys published
 by GitHub over verified HTTPS.
 
+Identity paths and their parent directories must be canonical paths without
+symlinks. Existing private keys must be regular files with one hard link;
+Ansible rejects aliases before changing ownership or permissions.
+
 The `server-212` profile uses `/home/swarm/.ssh/id_ed25519_packages_888` for
 `packages-888`. Its public key is registered as a write-enabled deploy key for
 that repository. Private keys stay on the VPS. For a new host or repository,

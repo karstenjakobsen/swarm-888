@@ -122,7 +122,13 @@ export default function App() {
     try {
       const value = await workspaceRead<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`, controller.signal);
       if (value && !controller.signal.aborted && currentId.current === id && request === conversationDetailRequest.current && !removedConversations.current.has(id)) {
-        setDetail(value);
+        setDetail(previous => {
+          if (previous?.conversation.id !== id) return value;
+          // Messages are append-only; a delayed snapshot must retain newer streamed messages.
+          const messages = new Map(value.messages.map(message => [message.id, message]));
+          for (const message of previous.messages) if (!messages.has(message.id)) messages.set(message.id, message);
+          return { ...value, messages: [...messages.values()] };
+        });
         setEvents(previous => {
           const map = new Map(previous.filter(event => !event.conversationId || !removedConversations.current.has(event.conversationId)).map(event => [event.seq, event]));
           for (const event of value.events || []) if (!event.conversationId || !removedConversations.current.has(event.conversationId)) map.set(event.seq, event);
@@ -173,6 +179,7 @@ export default function App() {
     const scheduleRefresh = (list = true, selectedDetail = true, status = false) => {
       pendingList ||= list; pendingDetail ||= selectedDetail; pendingStatus ||= status;
       if (!firstPendingAt) firstPendingAt = Date.now();
+      if (initializing || refreshing) return;
       if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => { void flushRefresh(); }, Math.max(0, Math.min(150, 1000 - (Date.now() - firstPendingAt))));
     };
@@ -207,7 +214,7 @@ export default function App() {
       if (!replaying && ['run', 'completed', 'thread', 'clarification'].includes(value.type)) scheduleRefresh(true, currentId.current === value.conversationId);
       if (value.type === 'message' && value.conversationId === currentId.current) {
         const message = value.data.message as Message | undefined;
-        if (message) setDetail(previous => previous ? { ...previous, messages: appendUnique(previous.messages, message) } : previous);
+        if (message) setDetail(previous => previous?.conversation.id === value.conversationId ? { ...previous, messages: appendUnique(previous.messages, message) } : previous);
       }
     });
     source.addEventListener('status', event => {

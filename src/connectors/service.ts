@@ -24,7 +24,7 @@ export class ConnectorService {
   private receipts:RuntimeReceipts;
   private operations=new Map<string,Promise<unknown>>();
   constructor(private store:Store,client:WorkerClient,private projects:ProjectService,private managed:ManagedService,receipts?:RuntimeReceipts,private vault?:CredentialVault){this.receipts=receipts??new RuntimeReceipts(store.db,client);}
-  private exclusive<T>(key:string,operation:()=>Promise<T>):Promise<T>{
+  private exclusive<T>(key:string,operation:()=>T|Promise<T>):Promise<T>{
     const pending=(this.operations.get(key)??Promise.resolve()).catch(()=>{}).then(operation);
     this.operations.set(key,pending);
     void pending.finally(()=>{if(this.operations.get(key)===pending)this.operations.delete(key);}).catch(()=>{});
@@ -33,6 +33,8 @@ export class ConnectorService {
   private authored<T>(runId:string|undefined,operation:()=>Promise<T>):Promise<T>{return runId?this.managed.packages.withRun(runId,operation):operation();}
   private sourceProject(row:Connector):string|null{return row.packageId??(row.projectId&&this.store.managed.source(row.projectId)?.kind==='connector'?row.projectId:null);}
   list():Connector[]{return this.store.connectors.list().map(row=>this.expand(row));}
+  forPackage(packageId:string):Connector|undefined{const row=this.store.connectors.forPackage(packageId);return row?this.expand(row):undefined;}
+  forRepositoryPath(repositoryId:string,path:string):Connector|undefined{const record=this.managed.packages.store.atPath(repositoryId,path);return record?this.forPackage(record.id):undefined;}
   get(id:string):Connector{z.string().uuid().parse(id);const row=this.store.connectors.get(id);if(!row)throw failure('Connection not found',404);return this.expand(row);}
   private expand(row:Connector):Connector{
     row={...row,readiness:this.vault?.readiness(row.auth,row.id)??{ready:!row.auth,...(row.auth?{reason:'Configure connection credentials in Connections.'}:{})}};
@@ -46,6 +48,7 @@ export class ConnectorService {
     }
     return {...row,...(sourceProject?{source}:{})};
   }
+  /** Local installation primitive; owner and model creation use createPackaged. */
   create(raw:unknown){
     const input=connectorInput.parse(raw),id=randomUUID(),now=new Date().toISOString();
     if(input.projectId)this.projects.get(input.projectId);
@@ -56,43 +59,48 @@ export class ConnectorService {
   }
   async createPackaged(raw:unknown,runId?:string){
     const input=connectorPackageInput.parse(raw);
-    return this.authored(runId,()=>this.exclusive(`name:${input.name}`,async()=>{
+    return this.authored(runId,()=>this.managed.withConnectorName(input.name,async()=>{
       const prior=this.managed.packages.store.atPath(input.repositoryId,input.packagePath);
-      const existing=prior?this.list().find(value=>value.packageId===prior.id||!value.packageId&&value.projectId===prior.id):undefined;
+      const existing=prior?this.forPackage(prior.id):undefined;
       if(this.store.connectors.nameExists(input.name,existing?.id))throw failure('That connection name is already registered',409);
       if(prior&&(prior.kind!=='connector'||prior.name!==input.name||prior.description!==input.description||JSON.stringify(prior.manifest.mcp)!==JSON.stringify(portableTransport(input))||prior.manifest.check||prior.manifest.build||prior.manifest.run))throw failure('This package folder already has a different source definition. Import it from Repositories or choose another folder.',409);
       const record=prior??await this.managed.createPackage(input.repositoryId,{path:input.packagePath,kind:'connector',name:input.name,description:input.description,template:'empty',mcp:portableTransport(input)});
       this.managed.trackPackage(record.id,runId);
       await this.managed.materializePackage(record);
       const connection=await this.registerProject(record.id);
-      return input.enabled===connection.enabled?connection:this.update(connection.id,{enabled:input.enabled});
+      return input.enabled===connection.enabled?connection:this.updateRegistration(connection.id,{enabled:input.enabled});
     }));
   }
   async adoptPackage(id:string,raw:unknown,runId?:string){
     const input=connectorAdoptInput.parse(raw);
     return this.authored(runId,()=>this.exclusive(`connection:${id}`,async()=>{
-      const current=this.get(id);
-      if(current.source?.repositoryId){
-        if(current.source.repositoryId!==input.repositoryId||current.source.path!==input.packagePath)throw failure('This connection already belongs to another package folder.',409);
-        this.managed.trackPackage(current.source.packageId??current.packageId??current.projectId!,runId);
-        if(!current.packageId&&current.source.packageId)this.store.transaction(()=>this.store.connectors.attachPackage(id,current.source!.packageId!));
-        return this.get(id);
-      }
-      if(current.source)throw failure('Migrate this connection’s existing source project into a registered repository first.',409);
-      if(current.transport==='stdio'&&current.cwd)throw failure('This connection uses a local working directory. Move its code into a connector package before adopting it; a metadata package cannot preserve that directory.',409);
-      // The existing connection UUID makes a committed adoption recoverable if materialization is interrupted.
-      return this.exclusive(`package:${id}`,async()=>{
-        let record=this.managed.packages.store.package(id);
-        if(record){
-          if(record.kind!=='connector'||record.repositoryId!==input.repositoryId||record.path!==input.packagePath||JSON.stringify(record.manifest.mcp)!==JSON.stringify(portableTransport(current)))throw failure('The connection UUID already belongs to another package definition.',409);
-        }else{
-          const manifest=packageManifestSchema.parse({schemaVersion:1,id,kind:'connector',name:current.name,description:current.description,version:'0.1.0',mcp:portableTransport(current)});
-          record=await this.managed.packages.createPackage(input.repositoryId,{path:input.packagePath,manifest});
+      const name=this.get(id).name;
+      return this.managed.withConnectorName(name,async()=>{
+        const current=this.get(id);
+        if(current.name!==name)throw failure('Connection source changed while updating its details. Retry with the current package.',409);
+        if(current.source?.repositoryId){
+          const packageId=current.source.packageId??current.packageId??current.projectId!,source=this.managed.packages.source(packageId);
+          if(source.repositoryId!==input.repositoryId||source.path!==input.packagePath)throw failure('This connection already belongs to another package folder.',409);
+          this.managed.trackPackage(packageId,runId);
+          if(!current.packageId)this.store.transaction(()=>this.store.connectors.attachPackage(id,packageId));
+          return this.get(id);
         }
-        this.managed.trackPackage(record.id,runId);
-        await this.managed.materializePackage(record);
-        this.store.transaction(()=>this.store.connectors.attachPackage(id,record!.id));
-        return this.get(id);
+        if(current.source)throw failure('Migrate this connection’s existing source project into a registered repository first.',409);
+        if(current.transport==='stdio'&&current.cwd)throw failure('This connection uses a local working directory. Move its code into a connector package before adopting it; a metadata package cannot preserve that directory.',409);
+        // The existing connection UUID makes a committed adoption recoverable if materialization is interrupted.
+        return this.exclusive(`package:${id}`,async()=>{
+          let record=this.managed.packages.store.package(id);
+          if(record){
+            if(record.kind!=='connector'||record.repositoryId!==input.repositoryId||record.path!==input.packagePath||record.name!==current.name||record.description!==current.description||JSON.stringify(record.manifest.mcp)!==JSON.stringify(portableTransport(current)))throw failure('The connection UUID already belongs to another package definition.',409);
+          }else{
+            const manifest=packageManifestSchema.parse({schemaVersion:1,id,kind:'connector',name:current.name,description:current.description,version:'0.1.0',mcp:portableTransport(current)});
+            record=await this.managed.packages.createPackage(input.repositoryId,{path:input.packagePath,manifest});
+          }
+          this.managed.trackPackage(record.id,runId);
+          await this.managed.materializePackage(record);
+          this.store.transaction(()=>this.store.connectors.attachPackage(id,record!.id));
+          return this.get(id);
+        });
       });
     }));
   }
@@ -104,16 +112,12 @@ export class ConnectorService {
       if(name!==current.name||description!==current.description){
         const sourceProject=this.sourceProject(current);
         if(!sourceProject||!current.source?.repositoryId)throw failure('Adopt this connection into a package before editing its shared details.',409);
-        this.managed.trackProject(sourceProject,runId);
-        const value=await this.managed.readReleaseSource(sourceProject);
-        if(value.source.dirty||value.source.workspaceDiverged)throw failure('Commit or resolve package source changes before editing connection details.',409);
-        const manifest=packageManifestSchema.parse({...value.manifest,name,description});
-        await this.managed.writeSource(sourceProject,{files:{'operator-package.json':JSON.stringify(manifest,null,2)+'\n'},expectedCommit:value.source.commit,message:'Update connection details'});
+        await this.managed.updateProject(sourceProject,{...(input.name!==undefined?{name:input.name}:{}),...(input.description!==undefined?{description:input.description}:{})},runId);
       }
-      return this.update(id,input);
+      return input.enabled===undefined?this.get(id):this.updateRegistration(id,{enabled:input.enabled});
     }));
   }
-  update(id:string,raw:unknown){
+  private updateRegistration(id:string,raw:unknown){
     const current=this.get(id),input=connectorPatchInput.parse(raw);
     if(input.name&&this.store.connectors.nameExists(input.name,id))throw failure('That connection name is already registered',409);
     this.store.connectors.update(id,{name:input.name??current.name,description:input.description??current.description,enabled:input.enabled??current.enabled});
@@ -143,20 +147,20 @@ export class ConnectorService {
     this.store.transaction(()=>this.store.connectors.updatePortableTransport(record.id,transport));
     return this.get(record.id);
   }
-  async registerProject(id:string,name?:string){
-    return this.exclusive(`package:${id}`,async()=>{
-      const project=this.projects.get(id),value=await this.managed.readReleaseSource(id);
+  async registerProject(id:string){
+    const value=await this.managed.readReleaseSource(id),connectionName=value.manifest.name;
+    return this.managed.withConnectorName(connectionName,()=>this.exclusive(`package:${id}`,()=>{
       if(!value.manifest.mcp)throw failure('The package manifest needs an mcp configuration.');
-      const existing=this.list().find(item=>item.packageId===id||!item.packageId&&item.projectId===id);
+      if(value.source.repositoryId&&this.managed.packages.source(value.source.packageId??id).commit!==value.source.commit)throw failure('Package source changed during registration. Register its current revision again.',409);
+      const existing=this.forPackage(id);
       if(!existing&&!value.source.repositoryId)throw failure('Migrate this connector source into a registered repository before registering a new connection.',409);
-      const connectionName=name??project.name;
       if(this.store.connectors.nameExists(connectionName,existing?.id))throw failure('That connection name is already registered',409);
       let connection:Connector;
-      if(existing){this.synchronizeTransport(existing.id,value.manifest.mcp);connection=this.update(existing.id,{name:connectionName,description:project.description});}
-      else connection=this.create({name:connectionName,description:project.description,projectId:id,...value.manifest.mcp});
+      if(existing){this.synchronizeTransport(existing.id,value.manifest.mcp);connection=this.updateRegistration(existing.id,{name:connectionName,description:value.manifest.description});}
+      else connection=this.create({name:connectionName,description:value.manifest.description,projectId:id,...value.manifest.mcp});
       if(!connection.packageId&&value.source.repositoryId&&this.managed.packages?.store.package(id))this.store.transaction(()=>this.store.connectors.attachPackage(connection.id,id));
       return this.get(connection.id);
-    });
+    }));
   }
   private async resolve(id:string):Promise<ResolvedConnector>{
     let record=this.get(id);if(!record.enabled)throw failure('Enable this connection before using its tools.',409);

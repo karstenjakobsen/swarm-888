@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import type { Config } from '../src/config.ts';
 import { PackageService } from '../src/packages/service.ts';
+import { RepositoryPublisher } from '../src/packages/publishing.ts';
 import { repositoryPushSettingsInput } from '../src/packages/schemas.ts';
 import { toolSchemas } from '../src/brain/schemas.ts';
 
@@ -76,6 +77,67 @@ test('in-flight publication recovers after restart by confirming the already-pus
   }finally{await f.close();}
 });
 
+test('restart confirms an accepted commit when the remote has advanced without changing checkout or fetch preview',async()=>{
+  const f=fixture();try{
+    const repository=await f.repository();await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false});
+    const record=await f.package(repository.id);await f.service.requestPush(repository.id);
+    git(repository.directory,'push','--quiet',f.remote,`${record.lastImportedCommit}:refs/heads/${repository.branch}`);
+    git(repository.directory,'fetch','--quiet',f.remote,`refs/heads/${repository.branch}`);
+    const preview=readFileSync(join(repository.directory,'.git','FETCH_HEAD'),'utf8');
+    const rival=join(f.root,'rival');git(f.root,'clone','--quiet','--branch',repository.branch,f.remote,rival);
+    writeFileSync(join(rival,'owner-note.txt'),'A subsequent accepted owner commit\n');git(rival,'add','.');git(rival,'commit','--quiet','-m','Advance remote after publication');git(rival,'push','--quiet','origin',repository.branch);
+    const remote=git(rival,'rev-parse','HEAD');assert.throws(()=>git(repository.directory,'cat-file','-e',remote));
+    f.store.db.prepare("UPDATE repository_pushes SET state='pushing' WHERE repositoryId=?").run(repository.id);
+    f.reopen();await f.drain();
+    const status=f.service.repository(repository.id).push!;assert.equal(status.state,'pushed');assert.equal(status.pushedCommit,record.lastImportedCommit);assert.equal(status.error,null);
+    assert.equal(git(f.remote,'rev-parse',repository.branch),remote);assert.equal(git(repository.directory,'rev-parse','HEAD'),record.lastImportedCommit);
+    assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);assert.equal(readFileSync(join(repository.directory,'.git','FETCH_HEAD'),'utf8'),preview);assert.equal(git(repository.directory,'status','--porcelain'),'');
+  }finally{await f.close();}
+});
+
+test('startup recovers every accepted package revision when import timestamps do not reflect Git order',async()=>{
+  const f=fixture();try{
+    const repository=await f.repository();await f.service.setPushSettings(repository.id,{enabled:true,autoPush:true});
+    const first=await f.package(repository.id,'first'),second=await f.package(repository.id,'second');
+    const latest=await f.service.writeTextFiles(first.id,{'app.mjs':'export const value = 3;\n'});
+    // Simulate a crash between accepted source/catalog commits and outbox inserts.
+    f.store.db.prepare('DELETE FROM repository_pushes WHERE repositoryId=?').run(repository.id);
+    f.store.db.prepare('UPDATE packages SET lastImportedAt=? WHERE repositoryId=?').run('2026-11-18T12:00:00.000Z',repository.id);
+    f.service.startPublishing();await f.drain();
+    assert.equal(git(f.remote,'rev-parse',repository.branch),latest.lastImportedCommit);
+    const rows=f.store.db.prepare('SELECT commitSha,state FROM repository_pushes WHERE repositoryId=?').all(repository.id);
+    assert.deepEqual(new Set(rows.map(row=>row.commitSha)),new Set([latest.lastImportedCommit,second.lastImportedCommit]));assert(rows.every(row=>row.state==='pushed'));
+    const status=f.service.repository(repository.id).push!;assert.equal(status.state,'pushed');assert.equal(status.commit,latest.lastImportedCommit);assert.equal(status.pushedCommit,latest.lastImportedCommit);
+  }finally{await f.close();}
+});
+
+test('a concurrent remote advance before or after a push is acknowledged when it contains the queued revision',async t=>{
+  for(const phase of ['before','after'])await t.test(phase,async()=>{
+    const f=fixture();let publisher:RepositoryPublisher|undefined;try{
+      const repository=await f.repository();await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false});
+      const record=await f.package(repository.id);await f.service.requestPush(repository.id);
+      let remote='',pushes=0;
+      const advance=()=>{
+        const rival=join(f.root,'rival');git(f.root,'clone','--quiet','--branch',repository.branch,f.remote,rival);
+        writeFileSync(join(rival,'owner-note.txt'),'Preserve the concurrent owner commit\n');git(rival,'add','.');git(rival,'commit','--quiet','-m','Concurrent remote advance');git(rival,'push','--quiet','origin',repository.branch);remote=git(rival,'rev-parse','HEAD');
+      };
+      publisher=new RepositoryPublisher(f.store.db,{
+        repository:id=>f.service.repository(id),exclusive:async(_id,operation)=>operation(),
+        git:(directory,args,allowFailure)=>{try{return git(directory,...args);}catch(error){if(allowFailure)return '';throw error;}},
+        remoteGit:async(directory,args)=>{
+          if(args[0]==='push'){
+            pushes++;
+            if(phase==='before'){git(repository.directory,'push','--quiet',f.remote,`${record.lastImportedCommit}:refs/heads/${repository.branch}`);advance();}
+          }
+          const result=git(directory,...args);if(args[0]==='push'&&phase==='after')advance();return result;
+        },assertSafe:()=>{},error:error=>(error as Error).message,
+      });
+      await publisher.flush();assert.equal(pushes,1);assert.equal(publisher.status(repository.id).state,'pushed');assert.equal(publisher.status(repository.id).error,null);
+      assert.equal(git(f.remote,'rev-parse',repository.branch),remote);assert.equal(git(repository.directory,'rev-parse','HEAD'),record.lastImportedCommit);
+    }finally{await publisher?.close();await f.close();}
+  });
+});
+
 test('publishing waits for task source finalization to release its repository lease',async()=>{
   const f=fixture();try{
     const repository=await f.repository();await f.service.setPushSettings(repository.id,{enabled:true,autoPush:true});
@@ -110,5 +172,28 @@ test('omitted push URL keeps an existing SSH push URL independently of the fetch
     const repository=await f.repository(),ssh='git@github.com:owner/package-fixture.git';git(repository.directory,'remote','set-url','--push','origin',ssh);
     const first=await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false});assert.equal(first.push?.pushUrl,ssh);assert.equal(git(repository.directory,'remote','get-url','origin'),f.remote);
     const second=await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false,branch:'release/other'});assert.equal(second.push?.pushUrl,ssh);assert.equal(second.push?.branch,'release/other');
+  }finally{await f.close();}
+});
+
+test('an explicit null push URL resets an override to the current Git push destination',async()=>{
+  const f=fixture();try{
+    const repository=await f.repository(),ssh='git@github.com:owner/current-package-fixture.git',override='git@github.com:owner/previous-package-fixture.git';
+    git(repository.directory,'remote','set-url','--push','origin',ssh);
+    await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false,pushUrl:override});
+    const retained=await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false});assert.equal(retained.push?.pushUrl,override);
+    const reset=await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false,pushUrl:null});assert.equal(reset.push?.pushUrl,ssh);
+    assert.equal(git(repository.directory,'remote','get-url','origin'),f.remote);assert.equal(git(repository.directory,'remote','get-url','--push','origin'),ssh);
+  }finally{await f.close();}
+});
+
+test('resolved Git push destinations are checked for known credentials before they are persisted',async()=>{
+  const f=fixture();try{
+    const repository=await f.repository(),unsafe=`https://example.invalid/${f.config.adminPassword}/packages.git`;
+    git(repository.directory,'remote','set-url','--push','origin',unsafe);
+    await assert.rejects(f.service.setPushSettings(repository.id,{enabled:true,autoPush:false}),/known credentials/);
+    assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM repository_push_settings').get()?.n,0);
+    await f.service.setPushSettings(repository.id,{enabled:true,autoPush:false,pushUrl:f.remote});
+    await assert.rejects(f.service.setPushSettings(repository.id,{enabled:true,autoPush:false,pushUrl:null}),/known credentials/);
+    assert.equal(f.service.repository(repository.id).push?.pushUrl,f.remote);assert.equal(f.service.repository(repository.id).push?.enabled,true);
   }finally{await f.close();}
 });

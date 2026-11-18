@@ -308,9 +308,8 @@ export async function createController(config:Config, options:{client?:WorkerCli
         if(project&&params.name==='repository_import')throw fail('Import repository packages from a generic conversation or the Repositories UI; this task is scoped to its existing project.',403);
         if(project&&params.name==='repository_push'&&args.id!==project.source?.repositoryId)throw fail('Publish only the repository assigned to this task project.',403);
         if(params.name==='connector_register_project'||params.name==='connector_register'){
-          const packageId=params.name==='connector_register_project'?args.id:
-            typeof args.repositoryId==='string'&&typeof args.packagePath==='string'?managed.packages.store.atPath(args.repositoryId,args.packagePath)?.id:undefined;
-          const existing=typeof packageId==='string'?connectors.list().find(connection=>connection.packageId===packageId||!connection.packageId&&connection.projectId===packageId):undefined;
+          const existing=params.name==='connector_register_project'?(typeof args.id==='string'?connectors.forPackage(args.id):undefined):
+            typeof args.repositoryId==='string'&&typeof args.packagePath==='string'?connectors.forRepositoryPath(args.repositoryId,args.packagePath):undefined;
           if(existing&&!granted.includes(existing.id))throw fail('This connection is outside the task grant',403);
         }
         if(['connector_call','connector_test','connector_update'].includes(params.name)&&typeof args.id==='string'&&!granted.includes(args.id))throw fail('This connection is outside the task grant',403);

@@ -8,8 +8,9 @@ type Push={id:string;repositoryId:string;revision:number;commitSha:string;state:
 interface Host {
   repository:(id:string)=>RepositoryRecord;
   exclusive:<T>(id:string,operation:()=>T|Promise<T>)=>Promise<T>;
-  git:(directory:string,args:string[])=>string;
+  git:(directory:string,args:string[],allowFailure?:boolean)=>string;
   remoteGit:(directory:string,args:string[])=>Promise<string>;
+  assertSafe:(value:unknown)=>void;
   error:(error:unknown)=>string;
 }
 const fail=(message:string)=>Object.assign(new Error(message),{statusCode:409});
@@ -21,7 +22,7 @@ export class RepositoryPublisher {
   private closed=false;
   constructor(private db:DatabaseSync,private host:Host){
     // A controller crash can lose a push acknowledgement. The next attempt checks
-    // the remote SHA before sending anything, so no local commit is recreated.
+    // remote history before sending anything, so no local commit is recreated.
     db.prepare("UPDATE repository_pushes SET state='pending' WHERE state='pushing'").run();
   }
   private settings(id:string):Settings|undefined{return this.db.prepare('SELECT * FROM repository_push_settings WHERE repositoryId=?').get(id) as Settings|undefined;}
@@ -35,8 +36,10 @@ export class RepositoryPublisher {
     const input=repositoryPushSettingsInput.parse(raw);
     await this.host.exclusive(id,()=>{
       const repository=this.host.repository(id),previous=this.settings(id);
-      const pushUrl=remoteUrlSchema.parse(input.pushUrl??previous?.pushUrl??this.host.git(repository.directory,['remote','get-url','--push','origin']).trim());
+      const configuredUrl=input.pushUrl===undefined?previous?.pushUrl:input.pushUrl;
+      const pushUrl=remoteUrlSchema.parse(configuredUrl??this.host.git(repository.directory,['remote','get-url','--push','origin']).trim());
       const branch=input.branch??previous?.branch??repository.branch;
+      this.host.assertSafe({pushUrl,branch});
       const unchanged=previous&&previous.enabled===Number(input.enabled)&&previous.autoPush===Number(input.autoPush)&&previous.pushUrl===pushUrl&&previous.branch===branch;
       if(!unchanged)transaction(this.db,()=>{
         this.db.prepare("UPDATE repository_pushes SET state='cancelled',error=NULL,updatedAt=? WHERE repositoryId=? AND state IN ('pending','pushing','failed')").run(new Date().toISOString(),id);
@@ -58,8 +61,12 @@ export class RepositoryPublisher {
     if(this.timer||this.closed)return;
     const automatic=this.db.prepare('SELECT repositoryId FROM repository_push_settings WHERE enabled=1 AND autoPush=1').all() as {repositoryId:string}[];
     for(const {repositoryId:id} of automatic){
-      const accepted=this.db.prepare('SELECT lastImportedCommit FROM packages WHERE repositoryId=? ORDER BY lastImportedAt DESC,rowid DESC LIMIT 1').get(id) as {lastImportedCommit:string}|undefined;
-      if(accepted)this.committed(id,accepted.lastImportedCommit);
+      // Recover every accepted revision. Journal order keeps old acknowledgements
+      // first even when package timestamps tie or an existing package was updated.
+      const accepted=this.db.prepare(`SELECT p.lastImportedCommit FROM packages p
+        LEFT JOIN package_imports i ON i.repositoryId=p.repositoryId AND i.packageId=p.id AND i.commitSha=p.lastImportedCommit AND i.status='imported'
+        WHERE p.repositoryId=? GROUP BY p.lastImportedCommit ORDER BY MAX(i.rowid),p.lastImportedCommit`).all(id) as {lastImportedCommit:string}[];
+      for(const revision of accepted)this.committed(id,revision.lastImportedCommit);
     }
     this.timer=setInterval(()=>{void this.flush().catch(()=>{});},1000);this.timer.unref();
     void this.flush().catch(()=>{});
@@ -88,9 +95,25 @@ export class RepositoryPublisher {
       try{
         const repository=this.host.repository(id),ref=`refs/heads/${config.branch}`;
         if(this.host.git(repository.directory,['rev-parse',`${item.commitSha}^{commit}`]).trim()!==item.commitSha)throw fail('The queued source commit is unavailable.');
-        const remote=async()=>{const value=await this.host.remoteGit(repository.directory,['ls-remote','--heads','--',config.pushUrl,ref]);return value.trim().split(/\s+/)[0]??'';};
-        if(await remote()!==item.commitSha)await this.host.remoteGit(repository.directory,['push','--porcelain','--',config.pushUrl,`${item.commitSha}:${ref}`]);
-        if(await remote()!==item.commitSha)throw fail('Remote branch did not confirm the queued commit. Refresh and retry publication.');
+        const published=async()=>{
+          const value=await this.host.remoteGit(repository.directory,['ls-remote','--heads','--',config.pushUrl,ref]);
+          const tip=value.trim().split(/\s+/)[0]??'';
+          if(tip===item.commitSha)return true;
+          if(!/^[0-9a-f]{40,64}$/.test(tip))return false;
+          if(this.host.git(repository.directory,['rev-parse','--verify',`${tip}^{commit}`],true).trim()!==tip){
+            // Read missing history without changing the authoring checkout, its
+            // tracking branches, or a pending remote-import preview in FETCH_HEAD.
+            await this.host.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','--no-write-fetch-head','--',config.pushUrl,ref]);
+          }
+          return this.host.git(repository.directory,['merge-base',item.commitSha,tip],true).trim()===item.commitSha;
+        };
+        if(!await published()){
+          let pushError:unknown;
+          try{await this.host.remoteGit(repository.directory,['push','--porcelain','--',config.pushUrl,`${item.commitSha}:${ref}`]);}catch(error){pushError=error;}
+          // Another writer may have published this revision while our push was
+          // starting, or advanced the branch before the acknowledgement arrived.
+          if(!await published())throw pushError??fail('Remote branch did not confirm the queued commit. Refresh and retry publication.');
+        }
         this.db.prepare("UPDATE repository_pushes SET state='pushed',error=NULL,updatedAt=? WHERE id=?").run(new Date().toISOString(),item.id);
       }catch(error){this.db.prepare("UPDATE repository_pushes SET state='failed',error=?,updatedAt=? WHERE id=?").run(this.host.error(error).slice(0,4000),new Date().toISOString(),item.id);}
     });

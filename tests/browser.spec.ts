@@ -108,7 +108,7 @@ test('Repository publishing saves owner settings and preserves local packages ac
     expect(route.request().method()).toBe('PATCH');
     expect(route.request().headers()['x-csrf-token']).toBeTruthy();
     const input = route.request().postDataJSON(); settings.push(input);
-    push = { ...push, ...input, state: input.enabled ? 'idle' : 'disabled' };
+    push = { ...push, ...input, pushUrl: input.pushUrl === null ? repository.remoteUrl : input.pushUrl, state: input.enabled ? 'idle' : 'disabled' };
     return route.fulfill({ json: { ...repository, push } });
   });
   await page.route(`**/api/repositories/${id}/push`, route => {
@@ -144,9 +144,13 @@ test('Repository publishing saves owner settings and preserves local packages ac
   await expect(publishing.getByText('Pushed', { exact: true })).toBeVisible();
   await expect(publishing.locator(`code[title="${commit}"]`)).toHaveCount(2);
   expect(pushCalls).toBe(2);
+  await publishing.getByLabel('Push remote URL', { exact: true }).fill('');
+  await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
+  expect(settings[1]).toEqual({ enabled: true, autoPush: false, pushUrl: null, branch: 'release/published' });
+  await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue(repository.remoteUrl);
   await publishing.getByLabel('Allow remote pushes', { exact: true }).uncheck();
   await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(settings[1]).toEqual({ enabled: false, autoPush: false, pushUrl: 'git@example.invalid:owner/packages.git', branch: 'release/published' });
+  expect(settings[2]).toEqual({ enabled: false, autoPush: false, pushUrl: repository.remoteUrl, branch: 'release/published' });
   await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeDisabled();
 });
 
@@ -175,11 +179,38 @@ test('Repository automatic publishing keeps the existing Git push URL when no ov
   await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue('');
   await expect(publishing.getByLabel('Push branch', { exact: true })).toHaveValue('operator/work');
   await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(submitted).toEqual({ enabled: true, autoPush: true, branch: 'operator/work' });
+  expect(submitted).toEqual({ enabled: true, autoPush: true, pushUrl: null, branch: 'operator/work' });
   await expect(publishing.getByText('Pushed', { exact: true })).toBeVisible();
   await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue('git@example.invalid:owner/packages.git');
   await expect(publishing.getByLabel('Automatically push package commits', { exact: true })).toBeChecked();
   await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeEnabled();
+});
+
+test('Repository publishing polls one request at a time and cancels it when changing repositories', async ({ page }) => {
+  await page.clock.install();
+  const id = randomUUID(), otherId = randomUUID(), commit = 'a'.repeat(40);
+  const repository = { id, name: 'Pending repository', remoteUrl: 'https://example.invalid/pending.git', directory: '/tmp/pending', branch: 'operator/work', sourceBranch: 'main', status: 'ready', head: commit };
+  const push: RepositoryPushStatus = { enabled: true, autoPush: false, pushUrl: repository.remoteUrl, branch: repository.branch, state: 'pending', commit, pushedCommit: null, error: null, updatedAt: null };
+  const other = { ...repository, id: otherId, name: 'Other repository', directory: '/tmp/other' };
+  let polls = 0, release = () => {};
+  const responseGate = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/repositories', route => route.fulfill({ json: [{ ...repository, push }, other] }));
+  await page.route('**/api/packages', route => route.fulfill({ json: [] }));
+  await page.route(`**/api/repositories/${id}`, async route => {
+    polls++; await responseGate;
+    return route.fulfill({ json: { ...repository, push: { ...push, state: 'pushed', pushedCommit: commit } } });
+  });
+  try {
+    await login(page); await page.getByRole('button', { name: 'Repositories', exact: true }).click();
+    await expect(page.getByRole('heading', { name: repository.name, exact: true })).toBeVisible();
+    await page.clock.runFor(1600); await expect.poll(() => polls).toBe(1);
+    await page.clock.runFor(5000); expect(polls).toBe(1);
+    await page.locator('.project-list-item').filter({ hasText: other.name }).click();
+    await expect(page.getByRole('heading', { name: other.name, exact: true })).toBeVisible();
+    release(); await page.clock.runFor(5000); await page.waitForLoadState('networkidle');
+    expect(polls).toBe(1);
+    await expect(page.getByRole('heading', { name: other.name, exact: true })).toBeVisible();
+  } finally { release(); }
 });
 
 test('Repository import preview isolates invalid manifests and preserves last imported package after a failed update', async ({ page }) => {

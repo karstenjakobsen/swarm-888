@@ -143,6 +143,6 @@ test('connector calls require testing the exact source revision and disabled con
     let ready!:()=>void;const entered=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
     f.worker.request=async(method,input={})=>{if(method==='connectors/test'){const value=await request(method,input);ready();await gate;return value;}return request(method,input);};
     const testing=f.ctl.app.inject({method:'POST',url:`/api/connectors/${connector.id}/test`,headers:f.headers,payload:{}}).then(value=>value);await entered;
-    f.ctl.connectors.update(connector.id,{enabled:false});release();response=await testing;assert.equal(response.statusCode,409,response.body);assert.equal(f.ctl.connectors.get(connector.id).enabled,false);
+    await f.ctl.connectors.updatePackaged(connector.id,{enabled:false});release();response=await testing;assert.equal(response.statusCode,409,response.body);assert.equal(f.ctl.connectors.get(connector.id).enabled,false);
   }finally{release();await f.close();}
 });

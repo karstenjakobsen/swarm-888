@@ -1,6 +1,8 @@
 let csrf = '';
-export function setCsrf(value: string) { csrf = value; }
+let sessionGeneration = 0;
+export function setCsrf(value: string) { if (csrf !== value) { csrf = value; sessionGeneration++; } }
 export async function api<T = unknown>(path: string, options: RequestInit = {}): Promise<T> {
+  const generation = sessionGeneration;
   const response = await fetch(`/api${path}`, {
     credentials: 'same-origin',
     ...options,
@@ -10,7 +12,7 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
   try { body = await response.json(); } catch { body = null; }
   options.signal?.throwIfAborted();
   if (!response.ok) {
-    if (response.status === 401 && path !== '/login' && path !== '/session') window.dispatchEvent(new Event('operator:unauthorized'));
+    if (response.status === 401 && generation === sessionGeneration && path !== '/login' && path !== '/session') window.dispatchEvent(new Event('operator:unauthorized'));
     const error = body?.message || body?.error;
     throw new Error(typeof error === 'string' ? error : error?.message || (error ? JSON.stringify(error) : `Request failed (${response.status})`));
   }

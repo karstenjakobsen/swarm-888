@@ -13,6 +13,7 @@ import { ManagedService } from '../src/managed/service.ts';
 import { ConnectorService } from '../src/connectors/service.ts';
 import { CredentialVault } from '../src/credentials/vault.ts';
 import type { WorkerClient } from '../src/ipc.ts';
+import type { RuntimeReceipts } from '../src/runtime-receipts.ts';
 
 async function fixture(){
   const stateDir=mkdtempSync(join(tmpdir(),'operator-connection-packages-'));
@@ -21,7 +22,7 @@ async function fixture(){
   managed.packages.setSecretGuard(value=>vault.assertSafe(value));
   const repository=await managed.packages.register({name:'Connection packages',remoteUrl:'https://example.test/connections.git',mode:'create'});
   const git=(...args:string[])=>execFileSync('git',['-C',repository.directory,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
-  return {store,projects,managed,vault,connectors,repository,git,async close(){await managed.packages.closePublishing();projects.close();store.close();rmSync(stateDir,{recursive:true,force:true});}};
+  return {store,client,projects,managed,vault,connectors,repository,git,async close(){await managed.packages.closePublishing();projects.close();store.close();rmSync(stateDir,{recursive:true,force:true});}};
 }
 
 test('adoption recovers a committed package after interrupted materialization without changing local identity or authorization',async()=>{
@@ -103,15 +104,36 @@ test('packaged registration serializes duplicate names and failed metadata write
     assert.equal(results.filter(value=>value.status==='fulfilled').length,1);assert.equal(f.connectors.list().length,1);assert.equal(f.managed.packages.listPackages().length,1);
     const connection=f.connectors.list()[0],manifest=f.managed.packages.manifest(connection.packageId!);
     assert.equal(manifest.check,undefined);assert.equal(manifest.build,undefined);assert.equal(manifest.run,undefined);assert.deepEqual(manifest.mcp,{transport:'http',url:input.url});
-    const write=f.managed.writeSource.bind(f.managed);f.managed.writeSource=async()=>{throw new Error('Simulated rejected source write');};
+    const update=f.managed.updateProject.bind(f.managed);f.managed.updateProject=async()=>{throw new Error('Simulated rejected source write');};
     await assert.rejects(f.connectors.updatePackaged(connection.id,{description:'Uncommitted details'}),/rejected source write/);
     assert.equal(f.connectors.get(connection.id).description,input.description);assert.equal(f.managed.packages.manifest(connection.packageId!).description,input.description);
-    f.managed.writeSource=write;
+    f.managed.updateProject=update;
     const edited=await f.connectors.updatePackaged(connection.id,{name:'Renamed tools',description:'Shared details'});
     assert.equal(edited.name,'Renamed tools');assert.equal(f.managed.packages.manifest(connection.packageId!).description,'Shared details');assert.equal(f.projects.get(connection.packageId!).name,'Renamed tools');
     const path=join(f.repository.directory,input.packagePath,'operator-package.json'),pending=JSON.stringify({...f.managed.packages.manifest(connection.packageId!),mcp:{transport:'http',url:'https://pending.example.test/mcp'}},null,2)+'\n',commit=f.git('rev-parse','HEAD');
     writeFileSync(path,pending);
-    await assert.rejects(f.connectors.updatePackaged(connection.id,{description:'Clobber pending transport'}),/resolve package source changes/);
+    await assert.rejects(f.connectors.updatePackaged(connection.id,{description:'Clobber pending transport'}),/resolve pending source changes/);
     assert.equal(readFileSync(path,'utf8'),pending);assert.equal(f.git('rev-parse','HEAD'),commit);assert.equal(f.connectors.get(connection.id).description,'Shared details');
   }finally{await f.close();}
+});
+
+test('reimporting an unchanged connector preserves an in-flight discovery and registry timestamps',async()=>{
+  const f=await fixture();let release=()=>{};let testing:Promise<unknown>|undefined;
+  try{
+    const connection=await f.connectors.createPackaged({name:'Stable HTTP tools',transport:'http',url:'https://stable.example.test/mcp',repositoryId:f.repository.id,packagePath:'connectors/stable'});
+    const unchangedAt='2026-01-01T00:00:00.000Z';
+    f.store.db.prepare('UPDATE connectors SET updatedAt=? WHERE id=?').run(unchangedAt,connection.id);
+    f.store.db.prepare('UPDATE projects SET updatedAt=? WHERE id=?').run(unchangedAt,connection.packageId!);
+    let started=()=>{};const entered=new Promise<void>(resolve=>{started=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+    const receipts={request:async(_method:string,_input:unknown,guard?:()=>void)=>{guard?.();started();await gate;return {tools:[{name:'echo',inputSchema:{type:'object'}}],checkedAt:new Date().toISOString()};}} as unknown as RuntimeReceipts;
+    const connectors=new ConnectorService(f.store,f.client,f.projects,f.managed,receipts,f.vault);
+    testing=connectors.test(connection.id);await entered;
+    await f.managed.materializePackage(f.managed.packages.package(connection.packageId!));
+    await connectors.registerProject(connection.packageId!);
+    await connectors.updatePackaged(connection.id,{enabled:true,name:connection.name,description:connection.description});
+    assert.equal(connectors.get(connection.id).updatedAt,unchangedAt);
+    assert.equal(f.projects.get(connection.packageId!).updatedAt,unchangedAt);
+    release();const tested=await testing as {status:string;tools:{name:string}[]};
+    assert.equal(tested.status,'connected');assert.equal(tested.tools[0].name,'echo');
+  }finally{release();await testing?.catch(()=>{});await f.close();}
 });

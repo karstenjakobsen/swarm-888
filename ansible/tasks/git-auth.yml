@@ -11,6 +11,41 @@
     fail_msg: Use named SSH identities in the controller account's .ssh directory and canonical repository paths.
   loop: "{{ operator_git_ssh_keys }}"
 
+- name: Resolve SSH identity paths before managing their ownership
+  ansible.builtin.command:
+    argv: [realpath, --canonicalize-missing, "{{ item.path }}"]
+  loop: "{{ operator_git_ssh_keys }}"
+  check_mode: false
+  changed_when: false
+  register: operator_git_identity_paths
+
+- name: Require canonical SSH identity paths without symlinks
+  ansible.builtin.assert:
+    that: item.stdout | trim == item.item.path
+    fail_msg: SSH identities and their parent directories must not use symlinks or path aliases.
+  loop: "{{ operator_git_identity_paths.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Inspect existing private identities without reading their contents
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+    get_mime: false
+  loop: "{{ operator_git_ssh_keys }}"
+  register: operator_git_private_identities
+
+- name: Require existing private identities to be regular unshared files
+  ansible.builtin.assert:
+    that: >-
+      not item.stat.exists or
+      (item.stat.isreg | default(false) and item.stat.nlink | default(0) == 1)
+    fail_msg: Existing SSH identities must be regular files with one hard link.
+  loop: "{{ operator_git_private_identities.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
 - name: Create the controller SSH directory
   ansible.builtin.file:
     path: "{{ operator_home }}/.ssh"
@@ -18,6 +53,7 @@
     owner: "{{ operator_user }}"
     group: "{{ operator_group }}"
     mode: "0700"
+    follow: false
 
 - name: Generate missing package repository identities as the controller
   ansible.builtin.command:
@@ -33,6 +69,7 @@
     owner: "{{ operator_user }}"
     group: "{{ operator_group }}"
     mode: "0600"
+    follow: false
   loop: "{{ operator_git_ssh_keys }}"
   when: not ansible_check_mode
 

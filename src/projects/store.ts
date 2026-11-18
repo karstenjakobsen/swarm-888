@@ -23,6 +23,10 @@ export class ProjectStore {
     const row=this.db.prepare('SELECT p.* FROM projects p JOIN project_conversations pc ON pc.projectId=p.id WHERE pc.conversationId=?').get(conversationId) as ProjectRow|undefined;
     return row?this.expand(row,false,Date.now()):undefined;
   }
+  forPackage(packageId:string):Project|undefined {
+    const row=this.db.prepare('SELECT p.* FROM projects p JOIN project_sources ps ON ps.projectId=p.id WHERE ps.packageId=?').get(packageId) as ProjectRow|undefined;
+    return row?this.expand(row,false,Date.now()):undefined;
+  }
   create(row:ProjectRow):Project {
     if(this.db.prepare('SELECT id FROM projects WHERE directory=?').get(row.directory))throw failure('That project directory is already registered',409);
     this.db.prepare('INSERT INTO projects(id,name,description,directory,origin,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?)').run(row.id,row.name,row.description,row.directory,row.origin,row.createdAt,row.updatedAt);
@@ -36,10 +40,15 @@ export class ProjectStore {
       this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
     });
   }
-  update(id:string,input:{name?:string;description?:string;defaultWorkerId?:string|null}):Project {
+  validateUpdate(id:string,input:{defaultWorkerId?:string|null}):Project {
     const project=this.get(id);if(!project)throw failure('Project not found',404);
     if(input.defaultWorkerId&&input.defaultWorkerId!=='default'&&!this.db.prepare('SELECT 1 FROM workers WHERE id=?').get(input.defaultWorkerId))throw failure('Default worker is not registered',404);
-    this.db.prepare('UPDATE projects SET name=?,description=?,defaultWorkerId=?,updatedAt=? WHERE id=?').run(input.name??project.name,input.description??project.description,input.defaultWorkerId===undefined?project.defaultWorkerId??null:input.defaultWorkerId,new Date().toISOString(),id);
+    return project;
+  }
+  update(id:string,input:{name?:string;description?:string;defaultWorkerId?:string|null}):Project {
+    const project=this.validateUpdate(id,input),name=input.name??project.name,description=input.description??project.description,defaultWorkerId=input.defaultWorkerId===undefined?project.defaultWorkerId??null:input.defaultWorkerId;
+    if(name===project.name&&description===project.description&&defaultWorkerId===(project.defaultWorkerId??null))return project;
+    this.db.prepare('UPDATE projects SET name=?,description=?,defaultWorkerId=?,updatedAt=? WHERE id=?').run(name,description,defaultWorkerId,new Date().toISOString(),id);
     return this.get(id)!;
   }
   environment(id:string):{credentialId:string;bindings:Record<string,string>}|null {const row=this.db.prepare('SELECT environment FROM project_environment WHERE projectId=?').get(id);return row?JSON.parse(String(row.environment)):null;}

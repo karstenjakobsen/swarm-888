@@ -41,7 +41,7 @@ test('managed snapshots derive authorization only from owner metadata, including
     // A legacy/malformed manifest is kept here to exercise the service boundary
     // independently of the strict portable-manifest parser.
     let destination='https://example.invalid/changed-endpoint';
-    const auth={type:'bearer' as const,credentialId:credential.id,field:'token'},managed={readReleaseSource:async()=>({source,manifest:{mcp:{transport:'http',url:destination,auth}}})} as unknown as ManagedService;
+    const auth={type:'bearer' as const,credentialId:credential.id,field:'token'},managed={readReleaseSource:async()=>({source,manifest:{name:project.name,description:project.description,mcp:{transport:'http',url:destination,auth}}}),withConnectorName:(_name:string,operation:()=>unknown)=>operation()} as unknown as ManagedService;
     const connectors=new ConnectorService(f.store,f.client,f.projects,managed,undefined,f.vault),connector=connectors.create({name:'Unbound connector',projectId:project.id,transport:'http',url:'https://example.invalid/original-endpoint'});
     f.vault.grant(credential.id,connector.id); // Residual grants from an older installation.
     let snapshots=await connectors.snapshots(conversation.id,[connector.id]);

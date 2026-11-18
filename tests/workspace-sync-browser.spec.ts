@@ -196,3 +196,51 @@ test('logout closes the stream and cancels pending event refreshes and fallback 
   expect(fixture.counts).toEqual(beforeLogout);
   await expect(page.getByLabel('Administrator password')).toBeVisible();
 });
+
+test('a delayed conversation snapshot preserves messages that already arrived on the live stream', async ({ page }) => {
+  await page.clock.install();
+  const fixture = await workspace(page);
+  await settleRefreshes(page);
+  let release = () => {}, started = () => {};
+  const responseGate = new Promise<void>(resolve => { release = resolve; });
+  const requestStarted = new Promise<void>(resolve => { started = resolve; });
+  await page.route(`**/api/conversations/${fixture.conversation.id}`, async route => {
+    const snapshot = structuredClone(fixture.detail);
+    started(); await responseGate;
+    return route.fulfill({ json: snapshot });
+  });
+  try {
+    const event: ExecutionEvent = { seq: fixture.nextSequence, type: 'thread', runId: 'sync_late_snapshot', conversationId: fixture.conversation.id, data: {}, createdAt: fixture.now };
+    await page.evaluate(event => (window as unknown as StreamWindow).workspaceStream.event(event), event);
+    await page.clock.runFor(200); await requestStarted;
+    const message = { id: 'sync_streamed_message', conversationId: fixture.conversation.id, runId: 'sync_late_snapshot', role: 'assistant' as const, content: 'This new answer arrived after the HTTP snapshot.', createdAt: fixture.now };
+    await page.evaluate(event => (window as unknown as StreamWindow).workspaceStream.event(event), { ...event, seq: event.seq + 1, type: 'message', data: { message } });
+    await expect(page.getByTestId('message-assistant').last()).toContainText(message.content);
+    release(); await settleRefreshes(page);
+    await expect(page.getByTestId('message-assistant').last()).toContainText(message.content);
+  } finally { release(); }
+});
+
+test('an expired request from an earlier session cannot log out a newly authenticated session', async ({ page }) => {
+  await page.clock.install();
+  await workspace(page); await settleRefreshes(page);
+  let release = () => {}, started = () => {};
+  const responseGate = new Promise<void>(resolve => { release = resolve; });
+  const requestStarted = new Promise<void>(resolve => { started = resolve; });
+  let requests = 0;
+  await page.route('**/api/skills', async route => {
+    if (++requests > 1) return route.fulfill({ json: [] });
+    started(); await responseGate;
+    return route.fulfill({ status: 401, json: { error: 'Previous session expired' } });
+  });
+  try {
+    await page.getByRole('button', { name: 'Skills', exact: true }).click(); await requestStarted;
+    await page.locator('.logout').click();
+    await page.getByLabel('Administrator password').fill('browser-test-password-only');
+    await page.getByRole('button', { name: 'Enter workspace' }).click();
+    await expect(page.locator('.logout')).toBeVisible();
+    release(); await settleRefreshes(page);
+    await expect(page.locator('.logout')).toBeVisible();
+    await expect(page.getByLabel('Administrator password')).toHaveCount(0);
+  } finally { release(); }
+});

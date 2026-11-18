@@ -53,7 +53,7 @@ export class PackageService {
   private secretGuard?:(value:unknown)=>void;
   constructor(private config:Config,db:DatabaseSync){
     this.store=new PackageStore(db);this.store.recoverImports();
-    this.publisher=new RepositoryPublisher(db,{repository:id=>this.checkedRepository(id),exclusive:(id,operation)=>this.exclusive(id,operation),git:(directory,args)=>this.git(directory,args),remoteGit:(directory,args)=>this.remoteGit(directory,args,20_000),error:error=>this.safeDetail(error,'Remote publication failed')});
+    this.publisher=new RepositoryPublisher(db,{repository:id=>this.checkedRepository(id),exclusive:(id,operation)=>this.exclusive(id,operation),git:(directory,args,allowFailure)=>this.git(directory,args,allowFailure),remoteGit:(directory,args)=>this.remoteGit(directory,args,20_000),assertSafe:value=>this.assertNoSecrets(value),error:error=>this.safeDetail(error,'Remote publication failed')});
   }
   startPublishing():void{this.publisher.start();}
   closePublishing():Promise<void>{return this.publisher.close();}

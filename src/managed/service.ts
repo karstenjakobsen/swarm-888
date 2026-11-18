@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { Config } from '../config.ts';
 import type { Store } from '../store.ts';
@@ -23,6 +24,8 @@ export class ManagedService {
   readonly repository:ManagedRepository;
   readonly packages:PackageService;
   private sourceCreations=new Map<string,Promise<ManagedExport>>();
+  private connectorNames=new Map<string,Promise<unknown>>();
+  private connectorNameContext=new AsyncLocalStorage<string>();
   private receipts:RuntimeReceipts;
   constructor(private config:Config,private store:Store,private projects:ProjectService,client:WorkerClient,receipts?:RuntimeReceipts){
     this.repository=new ManagedRepository(config);this.packages=new PackageService(config,store.db);
@@ -49,23 +52,37 @@ export class ManagedService {
     return this.projects.get(project.id);
   }
   async updateProject(id:string,raw:unknown,runId?:string){
-    const input=this.projects.validateUpdate(id,raw),current=this.projects.get(id);
-    if((input.name!==undefined&&input.name!==current.name)||(input.description!==undefined&&input.description!==current.description)){
-      const row=this.row(id);
-      if(!row)throw fail('Adopt this project into a registered repository package before changing its name or description.',409);
-      if(!row.source.repositoryId)throw fail('Migrate this project source into a registered repository before changing its name or description.',409);
-      this.trackProject(id,runId);
-      const value=await this.readReleaseSource(id);
-      if(value.source.dirty)throw fail('Commit or resolve pending source changes before updating project details.',409);
-      const manifest=packageManifestSchema.parse({...value.manifest,name:input.name??value.manifest.name,description:input.description??value.manifest.description});
-      this.assertPackageMetadata(manifest);
-      const record=await this.packages.writeTextFiles(row.packageId,{'operator-package.json':JSON.stringify(manifest,null,2)+'\n'},[],{
-        message:'Update project details',expectedCommit:value.source.commit,runId,
-      });
-      this.synchronizePackageMetadata(record);
-      this.store.managed.saveSource(id,row.kind,this.packages.source(row.packageId),row.packageId);
-    }
-    return this.projects.update(id,input);
+    const input=this.projects.validateUpdate(id,raw),row=this.row(id);
+    const name=row?.kind==='connector'&&(input.name!==undefined||input.description!==undefined)?input.name??this.projects.get(id).name:undefined;
+    return this.withConnectorName(name,async()=>{
+      const current=this.projects.get(id);
+      if((input.name!==undefined&&input.name!==current.name)||(input.description!==undefined&&input.description!==current.description)){
+        const row=this.row(id);
+        if(!row)throw fail('Adopt this project into a registered repository package before changing its name or description.',409);
+        if(!row.source.repositoryId)throw fail('Migrate this project source into a registered repository before changing its name or description.',409);
+        this.trackProject(id,runId);
+        const value=await this.readReleaseSource(id);
+        if(value.source.dirty)throw fail('Commit or resolve pending source changes before updating project details.',409);
+        const manifest=packageManifestSchema.parse({...value.manifest,name:input.name??value.manifest.name,description:input.description??value.manifest.description});
+        if(row.kind==='connector'&&manifest.name!==name)throw fail('Connection source changed while updating its details. Retry with the current package.',409);
+        this.assertPackageMetadata(manifest);
+        const record=await this.packages.writeTextFiles(row.packageId,{'operator-package.json':JSON.stringify(manifest,null,2)+'\n'},[],{
+          message:'Update project details',expectedCommit:value.source.commit,runId,
+        });
+        this.synchronizePackageMetadata(record);
+        this.store.managed.saveSource(id,row.kind,this.packages.source(row.packageId),row.packageId);
+      }
+      return this.projects.update(id,input);
+    });
+  }
+  /** Connection names are global even when their source repositories are independent. */
+  async withConnectorName<T>(name:string|undefined,operation:()=>T|Promise<T>):Promise<T>{
+    const held=this.connectorNameContext.getStore();
+    if(!name||held===name)return operation();
+    if(held)throw fail('Connection source changed while updating its details. Retry with the current package.',409);
+    const pending=(this.connectorNames.get(name)??Promise.resolve()).catch(()=>{}).then(()=>this.connectorNameContext.run(name,operation));
+    this.connectorNames.set(name,pending);
+    try{return await pending;}finally{if(this.connectorNames.get(name)===pending)this.connectorNames.delete(name);}
   }
   private row(id:string){
     this.projects.get(id);
@@ -81,8 +98,8 @@ export class ManagedService {
   private synchronizePackageMetadata(record:PackageRecord){
     this.store.transaction(()=>{
       if(record.kind==='connector')this.store.connectors.syncPackageDetails(record.id,record);
-      const association=this.store.db.prepare('SELECT projectId FROM project_sources WHERE packageId=?').get(record.id) as {projectId:string}|undefined;
-      if(association)this.projects.update(association.projectId,{name:record.name,description:record.description});
+      const project=this.store.projects.forPackage(record.id);
+      if(project)this.projects.update(project.id,{name:record.name,description:record.description});
     });
   }
   private assertWorkspaceMetadata(packageId:string){
@@ -92,6 +109,7 @@ export class ManagedService {
     const manifest=this.metadataDocument(readFileSync(path,'utf8'));
     if(manifest.id!==record.id||manifest.kind!==record.kind)throw fail('Package manifest identity cannot change.',409);
     this.assertPackageMetadata(manifest);
+    return manifest;
   }
   createSource(id:string,raw:unknown):Promise<ManagedExport>{
     projectId.parse(id);const input=sourceCreateInput.parse(raw);
@@ -148,14 +166,16 @@ export class ManagedService {
   }
   async materializePackage(record:PackageRecord){
     if(record.kind==='skill')return;
-    const source=this.packages.source(record.id);
-    if(source.commit!==record.lastImportedCommit||source.path!==record.path)throw fail('A newer package revision was imported during registration. Import the current revision again to refresh runtime metadata.',409);
-    const prior=this.store.managed.source(record.id);
-    if(prior&&!prior.source.repositoryId)throw fail('Migrate the existing legacy source explicitly before attaching this package.',409);
-    this.assertPackageMetadata(record);
-    const project=this.projects.materializePackage(record);
-    this.store.managed.saveSource(project.id,record.kind,source,record.id);
-    this.synchronizePackageMetadata(record);return this.projects.get(project.id);
+    return this.withConnectorName(record.kind==='connector'?record.name:undefined,()=>{
+      const source=this.packages.source(record.id);
+      if(source.commit!==record.lastImportedCommit||source.path!==record.path)throw fail('A newer package revision was imported during registration. Import the current revision again to refresh runtime metadata.',409);
+      const prior=this.store.managed.source(record.id);
+      if(prior&&!prior.source.repositoryId)throw fail('Migrate the existing legacy source explicitly before attaching this package.',409);
+      this.assertPackageMetadata(record);
+      const project=this.projects.materializePackage(record);
+      this.store.managed.saveSource(project.id,record.kind,source,record.id);
+      this.synchronizePackageMetadata(record);return this.projects.get(project.id);
+    });
   }
   async createPackage(repositoryId:string,input:{path:string;kind:'project'|'connector'|'skill';name:string;description?:string;version?:string;template?:'service'|'connector'|'empty';adopt?:boolean;mcp?:ManagedExport['manifest']['mcp'];run?:ManagedExport['manifest']['run']}){
     const initial=scaffold({id:randomUUID(),kind:input.kind,name:input.name,description:input.description??'',template:input.template??(input.kind==='connector'?'connector':'empty')});
@@ -187,17 +207,26 @@ export class ManagedService {
   async writeSource(id:string,raw:unknown){
     const input=sourceWriteInput.parse(raw),row=this.row(id);if(!row)throw fail('Add managed source before saving files.',409);
     if(!row.source.repositoryId)throw fail('Migrate this legacy package to a registered repository before editing source.',409);
-    if(Object.hasOwn(input.files,'operator-package.json'))this.assertPackageMetadata(this.metadataDocument(input.files['operator-package.json']));
-    else this.assertWorkspaceMetadata(row.packageId);
-    const record=await this.packages.writeTextFiles(row.packageId,input.files,input.removedFiles??[],{message:input.message,expectedCommit:input.expectedCommit,createOnly:input.createOnly});
-    this.synchronizePackageMetadata(record);
-    const value=await this.packageExport(row.packageId);this.store.managed.saveSource(id,row.kind,value.source,row.packageId);return value;
+    const manifest=Object.hasOwn(input.files,'operator-package.json')?this.metadataDocument(input.files['operator-package.json']):this.assertWorkspaceMetadata(row.packageId);
+    return this.withConnectorName(row.kind==='connector'?manifest?.name:undefined,async()=>{
+      if(manifest)this.assertPackageMetadata(manifest);
+      if(!Object.hasOwn(input.files,'operator-package.json')&&this.assertWorkspaceMetadata(row.packageId)?.name!==manifest?.name)throw fail('Connection source changed while updating its details. Retry with the current package.',409);
+      const record=await this.packages.writeTextFiles(row.packageId,input.files,input.removedFiles??[],{message:input.message,expectedCommit:input.expectedCommit,createOnly:input.createOnly});
+      this.synchronizePackageMetadata(record);
+      const value=await this.packageExport(row.packageId);this.store.managed.saveSource(id,row.kind,value.source,row.packageId);return value;
+    });
+  }
+  private async commitPackage(packageId:string,message:string,runId?:string){
+    const manifest=this.assertWorkspaceMetadata(packageId);
+    return this.withConnectorName(manifest?.name,async()=>{
+      if(this.assertWorkspaceMetadata(packageId)?.name!==manifest?.name)throw fail('Connection source changed while updating its details. Retry with the current package.',409);
+      const source=await this.packages.commit(packageId,message,runId);
+      this.synchronizePackageMetadata(this.packages.package(packageId));return source;
+    });
   }
   async commitSource(id:string,raw:unknown={},runId?:string){
     const input=sourceCommitInput.parse(raw),row=this.row(id);if(!row)throw fail('This project has no managed source yet.',404);
-    if(row.source.repositoryId)this.assertWorkspaceMetadata(row.packageId);
-    const source=row.source.repositoryId?await this.packages.commit(row.packageId,input.message??'Save project changes',runId):await this.repository.commit(row.kind,row.packageId,input.message??'Save generated project changes',runId);
-    if(row.source.repositoryId)this.synchronizePackageMetadata(this.packages.package(row.packageId));
+    const source=row.source.repositoryId?await this.commitPackage(row.packageId,input.message??'Save project changes',runId):await this.repository.commit(row.kind,row.packageId,input.message??'Save generated project changes',runId);
     this.store.managed.saveSource(id,row.kind,source,row.packageId);return source;
   }
   async executionDirectory(conversationId:string):Promise<string|undefined>{
@@ -224,9 +253,7 @@ export class ManagedService {
       const record=this.packages.store.package(packageId);
       if(!record){this.store.transaction(()=>{this.store.managed.packageFinalized(run.id,packageId,null);this.store.releaseProject(run.id);});continue;}
       try{
-        this.assertWorkspaceMetadata(packageId);
-        const source=await this.packages.commit(packageId,`Save package changes from ${run.status} task ${run.id}`,run.id);
-        this.synchronizePackageMetadata(this.packages.package(packageId));
+        const source=await this.commitPackage(packageId,`Save package changes from ${run.status} task ${run.id}`,run.id);
         this.store.transaction(()=>{
           this.store.managed.refreshPackageSource(packageId,source);
           this.store.managed.packageFinalized(run.id,packageId,source.commit);
