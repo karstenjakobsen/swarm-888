@@ -24,6 +24,10 @@ const activeStates = new Set<Run['status']>(['queued', 'running', 'waiting', 'un
 export const friendlyStatus = (status: Run['status']) => ({ waiting: 'Needs your input', queued: 'Queued', running: 'Working', completed: 'Completed', failed: 'Failed', interrupted: 'Interrupted', uncertain: 'Needs reconciliation' }[status]);
 export function formatTime(date: string) { const value = new Date(date); return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 const appendUnique = <T extends { id: string }>(list: T[], value: T) => list.some(item => item.id === value.id) ? list.map(item => item.id === value.id ? value : item) : [...list, value];
+async function workspaceRead<T>(path: string, signal: AbortSignal) {
+  try { return await api<T>(path, { signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) }); }
+  catch (cause) { if (!signal.aborted) throw cause; }
+}
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -41,6 +45,8 @@ export default function App() {
   const conversationRows = useRef<Conversation[]>([]);
   const removedConversations = useRef(new Set<string>());
   const conversationListRequest = useRef(0), conversationDetailRequest = useRef(0);
+  const statusRequest = useRef(0);
+  const workspaceRequests = useRef<AbortController | null>(null);
   const deletingConversation = useRef<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
@@ -73,14 +79,15 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
-    api<{ authenticated: boolean; csrfToken?: string }>('/session').then(session => {
+    const controller = new AbortController();
+    api<{ authenticated: boolean; csrfToken?: string }>('/session', { signal: controller.signal }).then(session => {
       if (!alive) return;
       setCsrf(session.csrfToken || '');
       setAuthenticated(session.authenticated);
     }).catch(cause => { if (alive) { setError(cause.message); setAuthenticated(false); } });
     const unauthorized = () => { setAuthenticated(false); setCsrf(''); };
     window.addEventListener('operator:unauthorized', unauthorized);
-    return () => { alive = false; window.removeEventListener('operator:unauthorized', unauthorized); };
+    return () => { alive = false; controller.abort(); window.removeEventListener('operator:unauthorized', unauthorized); };
   }, []);
 
   useEffect(() => {
@@ -91,23 +98,30 @@ export default function App() {
   }, [authenticated, view]);
 
   const refreshStatus = useCallback(async () => {
-    const value = await api<Status>('/status');
-    setStatus(value);
+    const controller = workspaceRequests.current;
+    if (!controller) return;
+    const request = ++statusRequest.current;
+    const value = await workspaceRead<Status>('/status', controller.signal);
+    if (value && !controller.signal.aborted && request === statusRequest.current) setStatus(value);
   }, []);
   const refreshConversations = useCallback(async () => {
+    const controller = workspaceRequests.current;
+    if (!controller) return;
     const request = ++conversationListRequest.current;
-    const value = await api<Conversation[]>('/conversations');
-    if (request !== conversationListRequest.current) return;
+    const value = await workspaceRead<Conversation[]>('/conversations', controller.signal);
+    if (!value || controller.signal.aborted || request !== conversationListRequest.current) return;
     const rows = asList(value).filter((conversation: Conversation) => !removedConversations.current.has(conversation.id));
     conversationRows.current = rows; setConversations(rows);
     if (!currentId.current && rows[0]) { currentId.current = rows[0].id; setConversationId(rows[0].id); }
   }, []);
   const loadConversation = useCallback(async (id: string) => {
+    const controller = workspaceRequests.current;
+    if (!controller) return;
     if (currentId.current !== id || removedConversations.current.has(id)) return;
     const request = ++conversationDetailRequest.current;
     try {
-      const value = await api<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`);
-      if (currentId.current === id && request === conversationDetailRequest.current && !removedConversations.current.has(id)) {
+      const value = await workspaceRead<ConversationDetail>(`/conversations/${encodeURIComponent(id)}`, controller.signal);
+      if (value && !controller.signal.aborted && currentId.current === id && request === conversationDetailRequest.current && !removedConversations.current.has(id)) {
         setDetail(value);
         setEvents(previous => {
           const map = new Map(previous.filter(event => !event.conversationId || !removedConversations.current.has(event.conversationId)).map(event => [event.seq, event]));
@@ -133,19 +147,56 @@ export default function App() {
   useEffect(() => {
     if (!authenticated) return;
     let alive = true;
+    const controller = new AbortController();
+    workspaceRequests.current = controller;
+    let initializing = true, refreshing = false, replaying = true, connectionOpen = false;
+    let lastSnapshotAt: number | null = null;
+    let pendingList = false, pendingDetail = false, pendingStatus = false;
+    let refreshTimer: number | undefined, firstPendingAt = 0;
+    const reportError = (cause: unknown) => { if (alive && !controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not refresh the workspace.'); };
+    const flushRefresh = async () => {
+      refreshTimer = undefined;
+      if (!alive || initializing || refreshing) return;
+      const list = pendingList, selectedDetail = pendingDetail, status = pendingStatus;
+      pendingList = pendingDetail = pendingStatus = false; firstPendingAt = 0;
+      refreshing = true;
+      const requests = [
+        ...(list ? [refreshConversations()] : []),
+        ...(selectedDetail && currentId.current ? [loadConversation(currentId.current)] : []),
+        ...(status ? [refreshStatus()] : []),
+      ];
+      const results = await Promise.allSettled(requests);
+      for (const result of results) if (result.status === 'rejected') reportError(result.reason);
+      refreshing = false;
+      if (alive && (pendingList || pendingDetail || pendingStatus)) scheduleRefresh(false, false);
+    };
+    const scheduleRefresh = (list = true, selectedDetail = true, status = false) => {
+      pendingList ||= list; pendingDetail ||= selectedDetail; pendingStatus ||= status;
+      if (!firstPendingAt) firstPendingAt = Date.now();
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => { void flushRefresh(); }, Math.max(0, Math.min(150, 1000 - (Date.now() - firstPendingAt))));
+    };
     const initialize = async () => {
       try {
-        await refreshConversations();
-        if (!alive) return;
-        await refreshStatus();
-      } catch (cause: any) { if (alive) setError(cause.message); }
+        const results = await Promise.allSettled([refreshConversations(), refreshStatus()]);
+        for (const result of results) if (result.status === 'rejected') reportError(result.reason);
+      } finally {
+        initializing = false;
+        if (alive && (pendingList || pendingDetail || pendingStatus)) scheduleRefresh(false, false);
+      }
     };
     void initialize();
-    const interval = window.setInterval(() => { void refreshStatus().catch(cause => setError(cause.message)); }, 5000);
+    const interval = window.setInterval(() => {
+      if (!connectionOpen || lastSnapshotAt === null || Date.now() - lastSnapshotAt > 30_000) {
+        setStreamConnected(false);
+        scheduleRefresh(true, true, true);
+      }
+    }, 5000);
     const source = new EventSource(`/api/events?after=${cursor.current}`, { withCredentials: true });
-    source.onopen = () => setStreamConnected(true);
-    source.onerror = () => setStreamConnected(false);
+    source.onopen = () => { if (alive) { connectionOpen = true; replaying = true; } };
+    source.onerror = () => { if (alive) { connectionOpen = false; replaying = true; lastSnapshotAt = null; setStreamConnected(false); } };
     source.addEventListener('event', event => {
+      if (!alive) return;
       let value: ExecutionEvent;
       try { value = JSON.parse((event as MessageEvent).data); } catch { return; }
       if (typeof value.seq !== 'number' || value.seq <= cursor.current) return;
@@ -153,20 +204,30 @@ export default function App() {
       if (value.type === 'conversation_deleted' && typeof value.data?.conversationId === 'string') { removeConversationFromWorkspace(value.data.conversationId); return; }
       if (value.conversationId && removedConversations.current.has(value.conversationId)) return;
       setEvents(previous => previous.some(item => item.seq === value.seq) ? previous : [...previous, value]);
-      if (value.type === 'run' || value.type === 'completed' || value.type === 'thread' || value.type === 'clarification') {
-        void refreshStatus().catch(() => {});
-        void refreshConversations().catch(() => {});
-        if (currentId.current && currentId.current === value.conversationId) void loadConversation(currentId.current).catch(cause => setError(cause.message));
-      }
+      if (!replaying && ['run', 'completed', 'thread', 'clarification'].includes(value.type)) scheduleRefresh(true, currentId.current === value.conversationId);
       if (value.type === 'message' && value.conversationId === currentId.current) {
         const message = value.data.message as Message | undefined;
         if (message) setDetail(previous => previous ? { ...previous, messages: appendUnique(previous.messages, message) } : previous);
       }
     });
     source.addEventListener('status', event => {
-      try { const value = JSON.parse((event as MessageEvent).data); if ('worker' in value) setStatus(value); } catch { /* reconnection will refresh state */ }
+      if (!alive) return;
+      try {
+        const value = JSON.parse((event as MessageEvent).data);
+        if (!value || typeof value !== 'object' || !('worker' in value) || !Array.isArray(value.queue)) return;
+        statusRequest.current++; lastSnapshotAt = Date.now(); setStatus(value); setStreamConnected(true);
+        pendingStatus = false;
+        // The server sends its current status after replaying durable events.
+        if (replaying) { replaying = false; scheduleRefresh(); }
+      } catch { /* polling recovers if valid snapshots stop arriving */ }
     });
-    return () => { alive = false; source.close(); window.clearInterval(interval); setStreamConnected(false); };
+    return () => {
+      alive = false; controller.abort(); source.close(); window.clearInterval(interval);
+      if (refreshTimer !== undefined) window.clearTimeout(refreshTimer);
+      if (workspaceRequests.current === controller) workspaceRequests.current = null;
+      statusRequest.current++; conversationListRequest.current++; conversationDetailRequest.current++;
+      setStreamConnected(false);
+    };
   }, [authenticated, loadConversation, refreshConversations, refreshStatus, removeConversationFromWorkspace]);
 
   useEffect(() => {

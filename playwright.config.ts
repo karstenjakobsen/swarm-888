@@ -19,7 +19,7 @@ const inherited = Object.fromEntries(Object.entries(process.env).filter((entry):
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['browser.spec.ts', 'agent-connection-browser.spec.ts'],
+  testMatch: ['browser.spec.ts', 'agent-connection-browser.spec.ts', 'workspace-sync-browser.spec.ts'],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,

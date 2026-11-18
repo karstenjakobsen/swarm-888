@@ -850,8 +850,16 @@ async function conversationDeletionFixture(page: Page) {
     class FixtureEventSource extends EventTarget {
       onopen: ((event: Event) => void) | null = null;
       onerror: ((event: Event) => void) | null = null;
-      constructor() { super(); (window as any).__conversationEventSource = this; queueMicrotask(() => this.onopen?.(new Event('open'))); }
-      close() {}
+      private closed = false;
+      constructor() {
+        super(); (window as any).__conversationEventSource = this;
+        queueMicrotask(() => {
+          if (this.closed) return;
+          this.onopen?.(new Event('open'));
+          this.dispatchEvent(new MessageEvent('status', { data: JSON.stringify({ worker: null, workerError: null, maintenance: false, queue: [] }) }));
+        });
+      }
+      close() { this.closed = true; }
     }
     Object.defineProperty(window, 'EventSource', { value: FixtureEventSource });
   });

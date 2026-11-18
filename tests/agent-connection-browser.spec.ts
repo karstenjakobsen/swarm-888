@@ -173,10 +173,12 @@ test('an authenticated normal-user worker still requires root before appearing r
 });
 
 test('a legacy root broker with a non-root execution account must restart before appearing ready', async ({ page }) => {
-  await page.route('**/api/status', route => route.fulfill({ json: {
+  const status = {
     worker: { uid: 0, root: true, executionUid: 2001, pid: 42, activeRunId: null, runtime: { available: true, authenticated: true, version: 'fixture', detail: 'Legacy worker fixture' } },
     workerError: null, maintenance: false, queue: [],
-  } }));
+  };
+  await page.route('**/api/status', route => route.fulfill({ json: status }));
+  await page.route('**/api/events?*', route => route.fulfill({ contentType: 'text/event-stream', body: `event: status\ndata: ${JSON.stringify(status)}\n\n` }));
   await page.route('**/api/agent/connection', route => route.fulfill({ json: { state: 'connected', workerConnected: true, workerUid: 0, executionUid: 2001 } }));
   await login(page);
   await expect(page.locator('.privilege-pill')).toContainText('UID 2001 · non-root');

@@ -8,6 +8,7 @@ export async function api<T = unknown>(path: string, options: RequestInit = {}):
   });
   let body: any;
   try { body = await response.json(); } catch { body = null; }
+  options.signal?.throwIfAborted();
   if (!response.ok) {
     if (response.status === 401 && path !== '/login' && path !== '/session') window.dispatchEvent(new Event('operator:unauthorized'));
     const error = body?.message || body?.error;
