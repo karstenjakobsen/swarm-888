@@ -2,6 +2,21 @@
 
 A development MVP for one administrator on one Linux host. React/Vite talks to a normal-user Fastify controller that schedules durable tasks across registered Codex workers. Workers default to the launching user; root is an explicit option. Each named worker has its own startup-selected model, reasoning effort, profile, socket, and journal. A prompt guardrail reserves operator core source, build, dependencies, configuration, and launch definitions for the owner. Generated packages are explicitly editable in a controller-managed worktree of this same repository. This is an instruction, not filesystem isolation: root retains host access.
 
+## Automated host setup
+
+The [Ansible setup guide](ansible/README.md) installs the operator and persistent user/root worker services on Debian/Ubuntu, using either localhost or an SSH host. Ansible and Ruff use this repository's uv environment:
+
+```sh
+uv sync --dev
+cp ansible/vars.example.yml ansible/vars.local.yml
+chmod 600 ansible/vars.local.yml
+# Edit private variables, including the administrator password for a new install.
+uv run ansible-playbook ansible/setup.yml -i server-212, -e @ansible/vars.local.yml
+# Local alternative: -i localhost, -c local --ask-become-pass
+```
+
+Existing configuration, persistent data, and worker sign-ins are retained. New profiles require **Workers → Sign in** after installation. See the guide for configuration, rebuilding, and validation with `make ops-check`.
+
 ## Prerequisites and first start
 
 Verified with Ubuntu 24.04, **Node 26.13.1**, npm 11.16.0, **Codex CLI 0.166.0**, and Chromium 159 through Playwright 1.65.1. Dependencies are pinned in `package-lock.json`. The maintained Node `node:sqlite` binding supplies SQLite, FTS5, WAL and the online backup API; no database server is needed.

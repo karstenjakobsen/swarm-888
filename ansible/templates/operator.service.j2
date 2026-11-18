@@ -1,0 +1,27 @@
+[Unit]
+Description={{ item.description }}
+Wants=network-online.target
+After=network-online.target{{ ' swarm-888.service' if item.kind != 'controller' else '' }}
+
+[Service]
+Type=simple
+User={{ 'root' if item.kind == 'root' else operator_user }}
+Group={{ 'root' if item.kind == 'root' else operator_group }}
+WorkingDirectory={{ operator_checkout }}
+Environment="PATH={{ operator_runtime_path }}"
+Environment="APP_STATE_DIR={{ operator_state_dir }}"
+Environment="APP_CONTROLLER_UID={{ operator_account.uid }}"
+Environment="APP_PROJECTS_DIR={{ operator_projects_dir }}"
+Environment="APP_WORKER_ID={{ operator_root_worker_id if item.kind == 'root' else '' }}"
+Environment="APP_WORKER_MODE={{ 'root' if item.kind == 'root' else 'user' }}"
+Environment="APP_REQUIRE_ROOT_WORKER={{ 'true' if item.kind == 'root' else 'false' }}"
+Environment="CODEX_BIN={{ operator_checkout }}/node_modules/.bin/codex"
+ExecStart={{ operator_node_dir }}/bin/node --env-file={{ operator_checkout }}/.env --import {{ operator_checkout }}/node_modules/tsx/dist/loader.mjs {{ operator_checkout }}/src/{{ 'controller' if item.kind == 'controller' else 'worker' }}.ts{{ (' --id ' ~ operator_root_worker_id ~ ' --name ' ~ (operator_root_worker_name | to_json) ~ ' --model ' ~ (operator_root_worker_model | to_json) ~ (' --effort ' ~ operator_root_worker_effort if operator_root_worker_effort else '') ~ ' --mode root') if item.kind == 'root' else (' --mode user' if item.kind == 'user' else '') }}
+UMask=0077
+Restart={{ 'on-failure' if item.kind == 'controller' else 'always' }}
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

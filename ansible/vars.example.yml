@@ -1,0 +1,33 @@
+---
+# Copy to vars.local.yml (gitignored) and pass with -e @ansible/vars.local.yml.
+# Existing .env files do not require a password unless operator_replace_env=true.
+operator_admin_password: "CHANGE-ME-to-a-unique-password"
+
+# Defaults match server-212. For localhost you can use the same dedicated account.
+operator_user: swarm
+operator_group: swarm
+operator_home: /home/swarm
+operator_checkout: /home/swarm/swarm-888
+operator_state_dir: /home/swarm/.local/share/vps-ai-operator
+operator_projects_dir: /home/swarm/packages
+
+# Use false for a checkout you already manage, including this repo on localhost.
+operator_manage_checkout: true
+operator_repo_url: https://github.com/karstenjakobsen/swarm-888.git
+operator_repo_version: main
+
+operator_origins:
+  - http://localhost:3001
+  - http://127.0.0.1:3001
+# For the existing server, preserve its .env or use its actual public origin:
+# operator_origins: [https://swarm.karstenjakobsen.dk]
+# operator_secure_cookie: true
+
+operator_user_worker_enabled: true
+operator_root_worker_enabled: true
+operator_root_worker_id: root
+operator_root_worker_model: gpt-6.1-sol
+operator_root_worker_effort: high
+
+# operator_replace_env: true  # Regenerate an existing .env using these variables.
+# operator_rebuild: true      # Reinstall dependencies and rebuild on this run.

@@ -5,3 +5,8 @@ playwright-report/
 test-results/
 *.log
 .DS_Store
+.venv/
+__pycache__/
+.ruff_cache/
+.ansible/
+ansible/vars.local.yml

@@ -1,0 +1,280 @@
+---
+- name: Collect existing service states
+  ansible.builtin.service_facts:
+
+- name: Inspect dependencies, build output, database and deployment fingerprint
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
+    - "{{ operator_checkout }}/dist/web/index.html"
+    - "{{ operator_state_dir }}/operator.sqlite"
+    - "{{ operator_state_dir }}/deployment.sha256"
+  register: operator_installation
+
+- name: Read the previous successful build fingerprint
+  ansible.builtin.slurp:
+    src: "{{ operator_state_dir }}/deployment.sha256"
+  register: operator_previous_build
+  when: operator_installation.results[3].stat.exists
+
+- name: Fingerprint application build inputs
+  ansible.builtin.script:
+    cmd: "files/source_fingerprint.py {{ operator_checkout | quote }}"
+    executable: /usr/bin/python3
+  register: operator_source
+  changed_when: false
+  check_mode: false
+
+- name: Plan dependency installation and build
+  ansible.builtin.set_fact:
+    operator_build_required: >-
+      {{ operator_rebuild | bool or
+         not operator_installation.results[0].stat.exists or
+         not operator_installation.results[1].stat.exists or
+         (operator_source.stdout | trim) + ':' + operator_node_version !=
+         (operator_previous_build.content | default('') | b64decode | trim) }}
+
+- name: Preview environment changes without exposing secrets
+  ansible.builtin.template:
+    src: operator.env.j2
+    dest: "{{ operator_checkout }}/.env"
+    force: "{{ operator_replace_env | bool }}"
+    owner: "{{ operator_user }}"
+    group: "{{ operator_group }}"
+    mode: "0600"
+  check_mode: true
+  no_log: true
+  diff: false
+  register: operator_env_plan
+
+- name: Read existing configuration paths and listener as the controller user
+  ansible.builtin.command:
+    argv:
+      - "{{ operator_node_dir }}/bin/node"
+      - "--env-file={{ operator_checkout }}/.env"
+      - --input-type=module
+      - -e
+      - >-
+        import {homedir} from 'node:os'; import {join} from 'node:path';
+        const state=process.env.APP_STATE_DIR??join(homedir(),'.local/share/vps-ai-operator');
+        console.log(JSON.stringify({state,projects:process.env.APP_PROJECTS_DIR??join(state,'projects'),
+          host:process.env.APP_HOST??'127.0.0.1',port:Number(process.env.APP_PORT??3001)}));
+  become: true
+  become_user: "{{ operator_user }}"
+  changed_when: false
+  check_mode: false
+  register: operator_saved_paths
+  when: operator_existing.results[1].stat.exists
+
+- name: Prevent accidentally selecting different persistent data
+  ansible.builtin.assert:
+    that:
+      - (operator_saved_paths.stdout | from_json).state == operator_state_dir
+      - (operator_saved_paths.stdout | from_json).projects == operator_projects_dir
+    fail_msg: Match the existing .env state/projects paths. Data migration is a separate owner operation.
+  when: operator_existing.results[1].stat.exists
+
+- name: Select the effective controller listener for health checks
+  ansible.builtin.set_fact:
+    operator_health_host: >-
+      {{ (operator_saved_paths.stdout | from_json).host
+         if operator_existing.results[1].stat.exists and not operator_replace_env | bool
+         else operator_host }}
+    operator_health_port: >-
+      {{ (operator_saved_paths.stdout | from_json).port
+         if operator_existing.results[1].stat.exists and not operator_replace_env | bool
+         else operator_port }}
+
+- name: Preview service definitions
+  ansible.builtin.template:
+    src: operator.service.j2
+    dest: "/etc/systemd/system/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ operator_units }}"
+  check_mode: true
+  register: operator_unit_plan
+
+- name: Determine whether maintenance is needed
+  ansible.builtin.set_fact:
+    operator_maintenance_required: >-
+      {{ operator_build_required or operator_env_plan.changed or operator_unit_plan.changed or
+         (operator_units | rejectattr('enabled') | map(attribute='name') | list |
+          intersect(ansible_facts.services | dict2items | selectattr('value.state', 'equalto', 'running') |
+          map(attribute='key') | list) | length > 0) }}
+
+- name: Apply changes while idle workers are reserved
+  when: operator_maintenance_required | bool and not ansible_check_mode
+  block:
+    - name: Reserve idle workers before touching shared application files
+      ansible.builtin.command:
+        argv:
+          - "{{ operator_node_dir }}/bin/node"
+          - "--env-file-if-exists={{ operator_checkout }}/.env"
+          - --import
+          - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
+          - /usr/local/lib/swarm-888/worker-maintenance.mjs
+          - "{{ operator_checkout }}"
+          - reserve
+          - "{{ operator_root_worker_id }}"
+      become: true
+      become_user: "{{ operator_user }}"
+      environment: "{{ operator_launch_environment }}"
+      changed_when: false
+      when: operator_installation.results[0].stat.exists
+
+    # Stop admission first, then the workers. Reservation rejects new work in between.
+    - name: Stop managed services for maintenance
+      ansible.builtin.systemd_service:
+        name: "{{ item.name }}"
+        state: stopped
+      loop: "{{ operator_units }}"
+      when: item.name in ansible_facts.services
+
+    - name: Write the application environment
+      ansible.builtin.template:
+        src: operator.env.j2
+        dest: "{{ operator_checkout }}/.env"
+        force: "{{ operator_replace_env | bool }}"
+        owner: "{{ operator_user }}"
+        group: "{{ operator_group }}"
+        mode: "0600"
+      no_log: true
+      diff: false
+
+    - name: Install pinned npm dependencies including runtime TypeScript tooling
+      ansible.builtin.command:
+        argv: ["{{ operator_node_dir }}/bin/npm", ci, --include=dev, --no-audit, --no-fund]
+        chdir: "{{ operator_checkout }}"
+      become: true
+      become_user: "{{ operator_user }}"
+      environment:
+        PATH: "{{ operator_runtime_path }}"
+      changed_when: true
+      when: operator_build_required | bool
+
+    - name: Typecheck the application and build the web UI
+      ansible.builtin.command:
+        argv: ["{{ operator_node_dir }}/bin/npm", run, build]
+        chdir: "{{ operator_checkout }}"
+      become: true
+      become_user: "{{ operator_user }}"
+      environment:
+        PATH: "{{ operator_runtime_path }}"
+      changed_when: true
+      when: operator_build_required | bool
+
+    - name: Initialize a fresh database as the controller user
+      ansible.builtin.command:
+        argv: ["{{ operator_node_dir }}/bin/npm", run, init]
+        chdir: "{{ operator_checkout }}"
+        creates: "{{ operator_state_dir }}/operator.sqlite"
+      become: true
+      become_user: "{{ operator_user }}"
+      environment: "{{ operator_launch_environment }}"
+
+    - name: Write persistent system services
+      ansible.builtin.template:
+        src: operator.service.j2
+        dest: "/etc/systemd/system/{{ item.name }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ operator_units }}"
+
+    - name: Reload system service definitions
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Record the successful build inputs
+      ansible.builtin.copy:
+        content: "{{ operator_source.stdout | trim }}:{{ operator_node_version }}\n"
+        dest: "{{ operator_state_dir }}/deployment.sha256"
+        owner: "{{ operator_user }}"
+        group: "{{ operator_group }}"
+        mode: "0600"
+
+  always:
+    - name: Release any reservations left by failed maintenance
+      ansible.builtin.command:
+        argv:
+          - "{{ operator_node_dir }}/bin/node"
+          - "--env-file-if-exists={{ operator_checkout }}/.env"
+          - --import
+          - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
+          - /usr/local/lib/swarm-888/worker-maintenance.mjs
+          - "{{ operator_checkout }}"
+          - release
+          - "{{ operator_root_worker_id }}"
+      become: true
+      become_user: "{{ operator_user }}"
+      environment: "{{ operator_launch_environment }}"
+      changed_when: false
+      failed_when: false
+      when: operator_installation.results[0].stat.exists
+
+- name: Enable and start the configured services
+  ansible.builtin.systemd_service:
+    name: "{{ item.name }}"
+    enabled: "{{ item.enabled }}"
+    state: "{{ 'started' if item.enabled else 'stopped' }}"
+  loop: "{{ operator_units }}"
+  when: not ansible_check_mode
+
+- name: Wait for the controller to accept browser sessions
+  ansible.builtin.uri:
+    url: "http://{{ operator_health_address }}:{{ operator_health_port }}/api/session"
+    status_code: 200
+  vars:
+    operator_health_address: >-
+      {{ '127.0.0.1' if operator_health_host == '0.0.0.0' else
+         '[::1]' if operator_health_host == '::' else
+         '[' + operator_health_host + ']' if ':' in operator_health_host else operator_health_host }}
+  register: operator_http_health
+  until: operator_http_health.status | default(0) == 200
+  retries: 20
+  delay: 2
+  when: not ansible_check_mode
+
+- name: Wait for enabled worker sockets
+  ansible.builtin.wait_for:
+    path: "{{ operator_state_dir }}/{{ item.path }}"
+    state: present
+    timeout: 45
+  loop:
+    - enabled: "{{ operator_user_worker_enabled | bool }}"
+      path: worker.sock
+    - enabled: "{{ operator_root_worker_enabled | bool }}"
+      path: "workers/{{ operator_root_worker_id }}/worker.sock"
+  when: not ansible_check_mode and item.enabled
+
+- name: Verify private worker health and report sign-in status
+  ansible.builtin.command:
+    argv:
+      - "{{ operator_node_dir }}/bin/node"
+      - "--env-file={{ operator_checkout }}/.env"
+      - --import
+      - "{{ operator_checkout }}/node_modules/tsx/dist/loader.mjs"
+      - /usr/local/lib/swarm-888/worker-maintenance.mjs
+      - "{{ operator_checkout }}"
+      - health
+      - "{{ operator_root_worker_id }}"
+      - >-
+        {{ ((['default'] if operator_user_worker_enabled | bool else []) +
+            ([operator_root_worker_id] if operator_root_worker_enabled | bool else [])) | join(',') }}
+  become: true
+  become_user: "{{ operator_user }}"
+  environment: "{{ operator_launch_environment }}"
+  changed_when: false
+  register: operator_worker_health
+  retries: 15
+  delay: 2
+  until: operator_worker_health.rc == 0
+  when: not ansible_check_mode
+
+- name: Show worker readiness
+  ansible.builtin.debug:
+    msg: "{{ operator_worker_health.stdout_lines + ['Sign in to new profiles from Workers in the web UI.'] }}"
+  when: not ansible_check_mode
