@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/app.css" />
     <script defer src="/api.js"></script>
     <script defer src="/dashboard.js"></script>
+    <script defer src="/brain.js"></script>
     <script defer src="/workspaces.js"></script>
     <script defer src="/peers.js"></script>
     <script defer src="/vendor/alpine-csp.js"></script>
@@ -52,6 +53,9 @@
             <button :class="navClass('runs')" @click="tab('runs')">
               <span aria-hidden="true">▤</span>Run desk
             </button>
+            <button :class="navClass('brain')" @click="tab('brain')">
+              <span aria-hidden="true">◎</span>Brain
+            </button>
             <button :class="navClass('workers')" @click="tab('workers')">
               <span aria-hidden="true">▦</span>Worker pool
             </button>
@@ -75,7 +79,7 @@
               +
             </button>
           </div>
-          <template x-for="p in projects" :key="p.id"
+          <template x-for="p in workspaces" :key="p.id"
             ><button
               :class="projectClass(p.id)"
               @click="selectProject(p.id)"
@@ -146,7 +150,7 @@
         <div class="page">
           <div class="page-head">
             <h1 x-text="viewTitle"></h1>
-            <span class="workspace-tag" x-text="project.name"></span>
+            <span class="workspace-tag" x-show="selectedTab === 'runs'" x-text="project.name"></span>
           </div>
           <p role="alert" class="error" x-text="error" x-show="error"></p>
           <!-- operator-views -->

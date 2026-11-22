@@ -31,6 +31,7 @@ Idle slots do not start a Codex subprocess. Change the port, data directory, or 
 ## Use the dashboard
 
 - **Run desk** queues tasks in the selected workspace. Expand a run to see its actions and result. Send another task in that workspace to continue the conversation.
+- **Brain** opens the operator's SQLite records across all workspaces. Choose Memory notes, Runs and conversations, or Run events to inspect what the operator remembered, what you asked, and what happened. Expand a row to read its fields. Refresh for new entries or page back to older ones. Catalog configuration, workspace records, peers, and invitation workspaces are also available here. Credential columns are private.
 - **Worker pool** shows which slot owns each active task, its workspace, and its latest action. Different workspaces run concurrently. One worker at a time can change a given workspace.
 - **Catalog** lists reusable assets. Create a workspace with a separate HTTPS or SSH Git repository and an optional branch, tag, or commit. The operator imports the asset directories and records the resolved Git commit.
 - **Peer operators** pairs trusted operators. On the receiving operator, create an invitation. On the sending operator, enter the receiver's URL and invitation key. Select the peer under **Run on** when queuing a task. Each invitation has its own incoming workspace. Retried deliveries reuse the same request ID.
@@ -47,7 +48,7 @@ uv run python -m swarm --catalog-dir /home/karsten/projects/github/karstenjakobs
 
 The operator remembers the directory in its SQLite database. Another instance can use its own path or the default. `--catalog-repo`, `SWARM_CATALOG_REPO`, and `SWARM_CATALOG_DIR` support other deployments. The running account needs read/write access to the checkout, and SSH credentials for this GitHub remote. A systemd installation can keep its checkout under its writable state directory.
 
-**Catalog** shows the shared remote, local path, branch, and packages from every workspace. Choose **Work on catalog** to give Codex a task in that checkout. Shared packages belong in `skills/<name>/SKILL.md`, `connectors/<name>/`, and `projects/<name>/`. Ordinary project workers can read these packages and keep their own edits and memory in their private workspace.
+**Catalog** shows the shared remote, local path, branch, and packages from every workspace. Choose **Work on catalog** to give Codex a task in that checkout. Shared packages belong in `skills/<name>/SKILL.md`, `connectors/<name>/`, and `projects/<name>/`. Project workers can reuse these packages and keep task files in their workspace.
 
 **Sync catalog** fast-forwards the local branch. The operator also syncs at startup and before shared catalog tasks. **Publish changes** stages the three package directories and pushes the resulting commit to `main`. Other operators can then sync that revision. A conflicting change stops the job and leaves local work available for reconciliation. Switching repositories or checkout directories marks unfinished catalog runs as blocked and queues a fresh sync for the new checkout.
 
@@ -61,7 +62,9 @@ The operator remembers the directory in its SQLite database. Another instance ca
 
 **Publish workspace changes** commits the three workspace directories to a dedicated `swarm/<workspace-id>` branch in the source repository. Enable automatic publishing at workspace creation to queue a publish after each successful local task. Another operator can import the published branch or exact commit. An empty repository starts with a local catalog branch.
 
-SQLite stores projects, prompts, run states, actions, peer registrations, and results. Codex retains its thread history in the service account's Codex home. Workers are instructed to record durable project decisions in workspace-local `MEMORY.md`. Memory and conversations stay local when publishing a catalog. Back up the data directory and Codex home together for continuity.
+Each operator has one Brain in `<operator-data>/operator.sqlite3`. Workers return new facts and decisions in their structured response. The operator saves each note and the run outcome in one transaction, including for blocked runs. Notes retain their source workspace and run. Owner tasks receive recent Brain notes across local workspaces. Incoming peer tasks and shared-catalog tasks receive only their own workspace's notes. The Brain view can page through the full records.
+
+On upgrade, the operator imports existing private workspace `MEMORY.md` files. Once the text is committed, it retires the imported file from standalone workspaces. Repository files are preserved. SQLite also holds the user-facing conversation (task prompts and results), run events, and Codex thread references. Codex keeps its native thread transcripts in the service account's Codex home for resuming turns. If a new task cannot resume its thread, the operator seeds a fresh thread with recent prompts and results from the same workspace in Brain. Back up the data directory and Codex home together to preserve both.
 
 ## Install on a Linux VPS
 

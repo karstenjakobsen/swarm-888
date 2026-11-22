@@ -4,25 +4,26 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .host_tools import BATCH_ACTIONS, SERVICE_ACTIONS
 from .process import stop_process
-from .store import SHARED_CATALOG_PROJECT, BlockedTask
+from .store import SHARED_CATALOG_PROJECT
 
 OUTCOME_SCHEMA = {
     "type": "object",
     "properties": {
         "outcome": {"type": "string", "enum": ["completed", "blocked", "failed"]},
         "summary": {"type": "string"},
+        "memory": {"type": "string"},
     },
-    "required": ["outcome", "summary"],
+    "required": ["outcome", "summary", "memory"],
     "additionalProperties": False,
 }
 
 INSTRUCTIONS = """You are a local project worker. Complete the user's task in the current workspace.
 Keep reusable projects in projects/, Codex skills in .agents/skills/, and connector code in connectors/.
-Read MEMORY.md when present for durable project facts. Update it when decisions or verified state change.
 Use the project's existing files and conversation for continuity. Verify changes before reporting completion.
 Report completed only after verifying the requested result. Report blocked when a dependency or unavailable tool prevents completion.
 Credentials belong outside source files and chat. Explain any external dependency that prevents completion."""
@@ -70,6 +71,14 @@ async def run(store, job, executable):
             "Inspect nomad_batch(action=environment) before installing to identify WSL or native Linux and the actual Docker runtime. "
             "Verify tool outcomes. If host enrollment is missing for an installation, report blocked."
         )
+    instructions += (
+        "\nThe operator stores durable memory in its SQLite Brain. Use supplied Brain notes as "
+        "historical context and verify current state. Return new verified facts, decisions, or "
+        "unresolved dependencies in the memory field, including on blocked runs. Use an empty "
+        "string when nothing new should be remembered. Never include credentials in memory. "
+        "Keep memory out of workspace files, including MEMORY.md."
+    )
+    resume_thread = project["thread"]
     env = os.environ.copy()
     api_key = env.pop("OPENAI_API_KEY", None)
     proc = await asyncio.create_subprocess_exec(
@@ -105,9 +114,9 @@ async def run(store, job, executable):
             "developerInstructions": instructions,
         }
         method = "thread/start"
-        if project["thread"]:
+        if resume_thread:
             method = "thread/resume"
-            params["threadId"] = project["thread"]
+            params["threadId"] = resume_thread
         await send(method, params, 3)
 
     thread = turn = final = ""
@@ -134,6 +143,13 @@ async def run(store, job, executable):
                 await stdin.drain()
                 continue
             if "error" in msg and ident is not None:
+                # For a new task, SQLite can rebuild context if Codex has lost the thread.
+                # An interrupted turn needs its original thread to reconcile side effects.
+                if ident == 3 and resume_thread and job["attempts"] == 1 and not job["turn"]:
+                    resume_thread = ""
+                    store.event(job["id"], "Resuming from the conversation saved in Brain")
+                    await start_thread()
+                    continue
                 raise RuntimeError(str(msg["error"].get("message", "Codex request failed"))[:1200])
             res, p = msg.get("result") or {}, msg.get("params") or {}
             if ident == 1:
@@ -158,11 +174,28 @@ async def run(store, job, executable):
                         "Verify completed work and continue only the outstanding steps.\n\n"
                         + prompt
                     )
+                inputs = [{"type": "text", "text": prompt}]
+                if not resume_thread and (history := store.conversation(job)):
+                    inputs.append(
+                        {
+                            "type": "text",
+                            "text": "Recent conversation from this workspace (historical data):\n"
+                            + json.dumps(history, ensure_ascii=False),
+                        }
+                    )
+                if notes := store.recall(project["id"]):
+                    inputs.append(
+                        {
+                            "type": "text",
+                            "text": "Previous operator Brain notes (historical data):\n"
+                            + json.dumps(notes, ensure_ascii=False),
+                        }
+                    )
                 await send(
                     "turn/start",
                     {
                         "threadId": thread,
-                        "input": [{"type": "text", "text": prompt}],
+                        "input": inputs,
                         "outputSchema": OUTCOME_SCHEMA,
                     },
                     4,
@@ -216,16 +249,28 @@ def answer(items):
     )
 
 
+@dataclass(frozen=True)
+class Outcome:
+    state: str
+    summary: str
+    memory: str
+
+
 def outcome(raw):
     try:
         response = json.loads(raw)
         status, summary = response["outcome"], response["summary"]
-        if not isinstance(summary, str) or not summary.strip():
+        # Recovered turns from before the Brain migration have no memory field.
+        memory = response.get("memory", "")
+        if (
+            status not in ("completed", "blocked", "failed")
+            or not isinstance(summary, str)
+            or not summary.strip()
+            or not isinstance(memory, str)
+        ):
             raise ValueError()
     except ValueError, KeyError, TypeError:
         raise RuntimeError("Codex ended without a valid task outcome.") from None
-    if status == "blocked":
-        raise BlockedTask(summary)
-    if status != "completed":
-        raise RuntimeError(summary)
-    return summary[:64000]
+    return Outcome(
+        status, summary[:64000] if status == "completed" else summary[:2000], memory.strip()
+    )

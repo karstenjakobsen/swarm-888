@@ -9,7 +9,7 @@ from importlib.resources import files
 from typing import cast
 from urllib.parse import parse_qs, urlsplit
 
-from . import catalog, shared_catalog, web
+from . import catalog, records, shared_catalog, web
 from .store import Conflict, uid
 
 ASSETS = {
@@ -17,7 +17,14 @@ ASSETS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     **{
         "/" + f: (f, "application/javascript")
-        for f in ("api.js", "dashboard.js", "workspaces.js", "peers.js", "vendor/alpine-csp.js")
+        for f in (
+            "api.js",
+            "dashboard.js",
+            "brain.js",
+            "workspaces.js",
+            "peers.js",
+            "vendor/alpine-csp.js",
+        )
     },
 }
 
@@ -141,6 +148,10 @@ class Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(token.encode(), server.secret.encode()):
             return self.reply(401, {"error": "Open the access link printed by the server"})
         db = server.store
+        if self.command == "GET" and path == "/api/brain":
+            query = parse_qs(url.query, keep_blank_values=True)
+            before = int(query["before"][0]) if "before" in query else None
+            return self.reply(200, records.page(db, query.get("table", ["memory"])[0], before))
         if self.command == "GET" and path == "/api/state":
             project = parse_qs(url.query).get("project", ["inbox"])[0]
             p = db.project(project)

@@ -1,6 +1,7 @@
 """SQLite is the source of truth. A project owns one workspace and Codex thread."""
 
 import hashlib
+import logging
 import secrets
 import sqlite3
 import time
@@ -49,6 +50,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_writer ON jobs(project) WHERE state='runni
 CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY, job TEXT NOT NULL REFERENCES jobs(id), message TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS job_events ON events(job,id);
+CREATE TABLE IF NOT EXISTS memory (
+ id INTEGER PRIMARY KEY, project TEXT NOT NULL REFERENCES projects(id),
+ job TEXT UNIQUE REFERENCES jobs(id), body TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS project_memory ON memory(project,id);
 INSERT OR IGNORE INTO projects(id,name) VALUES('inbox','Operator workspace');
 """
 
@@ -63,6 +68,60 @@ class Store:
             db.executescript(SCHEMA)
             if "repo_ref" not in {row["name"] for row in db.execute("PRAGMA table_info(projects)")}:
                 db.execute("ALTER TABLE projects ADD COLUMN repo_ref TEXT NOT NULL DEFAULT 'HEAD'")
+        self._migrate_memory()
+
+    def _migrate_memory(self):
+        originals = []
+        with self.connection(True) as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] >= 1:
+                return
+            for row in db.execute(
+                "SELECT id,repo FROM projects WHERE id<>?", (SHARED_CATALOG_PROJECT,)
+            ):
+                path = self.root / "workspaces" / row["id"] / "MEMORY.md"
+                if path.resolve() != path or not path.is_file():
+                    continue
+                try:
+                    contents = path.read_bytes().decode("utf-8")
+                except UnicodeDecodeError:
+                    logging.warning("Skipping non-UTF-8 workspace memory at %s", path)
+                    continue
+                db.execute(
+                    "INSERT INTO memory(project,body,created) VALUES(?,?,?)",
+                    (row["id"], contents, path.stat().st_mtime_ns // 1_000_000),
+                )
+                if not row["repo"] and not (path.parent / ".git").exists():
+                    originals.append((path, contents))
+            db.execute("PRAGMA user_version=1")
+        # Retire private workspace copies only after the original text is committed.
+        for path, contents in originals:
+            try:
+                if path.resolve() == path and path.read_bytes() == contents.encode("utf-8"):
+                    path.unlink()
+            except OSError:
+                logging.warning("Imported memory into SQLite and retained %s", path)
+
+    def recall(self, project):
+        if project == SHARED_CATALOG_PROJECT or self.is_peer_project(project):
+            scope, args = "m.project=?", (project,)
+        else:
+            scope, args = "NOT EXISTS (SELECT 1 FROM invites WHERE project=m.project)", ()
+        return self.query(
+            f"""SELECT p.name AS workspace, m.created, substr(m.body,1,3000) AS note
+                FROM memory m JOIN projects p ON p.id=m.project
+                WHERE {scope} ORDER BY m.id DESC LIMIT 12""",
+            args,
+        )
+
+    def conversation(self, job):
+        recent = self.query(
+            """SELECT substr(prompt,1,2000) AS prompt, state, substr(result,1,3000) AS result
+               FROM jobs WHERE project=? AND id<>? AND kind='task'
+               AND state IN ('completed','blocked','failed')
+               ORDER BY created DESC,rowid DESC LIMIT 8""",
+            (job["project"], job["id"]),
+        )
+        return recent[::-1]
 
     @contextmanager
     def connection(self, write=False):
@@ -189,7 +248,7 @@ class Store:
                 )
                 return dict(db.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
 
-    def finish(self, job, state, result):
+    def finish(self, job, state, result, memory=""):
         with self.connection(True) as db:
             changed = db.execute(
                 "UPDATE jobs SET state=?,result=? WHERE id=? AND state='running'",
@@ -197,6 +256,11 @@ class Store:
             ).rowcount
             if not changed:
                 return
+            if memory:
+                db.execute(
+                    "INSERT INTO memory(project,job,body,created) VALUES(?,?,?,?)",
+                    (job["project"], job["id"], memory, now()),
+                )
             db.execute(
                 "INSERT INTO events(job,message,at) VALUES(?,?,?)",
                 (job["id"], "Run " + state, now()),

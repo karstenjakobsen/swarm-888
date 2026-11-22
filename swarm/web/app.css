@@ -384,6 +384,45 @@ small {
   margin-bottom: 9px;
   padding: 14px 17px;
 }
+.brain-tools {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.brain-tools select {
+  max-width: 100%;
+}
+.brain-record summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.brain-record summary strong {
+  font-weight: 580;
+}
+.brain-record time {
+  font-size: 0.85rem;
+  margin-left: 8px;
+}
+.brain-record dl {
+  margin: 12px 0 0;
+}
+.brain-record dl > div {
+  display: grid;
+  grid-template-columns: minmax(5rem, 17%) minmax(0, 1fr);
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 6px 0;
+}
+.brain-record dt {
+  font-family: ui-monospace, monospace;
+  color: var(--muted);
+}
+.brain-record dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .run-head {
   display: flex;
   align-items: baseline;

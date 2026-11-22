@@ -82,6 +82,9 @@ document.addEventListener("alpine:init", () => {
         }
       );
     },
+    get workspaces() {
+      return this.projects.filter((p) => p.id !== this.sharedCatalog?.id);
+    },
     get workers() {
       return Array.from({ length: this.capacity }, (_, i) => {
         const id = "worker-" + String(i + 1).padStart(2, "0");
@@ -110,6 +113,7 @@ document.addEventListener("alpine:init", () => {
     get viewTitle() {
       return {
         runs: "Run desk",
+        brain: "Brain",
         catalog: "Catalog",
         workers: "Worker pool",
         peers: "Peer operators",

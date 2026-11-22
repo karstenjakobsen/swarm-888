@@ -47,7 +47,10 @@ class Engine:
                 self.store.event(job["id"], f"Assigned to {name}")
                 async with asyncio.timeout(self.run_timeout):
                     result = await self._run(job)
-                self.store.finish(job, "completed", result)
+                if isinstance(result, codex.Outcome):
+                    self.store.finish(job, result.state, result.summary, result.memory)
+                else:
+                    self.store.finish(job, "completed", result)
             except BlockedTask as exc:
                 self.store.finish(job, "blocked", str(exc)[:2000])
             except TimeoutError:

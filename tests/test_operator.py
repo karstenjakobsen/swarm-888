@@ -139,6 +139,14 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(self.store.project("inbox")["thread"], "fixture-thread")
             blocked = self.store.enqueue("inbox", "missing credential")
             until(lambda: self.store.job(blocked["id"])["state"] == "blocked")
+            workspace = self.store.create_project("Second workspace")
+            recall = self.store.enqueue(workspace["id"], "recall previous decision")
+            until(lambda: self.store.job(recall["id"])["state"] == "completed")
+            self.assertEqual(self.store.query("SELECT job FROM memory"), [{"job": blocked["id"]}])
+            self.store.update("UPDATE projects SET thread='expired-thread' WHERE id='inbox'", ())
+            restored = self.store.enqueue("inbox", "continue from SQLite")
+            until(lambda: self.store.job(restored["id"])["state"] == "completed")
+            self.assertEqual(self.store.project("inbox")["thread"], "fixture-thread")
         finally:
             engine.stop()
 
@@ -203,6 +211,15 @@ class HTTPTest(unittest.TestCase):
         self.assertEqual(current["result"], "Fixture result: delegated")
         state, _ = request(url, "/api/state", headers=owner)
         self.assertNotIn(key, json.dumps(state))
+        with self.assertRaises(HTTPError) as no_brain:
+            request(url, "/api/brain", headers={"Authorization": "Bearer " + key})
+        self.assertEqual(no_brain.exception.code, 401)
+        no_brain.exception.close()
+        records, _ = request(url, "/api/brain?table=peers", headers=owner)
+        self.assertNotIn(key, json.dumps(records))
+        self.assertEqual(records["rows"][0]["id"], peer["id"])
+        records, _ = request(url, "/api/brain?table=jobs", headers=owner)
+        self.assertEqual(records["rows"][0]["result"], current["result"])
         scoped = {"Authorization": "Bearer " + key}
         duplicate, _ = request(
             destination, "/mesh/v1/runs", {"prompt": "delegated", "request_id": job["id"]}, scoped

@@ -7,7 +7,7 @@ def index():
     assets = files(__name__)
     views = [
         assets.joinpath("views", name + ".html").read_text()
-        for name in ("runs", "workers", "catalog", "peers")
+        for name in ("runs", "brain", "workers", "catalog", "peers")
     ]
     return (
         assets.joinpath("index.html")
