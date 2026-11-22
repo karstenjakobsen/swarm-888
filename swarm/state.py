@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS active(name TEXT PRIMARY KEY, rev TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS activations(id INTEGER PRIMARY KEY, name TEXT, rev TEXT, task TEXT);
 CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, task TEXT, rev TEXT, input_hash TEXT,
  result TEXT, checked TEXT, verified_reuse INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS call_inputs(call TEXT PRIMARY KEY, arguments TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS operations(
  id TEXT PRIMARY KEY, task TEXT, authority TEXT, target TEXT, intent TEXT, rev TEXT,
  status TEXT, evidence TEXT, attempts INTEGER DEFAULT 0, deadline REAL

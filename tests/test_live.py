@@ -16,7 +16,9 @@ import httpx
 import pytest
 import uvicorn
 from test_dns import configured, lose_create_reply, provider_server
+from test_learning import checked_failure
 
+from swarm.catalog import Catalog
 from swarm.dns import DO_ENDPOINT, DNSProvider, Intent, RemoteMCP
 from swarm.runtime import CodexRuntime, verify_schema
 from swarm.state import ROOT, State
@@ -32,7 +34,7 @@ def rpc(client, method, **params):
 
 
 @contextmanager
-def live_conversation(state, prompt):
+def live_conversation(state, prompt, expected_status="answered"):
     if not Path(os.getenv("SWARM_CODEX_AUTH", "")).is_file():
         pytest.skip("Set SWARM_CODEX_AUTH to a Codex file-backed ChatGPT login")
     worker = subprocess.Popen(
@@ -65,7 +67,7 @@ def live_conversation(state, prompt):
                     break
                 time.sleep(0.5)
             events = state.rows("SELECT kind,data FROM events WHERE task=? ORDER BY id", task)
-            assert row["status"] == "answered", events[-8:]
+            assert row["status"] == expected_status, events[-8:]
             yield client, task, events
     finally:
         worker.terminate()
@@ -111,6 +113,41 @@ def test_codex_author_and_reuse(tmp_path):
     assert a == b and checked["verified_reuse"]
     assert not state.rows("SELECT * FROM goals") and not list((state.path / "secrets").iterdir())
     assert not list((state.path / "workspaces").rglob("surprise.txt"))
+
+
+def test_codex_learns_from_failed_check(tmp_path):
+    state = State(tmp_path / "live")
+    catalog = Catalog(state)
+    old, failed = checked_failure(catalog)
+    with live_conversation(state, "/learn " + failed["call"], "verified") as (_, task, events):
+        rev = catalog.active(old.name)
+        cases = catalog.revision(rev)["tests"]
+        assert rev != failed["revision"] and len(cases) > len(old.tests)
+        assert all(c["passed"] for c in cases)
+        saved = json.loads(
+            state.one("SELECT data FROM events WHERE task=? AND kind='learning.result'", task)[
+                "data"
+            ]
+        )
+        assert saved["passed"] and saved["result"] == {"failed": ["archive.service"]}
+        assert {"learning.reproduced", "learning.candidate", "learning.result"} <= {
+            e["kind"] for e in events
+        }
+        assert not catalog.evidence(failed["call"])["check"]["passed"]
+        print(
+            "task",
+            task,
+            "failed call",
+            failed["call"],
+            "previous",
+            failed["revision"],
+            "revision",
+            rev,
+            "git",
+            catalog.revision(rev)["origin"],
+            "cases",
+            cases,
+        )
 
 
 def test_digitalocean_designated_host(tmp_path):

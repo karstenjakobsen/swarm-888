@@ -12,6 +12,8 @@ Ask `Create a project named heartbeat containing …` in a new conversation, or 
 
 Skills can declare descriptive permissions, connector dependencies, and inline input/output JSON schemas. A generated SQL program runs in a resource-limited process with an in-memory database, a read-only statement authorizer, and an empty environment. A call pins its revision when it starts. Rollback changes future calls. Earlier activations, tests and independent observations remain available. Framework code, privilege policy, connector destination grants and recovery access are controlled by the checkout owner. To upgrade, stop the worker, export state, review the source change, and run the locked checks before restarting.
 
+When an independent check finds an incorrect result, record its expected JSON with `python -m swarm attest CALL_ID EXPECTED_JSON OBSERVATION` using the prepared environment. Submit `/learn CALL_ID` to authorize a correction. The operator retrieves the redacted input and check, reproduces the failure, and tests a candidate against the inherited cases and a new regression case. The worker compares the candidate to the original independent expectation before activating it, then invokes the active revision again. The original failed call and the correction have separate records. Each learning task has a five-minute deadline and a budget of 24 actions, carried across restarts.
+
 ## Standing goals and notifications
 
 With the worker running, create a disposable fixture as the owner:

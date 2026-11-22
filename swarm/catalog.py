@@ -367,13 +367,19 @@ class Catalog:
         )
         return {"revision": revision, "passed": passed, "cases": results}
 
-    def activate(self, task: str, revision: str) -> dict:
+    def activate(self, task: str, revision: str, *, previous: str | None = None) -> dict:
         with self.state.tx() as conn:
             row = conn.execute(
                 "SELECT name FROM revisions WHERE rev=? AND passed=1", (revision,)
             ).fetchone()
             if not row:
                 raise ValueError("Test this revision successfully before activation")
+            if previous is not None:
+                active = conn.execute(
+                    "SELECT rev FROM active WHERE name=?", (row["name"],)
+                ).fetchone()
+                if not active or active["rev"] != previous:
+                    raise ValueError("The skill changed during the revision attempt")
             conn.execute("INSERT OR REPLACE INTO active VALUES (?,?)", (row["name"], revision))
             conn.execute(
                 "INSERT INTO activations(name,rev,task) VALUES (?,?,?)",
@@ -391,6 +397,7 @@ class Catalog:
     def run(self, task: str, key: str, arguments: dict) -> dict:
         rev = self.active(key)
         call = identity()
+        arguments = self.state.redact(arguments)
         try:
             result = self.evaluate(rev, arguments)
         except (ValueError, subprocess.SubprocessError) as exc:
@@ -400,15 +407,45 @@ class Catalog:
                 {"revision": rev, "error": str(exc), "input_hash": digest(arguments)},
             )
             raise
-        self.state.change(
-            "INSERT INTO calls(id,task,rev,input_hash,result) VALUES (?,?,?,?,?)",
-            call,
-            task,
-            rev,
-            digest(arguments),
-            encode(result),
-        )
+        with self.state.tx() as conn:
+            conn.execute(
+                "INSERT INTO calls(id,task,rev,input_hash,result) VALUES (?,?,?,?,?)",
+                (call, task, rev, digest(arguments), encode(result)),
+            )
+            conn.execute("INSERT INTO call_inputs VALUES (?,?)", (call, encode(arguments)))
         return {"call": call, "revision": rev, "exit_status": 0, "result": result}
+
+    def evidence(self, call: str) -> dict:
+        row = self.state.one(
+            """SELECT c.task,c.rev,r.name,c.result,c.checked,c.input_hash,i.arguments
+            FROM calls c JOIN revisions r ON r.rev=c.rev LEFT JOIN call_inputs i ON i.call=c.id
+            WHERE c.id=?""",
+            call,
+        )
+        arguments = json.loads(row["arguments"]) if row["arguments"] is not None else None
+        if arguments is None:
+            # Earlier installations recorded invocation inputs in the MCP activity stream.
+            for event in self.state.rows(
+                "SELECT data FROM events WHERE task=? AND kind='tool.started' ORDER BY id DESC",
+                row["task"],
+            ):
+                entry = json.loads(event["data"])
+                if entry.get("tool") in ("skill_run", "local_" + row["name"].replace("-", "_")):
+                    candidate = entry.get("arguments", {}).get("arguments")
+                    if isinstance(candidate, dict) and digest(candidate) == row["input_hash"]:
+                        arguments = candidate
+                        break
+        return self.state.redact(
+            {
+                "source_call": call,
+                "source_task": row["task"],
+                "revision": row["rev"],
+                "skill": row["name"],
+                "arguments": arguments,
+                "actual": json.loads(row["result"]),
+                "check": json.loads(row["checked"]) if row["checked"] else None,
+            }
+        )
 
     def attest(self, call: str, expected: dict, observation: str) -> dict:
         row = self.state.one(

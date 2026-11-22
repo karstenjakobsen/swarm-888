@@ -10,6 +10,7 @@ from pydantic import create_model
 from .catalog import Catalog, Contract, Package
 from .dns import DNSReconciler
 from .goals import Maintenance
+from .learning import Learning
 from .projects import Projects
 from .state import ROOT, State, identity
 
@@ -27,6 +28,7 @@ class TaskTools:
     ):
         self.maintenance = maintenance
         self.projects = Projects(state, catalog)
+        self.learning = Learning(state, catalog)
         self.dns = dns
         self.s, self.catalog, self.task = state, catalog, task
 
@@ -37,6 +39,10 @@ class TaskTools:
     def skill_read(self, name: str) -> dict:
         """Read the instructions and implementation of an active skill."""
         return self.catalog.read(name)
+
+    def skill_evidence(self, call: str) -> dict:
+        """Read a recorded skill invocation, its redacted input, and its independent check."""
+        return self.catalog.evidence(call)
 
     def skill_template(
         self, kind: Literal["transform", "permissions", "procedure", "publishing"] = "transform"
@@ -54,6 +60,9 @@ class TaskTools:
 
     def skill_activate(self, revision: str) -> dict:
         """Atomically select a tested implementation for subsequent calls."""
+        task = self.s.rows("SELECT input FROM tasks WHERE id=? AND kind='learn'", self.task)
+        if task:
+            return self.learning.activate(self.task, json.loads(task[0]["input"]), revision)
         return self.catalog.activate(self.task, revision)
 
     def skill_import(self, name: str, commit: str) -> dict:
@@ -179,8 +188,9 @@ class TaskTools:
             for key, method in self.methods().items()
             if task["kind"] != "dns" or key == "connector_observe_recovery"
             if task["kind"] == "project" or not key.startswith("project_")
+            if task["kind"] != "learn" or key in self.learning.tools
         ]
-        if task["kind"] == "dns":
+        if task["kind"] in ("dns", "learn"):
             return definitions
         for row in self.s.rows(
             "SELECT r.name,r.spec FROM active a JOIN revisions r ON a.rev=r.rev"
@@ -210,6 +220,8 @@ class TaskTools:
         arguments = self.s.redact(arguments)
         self.s.event(self.task, "tool.started", {"tool": key, "arguments": arguments})
         try:
+            if task["kind"] == "learn":
+                self.learning.authorize(self.task, json.loads(task["input"]), key, arguments)
             if task["kind"] == "dns" and key != "connector_observe_recovery":
                 raise ValueError(
                     "Only the checkpoint's DNS observation is available during recovery"

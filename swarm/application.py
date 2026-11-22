@@ -18,6 +18,7 @@ from .dns import (
     RemoteMCP,
 )
 from .goals import Maintenance
+from .learning import Learning
 from .publishing import Publisher, Site
 from .state import State, encode, identity, name
 from .tools import TaskTools
@@ -39,6 +40,7 @@ class Application:
         )
         self.dns = DNSReconciler(state, provider or DNSProvider(self.remote))
         self.maintenance = Maintenance(state, catalog)
+        self.learning = Learning(state, catalog)
         self.publisher = Publisher(state, catalog, self.dns)
         self.model_task: str | None = None
         self.lock = asyncio.Lock()
@@ -103,6 +105,8 @@ class Application:
             parts = shlex.split(text)
             kind = parts[0][1:]
             match [kind, *parts[1:]]:
+                case ["learn", call]:
+                    request = self.learning.request(call)
                 case ["project", project_name, *instructions] if instructions:
                     request = {"project": name(project_name), "text": " ".join(instructions)}
                 case ["publish", service] | ["publish", service, _]:
@@ -140,6 +144,14 @@ class Application:
             "revisions": [],
             "next": "Inspect active skills and prior evidence",
         }
+        if kind == "learn":
+            checkpoint.update(
+                source_call=request["source_call"],
+                skill=request["skill"],
+                revisions=[request["previous"]],
+                criteria="A newly tested revision passes the previously failed independent comparison",
+                next="Read skill-author and skill_evidence for the source call. Reproduce the failure, add a minimal regression test, revise, test and activate the skill.",
+            )
         with self.state.tx() as conn:
             conn.execute(
                 "INSERT INTO tasks(id,goal,status,checkpoint,created,run,input,kind) VALUES (?,?,'queued',?,?,?,?,?)",
@@ -319,6 +331,20 @@ class Application:
     async def execute(self, row: dict) -> str:
         key, kind = row["id"], row["kind"]
         req = json.loads(row["input"])
+        if kind == "learn":
+            if self.learning.finish(key, req):
+                return "verified"
+            self.learning.consume(key, req, "start conversation")
+            self.learning.reproduce(key, req)
+            async with asyncio.timeout(max(0, req["deadline"] - self.state.clock())):
+                outcome = await self.run_model(row)
+            if outcome != "completed":
+                return outcome
+            if not self.learning.finish(key, req):
+                raise ValueError(
+                    "The original failure still needs a tested and activated correction"
+                )
+            return "verified"
         if kind == "dns":
             checkpoint = json.loads(row["checkpoint"])
             operations = checkpoint["operations"]
