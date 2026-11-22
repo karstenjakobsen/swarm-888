@@ -70,6 +70,7 @@ def main():
         if len(secret) < 32:
             parser.exit(1, "Invalid dashboard key file. Check its contents and permissions.\n")
         with Dashboard(("127.0.0.1", args.port), store, engine, secret, args.name) as server:
+            shared_catalog.configure(store, args.catalog_dir, args.catalog_repo)
             url = f"http://127.0.0.1:{server.server_port}/#token={secret}"
             link.write_text(url + "\n")
             print(
@@ -89,7 +90,6 @@ def main():
             signal.signal(signal.SIGTERM, shutdown)
             signal.signal(signal.SIGINT, shutdown)
             server.timeout = 0.25
-            shared_catalog.configure(store, args.catalog_dir, args.catalog_repo)
             engine.start()
             try:
                 while not stop:

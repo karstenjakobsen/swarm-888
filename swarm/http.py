@@ -6,6 +6,7 @@ import re
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
+from typing import cast
 from urllib.parse import parse_qs, urlsplit
 
 from . import catalog, shared_catalog, web
@@ -47,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
         super().setup()
         self.connection.settimeout(15)
 
-    def log_message(self, *args):
+    def log_message(self, format, *args):
         pass
 
     def reply(self, status, value, mime="application/json", cookie=None):
@@ -95,7 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         mesh = path.startswith("/mesh/v1/")
         host = self.headers.get("Host", "")
-        port = self.server.server_port
+        server = cast(Dashboard, self.server)
+        port = server.server_port
         if not mesh and host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
             return self.reply(403, {"error": "Local access required"})
         origin = self.headers.get("Origin")
@@ -110,7 +112,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError("Expected an object")
         if mesh:
-            return self.mesh(path, data)
+            return self.mesh(path, data, server.store)
         if self.command == "GET" and path == "/favicon.ico":
             return self.reply(204, b"", "image/x-icon")
         if self.command == "GET" and path in ASSETS:
@@ -121,14 +123,14 @@ class Handler(BaseHTTPRequestHandler):
                 mime,
             )
         if self.command == "POST" and path == "/api/session":
-            if hmac.compare_digest(text(data, "token", 256).encode(), self.server.secret.encode()):
+            if hmac.compare_digest(text(data, "token", 256).encode(), server.secret.encode()):
                 return self.reply(
                     200,
                     {},
                     cookie="swarm_session_"
                     + str(port)
                     + "="
-                    + self.server.secret
+                    + server.secret
                     + "; HttpOnly; SameSite=Strict; Path=/",
                 )
             return self.reply(401, {"error": "Invalid operator key"})
@@ -136,9 +138,9 @@ class Handler(BaseHTTPRequestHandler):
         cookies.load(self.headers.get("Cookie", ""))
         cookie_name = f"swarm_session_{port}"
         token = cookies[cookie_name].value if cookie_name in cookies else ""
-        if not hmac.compare_digest(token.encode(), self.server.secret.encode()):
+        if not hmac.compare_digest(token.encode(), server.secret.encode()):
             return self.reply(401, {"error": "Open the access link printed by the server"})
-        db = self.server.store
+        db = server.store
         if self.command == "GET" and path == "/api/state":
             project = parse_qs(url.query).get("project", ["inbox"])[0]
             p = db.project(project)
@@ -152,8 +154,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(
                 200,
                 {
-                    "operator": self.server.name,
-                    "capacity": self.server.engine.count,
+                    "operator": server.name,
+                    "capacity": server.engine.count,
                     "projects": db.query(
                         "SELECT id,name,repo,repo_ref,revision,auto_publish FROM projects ORDER BY rowid"
                     ),
@@ -225,11 +227,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(201, {"id": ident})
         self.reply(404, {"error": "Unknown route"})
 
-    def mesh(self, path, data):
+    def mesh(self, path, data, db):
         header = self.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
             return self.reply(401, {"error": "Peer credential required"})
-        db = self.server.store
         try:
             project = db.peer_project(header[7:])
         except KeyError:

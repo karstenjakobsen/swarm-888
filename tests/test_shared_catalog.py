@@ -10,8 +10,30 @@ from swarm.engine import Engine
 from swarm.store import Store
 
 
-class SharedCatalogTest(unittest.IsolatedAsyncioTestCase):
-    async def test_adopt_clone_publish_pull_and_preserve_conflicts(self):
+class SharedCatalogTest(unittest.TestCase):
+    def test_switching_checkout_blocks_old_work_and_queues_a_fresh_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(tmp)
+            shared_catalog.configure(store)
+            running = store.claim("worker-01")
+            publish = store.enqueue(shared_catalog.PROJECT, "Publish pending edits", "publish")
+            personal = store.enqueue("inbox", "Continue")
+            same_repo = "https://github.com/karstenjakobsen/packages-888.git"
+            shared_catalog.configure(store, remote=same_repo)
+            self.assertEqual(store.job(publish["id"])["state"], "queued")
+            shared_catalog.configure(store, Path(tmp) / "another-checkout")
+            store.recover()
+            for job in (running, publish):
+                self.assertEqual(store.job(job["id"])["state"], "blocked")
+                self.assertIn("catalog checkout changed", store.job(job["id"])["result"])
+            queued = store.query(
+                "SELECT kind FROM jobs WHERE project=? AND state='queued'",
+                (shared_catalog.PROJECT,),
+            )
+            self.assertEqual(queued, [{"kind": "import"}])
+            self.assertEqual(store.job(personal["id"])["state"], "queued")
+
+    def test_adopt_clone_publish_pull_and_preserve_conflicts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             remote = root / "remote.git"
@@ -53,40 +75,60 @@ class SharedCatalogTest(unittest.IsolatedAsyncioTestCase):
                 )
                 return await spawn(*args, **kwargs)
 
-            async def operate(store, kind):
-                return await Engine(store, 1, "codex")._run(
-                    {"kind": kind, "project": shared_catalog.PROJECT, "target": ""}
-                )
+            def operate(store, kind):
+                job = {"kind": kind, "project": shared_catalog.PROJECT, "target": ""}
+                return asyncio.run(Engine(store, 1, "codex")._run(job))
 
             with patch("swarm.catalog.asyncio.create_subprocess_exec", test_transport):
-                await operate(first, "import")
-                await operate(second, "import")
+                operate(first, "import")
+                operate(second, "import")
                 self.assertEqual(first.workspace(shared_catalog.PROJECT), checkout)
                 self.assertEqual(second.workspace(shared_catalog.PROJECT), second.root / "catalog")
                 asset = checkout / "skills/daily/SKILL.md"
                 asset.parent.mkdir()
                 asset.write_text("first version")
                 (checkout / "private-note").write_text("local only")
-                await operate(first, "publish")
+                git("-C", checkout, "add", "private-note")
+                with self.assertRaisesRegex(ValueError, "staged changes outside"):
+                    operate(first, "publish")
+                git("-C", checkout, "restore", "--staged", "private-note")
+                operate(first, "publish")
                 self.assertEqual(
                     git("-C", checkout, "rev-parse", "origin/main"),
                     git("-C", checkout, "rev-parse", "HEAD"),
                 )
-                await operate(second, "import")
+                operate(second, "import")
                 other = second.catalog_dir / "skills/daily/SKILL.md"
                 self.assertEqual(other.read_text(), "first version")
                 self.assertFalse((second.catalog_dir / "private-note").exists())
                 self.assertEqual(shared_catalog.info(second)["assets"][0]["name"], "daily")
                 other.write_text("peer improvement")
-                await operate(second, "publish")
+                operate(second, "publish")
                 asset.write_text("pending local edit")
                 with self.assertRaisesRegex(ValueError, "preserve local edits"):
-                    await operate(first, "import")
+                    operate(first, "import")
                 self.assertEqual(asset.read_text(), "pending local edit")
                 self.assertEqual(
                     git("--git-dir", remote, "show", "main:skills/daily/SKILL.md"),
                     "peer improvement",
                 )
+                published = git("--git-dir", remote, "rev-parse", "main")
+                (second.catalog_dir / "private-note").write_text("peer local only")
+                git("-C", second.catalog_dir, "add", "private-note")
+                git(
+                    "-C",
+                    second.catalog_dir,
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@local",
+                    "commit",
+                    "-qm",
+                    "local notes",
+                )
+                with self.assertRaisesRegex(ValueError, "committed changes outside"):
+                    operate(second, "publish")
+                self.assertEqual(git("--git-dir", remote, "rev-parse", "main"), published)
             later = Store(first.root)
             shared_catalog.configure(later)
             self.assertEqual(later.catalog_dir, checkout)

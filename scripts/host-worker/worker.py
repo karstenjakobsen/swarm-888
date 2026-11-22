@@ -6,6 +6,8 @@ import json
 import os
 import pwd
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -97,14 +99,24 @@ def owns_unit():
     )
 
 
-def execute(action):
+def request_principal(source):
+    principal = (RELEASE / "principal").read_text().strip()
+    uid = pwd.getpwnam(principal).pw_uid
+    with socket.fromfd(source.fileno(), socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        credentials = struct.Struct("iII")
+        _, caller_uid, _ = credentials.unpack(
+            peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, credentials.size)
+        )
+    if uid == 0 or caller_uid != uid:
+        raise PermissionError("Deployment request is outside the enrolled operator account")
+    return principal
+
+
+def execute(action, principal):
     if action not in ACTIONS:
         raise ValueError("Unknown host operation")
     if action == "environment":
         return environment()
-    principal = (RELEASE / "principal").read_text().strip()
-    if pwd.getpwnam(principal).pw_uid == 0:
-        raise ValueError("Missing unprivileged operator identity")
     if action == "status":
         return command(
             [
@@ -144,13 +156,14 @@ def serve(source, dest):
         data = json.loads(payload)
         if not isinstance(data, dict) or set(data) != {"action"} or data["action"] not in ACTIONS:
             raise ValueError("Invalid deployment request")
+        principal = request_principal(source)
         # Read-only observations can proceed while one slot is installing.
         if data["action"] in ("environment", "status"):
-            message = execute(data["action"])
+            message = execute(data["action"], principal)
         else:
             with open("/run/swarm-888-host.lock", "a") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
-                message = execute(data["action"])
+                message = execute(data["action"], principal)
         response = {"ok": True, "message": message[:4000]}
     except (
         ValueError,

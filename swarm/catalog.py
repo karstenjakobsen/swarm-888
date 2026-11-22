@@ -5,7 +5,7 @@ import os
 import re
 from urllib.parse import urlsplit
 
-from .codex import stop_process
+from .process import stop_process
 
 ROOTS = {"projects": "Projects", ".agents/skills": "Skills", "connectors": "Connectors"}
 
@@ -94,6 +94,21 @@ async def git(*args, cwd=None, allow_failure=False):
     return out.decode(errors="replace").strip(), proc.returncode
 
 
+async def commit_assets(args, workspace, roots, message):
+    for root in roots:
+        folder = workspace / root
+        if folder.resolve() != folder:
+            raise ValueError("Catalog directories must be local directories")
+        tracked, _ = await git(*args, "ls-files", "--", root)
+        if folder.exists() or tracked:
+            await git(*args, "add", "-A", "--", root)
+    _, diff = await git(*args, "diff", "--cached", "--quiet", allow_failure=True)
+    if diff == 1:
+        await git(*args, "commit", "-m", message)
+    elif diff:
+        raise RuntimeError("Could not inspect catalog changes")
+
+
 async def operate(store, job):
     project = store.project(job["project"])
     if not project["repo"]:
@@ -134,18 +149,7 @@ async def operate(store, job):
         return "Imported repository at " + rev[:12]
     if not project["revision"]:
         raise ValueError("Import the repository successfully before publishing")
-    for root in ROOTS:
-        folder = workspace / root
-        if folder.is_symlink() or folder.resolve() != folder:
-            raise ValueError("Catalog directories must be local directories")
-        tracked, _ = await git(*args, "ls-files", "--", root)
-        if folder.exists() or tracked:
-            await git(*args, "add", "-A", "--", root)
-    _, diff = await git(*args, "diff", "--cached", "--quiet", allow_failure=True)
-    if diff == 1:
-        await git(*args, "commit", "-m", "Update operator catalog")
-    elif diff:
-        raise RuntimeError("Could not inspect catalog changes")
+    await commit_assets(args, workspace, ROOTS, "Update operator catalog")
     rev = (await git(*args, "rev-parse", "HEAD"))[0]
     await git(*args, "push", project["repo"], "HEAD:refs/heads/" + branch)
     store.update("UPDATE projects SET revision=? WHERE id=?", (rev, project["id"]))

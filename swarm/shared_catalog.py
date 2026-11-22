@@ -7,44 +7,33 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .catalog import assets, git, repository_url
+from .catalog import assets, commit_assets, git, repository_url
+from .store import SHARED_CATALOG_PROJECT as PROJECT
 
-PROJECT = "shared-catalog"
 DEFAULT_REMOTE = "git@github.com:karstenjakobsen/packages-888.git"
 BRANCH = "main"
 ROOTS = {"skills": "Skills", "connectors": "Connectors", "projects": "Projects"}
 
 
 def configure(store, directory=None, remote=None):
-    previous = store.query("SELECT directory FROM shared_catalog WHERE id=1")
-    existing = store.query("SELECT repo FROM projects WHERE id=?", (PROJECT,))
+    previous = store.catalog_settings()
     path = (
-        Path(directory or (previous[0]["directory"] if previous else store.root / "catalog"))
+        Path(directory or (previous["directory"] if previous else store.root / "catalog"))
         .expanduser()
         .resolve()
     )
-    url = repository_url(remote or (existing[0]["repo"] if existing else DEFAULT_REMOTE))
+    url = repository_url(remote or (previous["repo"] if previous else DEFAULT_REMOTE))
     if (
         path == store.root
         or path.is_relative_to(store.root / "workspaces")
         or store.root.is_relative_to(path)
     ):
         raise ValueError("Choose a dedicated directory for the shared catalog")
-    with store.connection(True) as db:
-        db.execute("INSERT OR REPLACE INTO shared_catalog(id,directory) VALUES(1,?)", (str(path),))
-        db.execute(
-            """INSERT INTO projects(id,name,repo,repo_ref) VALUES(?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET repo=excluded.repo,repo_ref=excluded.repo_ref""",
-            (PROJECT, "Shared catalog", url, BRANCH),
-        )
-        if previous and (str(path) != previous[0]["directory"] or existing[0]["repo"] != url):
-            db.execute("UPDATE projects SET revision='',thread='' WHERE id=?", (PROJECT,))
-        if not db.execute(
-            "SELECT 1 FROM jobs WHERE project=? AND kind='import' AND state IN ('queued','running')",
-            (PROJECT,),
-        ).fetchone():
-            store.insert_job(db, PROJECT, "import", "Sync shared catalog")
-    store.catalog_dir = path
+    changed = bool(
+        previous
+        and (str(path) != previous["directory"] or identity(previous["repo"]) != identity(url))
+    )
+    store.configure_catalog(path, url, BRANCH, changed)
 
 
 def info(store):
@@ -118,7 +107,7 @@ async def operate(store, kind):
     args = ["-C", path]
     tracking = "refs/remotes/origin/" + BRANCH
     await git(*args, "fetch", "--no-tags", url, f"+refs/heads/{BRANCH}:{tracking}")
-    upstream, _ = await git(*args, "rev-parse", "FETCH_HEAD")
+    upstream, _ = await git(*args, "rev-parse", tracking)
     _, failed = await git(
         *args, "merge", "--ff-only", "--no-autostash", upstream, allow_failure=True
     )
@@ -126,29 +115,24 @@ async def operate(store, kind):
         raise ValueError(
             f"Sync stopped to preserve local edits or divergent commits. Reconcile {path} with {BRANCH} and retry."
         )
+    outside = ["--", ".", *(":(exclude)" + root for root in ROOTS)]
     if kind == "publish":
-        outside = ["--", ".", *(":(exclude)" + root for root in ROOTS)]
         _, staged = await git(*args, "diff", "--cached", "--quiet", *outside, allow_failure=True)
-        other_commits, _ = await git(*args, "rev-list", upstream + "..HEAD", *outside)
-        if staged or other_commits:
-            raise ValueError(
-                "The checkout contains staged or committed changes outside its catalog directories. Resolve them before publishing."
-            )
-        for root in ROOTS:
-            folder = path / root
-            if folder.resolve() != folder:
-                raise ValueError("Catalog directories must stay inside the checkout")
-            tracked, _ = await git(*args, "ls-files", "--", root)
-            if folder.exists() or tracked:
-                await git(*args, "add", "-A", "--", root)
-        _, diff = await git(*args, "diff", "--cached", "--quiet", allow_failure=True)
-        if diff == 1:
-            await git(*args, "commit", "-m", "Update shared operator catalog")
-        elif diff:
-            raise RuntimeError("Could not inspect catalog changes")
+        if staged:
+            raise ValueError("The checkout contains staged changes outside its catalog directories")
+        await commit_assets(args, path, ROOTS, "Update shared operator catalog")
     revision, _ = await git(*args, "rev-parse", "HEAD")
     if kind == "publish" and revision != upstream:
-        _, failed = await git(*args, "push", url, "HEAD:refs/heads/" + BRANCH, allow_failure=True)
+        other_commits, _ = await git(
+            *args, "rev-list", "--full-history", upstream + ".." + revision, *outside
+        )
+        if other_commits:
+            raise ValueError(
+                "The checkout contains committed changes outside its catalog directories"
+            )
+        _, failed = await git(
+            *args, "push", url, revision + ":refs/heads/" + BRANCH, allow_failure=True
+        )
         if failed:
             raise ValueError(
                 "Publish failed. Local commits are preserved. Check push access and sync the shared branch before retrying."

@@ -8,6 +8,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+SHARED_CATALOG_PROJECT = "shared-catalog"
+
 
 def uid():
     return uuid.uuid4().hex
@@ -91,11 +93,49 @@ class Store:
     def workspace(self, project):
         # Only database-generated project IDs may become path components.
         self.project(project)
-        if project == "shared-catalog" and self.catalog_dir is not None:
+        if project == SHARED_CATALOG_PROJECT and self.catalog_dir is not None:
             return self.catalog_dir
         path = self.root / "workspaces" / project
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def catalog_settings(self):
+        rows = self.query(
+            "SELECT c.directory,p.repo FROM shared_catalog c JOIN projects p ON p.id=? WHERE c.id=1",
+            (SHARED_CATALOG_PROJECT,),
+        )
+        return rows[0] if rows else None
+
+    def configure_catalog(self, path, url, branch, changed):
+        project = SHARED_CATALOG_PROJECT
+        with self.connection(True) as db:
+            db.execute(
+                "INSERT OR REPLACE INTO shared_catalog(id,directory) VALUES(1,?)", (str(path),)
+            )
+            db.execute(
+                """INSERT INTO projects(id,name,repo,repo_ref) VALUES(?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET repo=excluded.repo,repo_ref=excluded.repo_ref""",
+                (project, "Shared catalog", url, branch),
+            )
+            if changed:
+                reason = "Shared catalog checkout changed before this run finished"
+                db.execute(
+                    """INSERT INTO events(job,message,at) SELECT id,?,?
+                    FROM jobs WHERE project=? AND state IN ('queued','running')""",
+                    (reason, now(), project),
+                )
+                db.execute(
+                    """UPDATE jobs SET state='blocked',result=?,worker=''
+                    WHERE project=? AND state IN ('queued','running')""",
+                    (reason, project),
+                )
+                db.execute("UPDATE projects SET revision='',thread='' WHERE id=?", (project,))
+            if not db.execute(
+                "SELECT 1 FROM jobs WHERE project=? AND kind='import' AND state IN ('queued','running')",
+                (project,),
+            ).fetchone():
+                self.insert_job(db, project, "import", "Sync shared catalog")
+        self.catalog_dir = path
 
     def create_project(self, name, repo="", auto_publish=False, repo_ref="HEAD"):
         ident = uid()
@@ -196,11 +236,14 @@ class Store:
 
     def invite(self, name):
         token = secrets.token_urlsafe(32)
-        project = self.create_project(name)
-        self.update(
-            "INSERT INTO invites(digest,project) VALUES(?,?)", (digest(token), project["id"])
-        )
+        project = uid()
+        with self.connection(True) as db:
+            db.execute("INSERT INTO projects(id,name) VALUES(?,?)", (project, name))
+            db.execute("INSERT INTO invites(digest,project) VALUES(?,?)", (digest(token), project))
         return token
+
+    def is_peer_project(self, project):
+        return bool(self.query("SELECT 1 FROM invites WHERE project=? LIMIT 1", (project,)))
 
     def peer_project(self, token):
         return self.one("SELECT project FROM invites WHERE digest=?", (digest(token),))["project"]

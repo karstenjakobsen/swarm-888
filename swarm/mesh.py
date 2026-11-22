@@ -8,7 +8,7 @@ from .store import BlockedTask
 
 
 class NoRedirect(request.HTTPRedirectHandler):
-    def redirect_request(self, *args):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 

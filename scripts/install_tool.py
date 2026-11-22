@@ -77,7 +77,10 @@ def install(tool, destination, version):
             if not binary:
                 raise SystemExit("Executable missing from release archive")
             staged = Path(tmp) / "executable"
-            with tf.extractfile(binary) as src, staged.open("wb") as out:
+            src = tf.extractfile(binary)
+            if src is None:
+                raise SystemExit("Executable has no file data in the release archive")
+            with src, staged.open("wb") as out:
                 shutil.copyfileobj(src, out)
             staged.chmod(0o755)
             os.replace(staged, destination)

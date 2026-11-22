@@ -49,7 +49,7 @@ The operator remembers the directory in its SQLite database. Another instance ca
 
 **Catalog** shows the shared remote, local path, branch, and packages from every workspace. Choose **Work on catalog** to give Codex a task in that checkout. Shared packages belong in `skills/<name>/SKILL.md`, `connectors/<name>/`, and `projects/<name>/`. Ordinary project workers can read these packages and keep their own edits and memory in their private workspace.
 
-**Sync catalog** fast-forwards the local branch. The operator also syncs at startup and before shared catalog tasks. **Publish changes** stages the three package directories and pushes to `main`; other operators can then sync them. Simultaneous pushes never force-update the shared branch. A conflicting change stops the job and leaves local work available for reconciliation. The catalog checkout has its own job queue and lock.
+**Sync catalog** fast-forwards the local branch. The operator also syncs at startup and before shared catalog tasks. **Publish changes** stages the three package directories and pushes the resulting commit to `main`. Other operators can then sync that revision. A conflicting change stops the job and leaves local work available for reconciliation. Switching repositories or checkout directories marks unfinished catalog runs as blocked and queues a fresh sync for the new checkout.
 
 ## Workspace repositories and memory
 
@@ -100,7 +100,7 @@ The system installer copies the reviewed catalog files into a root-owned release
 
 The service runs Codex App Server over stdio with workspace writes and unattended command approval policy. The background supervisor owns queueing, Git transfers, and peer delivery. On restart, it reclaims interrupted jobs, resumes the project thread, and asks the worker to verify previous effects before continuing. Three interruptions mark a job failed. Arbitrary external side effects require idempotency in the connector itself.
 
-Workspaces share one OS account and preserve separate conversations. The operator advertises the Nomad tools to owner-created local project runs. Catalog editing and incoming peer tasks use their ordinary workspace toolsets. Treat peers and catalog sources as trusted under this shared-account model.
+Workspaces share one OS account and preserve separate conversations. The operator advertises the Nomad tools to owner-created local project runs. The root worker checks the Unix caller's UID against its enrolled account on every request. All slots under that account have the same OS identity. Pair trusted peers and use trusted catalog sources. Mutually untrusted operators require separate service accounts and separately scoped host access.
 
 ## Code map
 

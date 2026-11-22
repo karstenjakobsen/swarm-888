@@ -151,29 +151,30 @@ def batch(args):
         params.extend(["--stream", args["stream"]])
     if set(args) != keys:
         raise ValueError("Incorrect arguments for " + action)
-    if not CONNECTOR.is_file():
-        raise RuntimeError("The local Nomad connector has not been provisioned")
     source = ""
     if "source" in keys:
         source = args["source"]
         if not isinstance(source, str) or not 0 < len(source.encode()) <= 49152:
             raise ValueError("Expected 1–49152 bytes of Python source")
         params.append("-")
+    if not CONNECTOR.is_file():
+        raise RuntimeError("The local Nomad connector has not been provisioned")
     p = subprocess.run(
         ["/usr/bin/python3", "-ISB", str(CONNECTOR), *params],
-        input=source,
+        input=source.encode("utf-8"),
         capture_output=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=240,
         cwd="/",
         env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
     )
+    output = p.stdout.decode("utf-8", errors="replace")
     if p.returncode:
-        raise RuntimeError(
-            p.stderr.strip()[:2000] or f"Connector exited with status {p.returncode}"
-        )
-    result = p.stdout.rstrip()
+        detail = p.stderr.decode("utf-8", errors="replace").strip()
+        if not detail and action == "plan":
+            # The batch CLI prints the plan, including placement failures, on stdout.
+            detail = output.strip()
+        raise RuntimeError(detail[:2000] or f"Connector exited with status {p.returncode}")
+    result = output if action == "logs" else output.rstrip()
     return result[:64000] + ("\n[Output truncated]" if len(result) > 64000 else "")
 
 
@@ -197,11 +198,12 @@ def handle(request):
         return {}
     if method == "tools/call":
         p = request.get("params", {})
+        tools = {"nomad_service": service, "nomad_batch": batch}
+        name, arguments = p.get("name"), p.get("arguments")
+        if not isinstance(name, str) or name not in tools or not isinstance(arguments, dict):
+            raise ValueError("Unknown deployment tool or invalid arguments")
         try:
-            tools = {"nomad_service": service, "nomad_batch": batch}
-            if p.get("name") not in tools or not isinstance(p.get("arguments"), dict):
-                raise ValueError("Unknown deployment tool or invalid arguments")
-            output = tools[p["name"]](p["arguments"])
+            output = tools[name](arguments)
             return {"content": [{"type": "text", "text": output}]}
         except (
             KeyError,
@@ -212,7 +214,7 @@ def handle(request):
             subprocess.TimeoutExpired,
         ) as exc:
             return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
-    raise KeyError("Unsupported MCP method")
+    raise KeyError(method)
 
 
 def main():
@@ -221,12 +223,29 @@ def main():
         ident = None
         try:
             msg = json.loads(line)
-            ident = msg.get("id")
-            if ident is None:
+            if (
+                not isinstance(msg, dict)
+                or msg.get("jsonrpc") != "2.0"
+                or not isinstance(msg.get("method"), str)
+            ):
+                raise TypeError("Invalid request")
+            if "id" not in msg:
                 continue
+            ident = msg.get("id")
+            if type(ident) not in (str, int):
+                ident = None
+                raise TypeError("Invalid request ID")
+            if not isinstance(msg.get("params", {}), dict):
+                raise ValueError("Expected named parameters")
             response = {"result": handle(msg)}
-        except (ValueError, TypeError, AttributeError, KeyError) as exc:
-            response = {"error": {"code": -32601, "message": str(exc)}}
+        except json.JSONDecodeError, UnicodeDecodeError, RecursionError:
+            response = {"error": {"code": -32700, "message": "Invalid JSON"}}
+        except TypeError as exc:
+            response = {"error": {"code": -32600, "message": str(exc)}}
+        except KeyError:
+            response = {"error": {"code": -32601, "message": "Unknown method"}}
+        except ValueError as exc:
+            response = {"error": {"code": -32602, "message": str(exc)}}
         print(json.dumps({"jsonrpc": "2.0", "id": ident, **response}), flush=True)
     return 0
 

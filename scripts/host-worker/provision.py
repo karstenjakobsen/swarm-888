@@ -7,6 +7,7 @@ import json
 import os
 import pwd
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ BASE = Path("/opt/swarm-888-host")
 UNITS = Path("/etc/systemd/system")
 MARKER = "# Managed by Swarm 888 host worker\n"
 SOCKET = "swarm-888-host.socket"
+SOCKET_PATH = Path("/run/swarm-888-host.sock")
 SERVICE = "swarm-888-host@.service"
 
 
@@ -33,12 +35,10 @@ def payload(manifest, catalog=None):
             or path.parts[:2] not in (("projects", "local-nomad"), ("connectors", "local-nomad"))
         ):
             raise ValueError("Unexpected catalog payload path")
-        if catalog:
-            data = (catalog / path).read_bytes()
-        else:
-            url = f"https://raw.githubusercontent.com/karstenjakobsen/packages-888/{manifest['revision']}/{relative}"
-            with urlopen(url, timeout=40) as response:
-                data = response.read(1024 * 1024 + 1)
+        url = f"https://raw.githubusercontent.com/karstenjakobsen/packages-888/{manifest['revision']}/{relative}"
+        source = (catalog / path).open("rb") if catalog else urlopen(url, timeout=40)
+        with source:
+            data = source.read(1024 * 1024 + 1)
         if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
             raise ValueError("Catalog file does not match the pinned release: " + relative)
         result[path] = data
@@ -69,7 +69,7 @@ RuntimeMaxSec=20min
 Description=Swarm 888 operator deployment socket
 
 [Socket]
-ListenStream=/run/swarm-888-host.sock
+ListenStream={SOCKET_PATH}
 SocketUser={user}
 SocketMode=0600
 Accept=yes
@@ -83,8 +83,15 @@ WantedBy=sockets.target
 
 
 def regular_destination(path):
-    if path.is_symlink() or (
-        path.exists() and (not path.is_file() or not path.read_text().startswith(MARKER))
+    try:
+        entry = path.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISREG(entry.st_mode)
+        or entry.st_uid != os.geteuid()
+        or entry.st_mode & 0o022
+        or not path.read_text().startswith(MARKER)
     ):
         raise ValueError("Refusing to replace an unmanaged unit: " + str(path))
 
@@ -94,7 +101,10 @@ def install(user, catalog):
         raise PermissionError(
             "Initial enrollment must be performed by the host provisioner as root"
         )
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user) or pwd.getpwnam(user).pw_uid == 0:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user):
+        raise ValueError("Invalid operator service account name")
+    uid = pwd.getpwnam(user).pw_uid
+    if uid == 0:
         raise ValueError("Select the existing unprivileged operator service account")
     manifest = json.loads((HERE.parents[1] / "swarm" / "host_catalog.json").read_text())
     files = payload(manifest, catalog)
@@ -146,8 +156,16 @@ def install(user, catalog):
         changed = True
     subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True)
     subprocess.run(["/usr/bin/systemctl", "enable", SOCKET], check=True)
-    subprocess.run(["/usr/bin/systemctl", "restart" if changed else "start", SOCKET], check=True)
-    print("Deployment worker is available to " + user + " on /run/swarm-888-host.sock")
+    # A previous enrollment may have written the units but stopped before rebinding the socket.
+    try:
+        bound = SOCKET_PATH.lstat()
+        rebind = bound.st_uid != uid or bound.st_mode != (stat.S_IFSOCK | 0o600)
+    except FileNotFoundError:
+        rebind = True
+    subprocess.run(
+        ["/usr/bin/systemctl", "restart" if changed or rebind else "start", SOCKET], check=True
+    )
+    print(f"Deployment worker is available to {user} on {SOCKET_PATH}")
 
 
 if __name__ == "__main__":

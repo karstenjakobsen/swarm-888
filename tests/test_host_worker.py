@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import threading
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from swarm import codex, host_tools, shared_catalog
@@ -71,17 +73,38 @@ class HostWorkerTest(unittest.TestCase):
                 execute.assert_not_called()
 
     def test_service_refuses_unmanaged_unit(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            principal = Path(tmp) / "principal"
-            principal.write_text("nobody")
-            with (
-                patch.object(worker, "RELEASE", Path(tmp)),
-                patch.object(worker, "owns_unit", return_value=False),
-                patch.object(worker, "command") as command,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "definition differs"):
-                    worker.execute("restart")
-                command.assert_not_called()
+        with (
+            patch.object(worker, "owns_unit", return_value=False),
+            patch.object(worker, "command") as command,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "definition differs"):
+                worker.execute("restart", "nobody")
+            command.assert_not_called()
+
+    def test_worker_checks_unix_peer_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(worker, "RELEASE", Path(tmp)):
+            (Path(tmp) / "principal").write_text("operator")
+            for uid in (os.getuid(), os.getuid() + 1):
+                with (
+                    self.subTest(uid=uid),
+                    patch.object(worker.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=uid)),
+                ):
+                    client, server = socket.socketpair()
+                    with (
+                        client,
+                        server,
+                        server.makefile("rb") as reader,
+                        patch.object(worker, "execute", return_value="active") as execute,
+                    ):
+                        client.sendall(b'{"action":"status"}\n')
+                        dest = io.BytesIO()
+                        worker.serve(reader, dest)
+                        allowed = uid != 0 and uid == os.getuid()
+                        self.assertEqual(json.loads(dest.getvalue())["ok"], allowed)
+                        if allowed:
+                            execute.assert_called_once_with("status", "operator")
+                        else:
+                            execute.assert_not_called()
 
     def test_adapter_reaches_private_socket_and_reports_result(self):
         with tempfile.TemporaryDirectory() as tmp, socket.socket(socket.AF_UNIX) as listener:
@@ -116,6 +139,25 @@ class HostWorkerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 host_tools.batch(args)
 
+    def test_mcp_errors_keep_the_stdio_session_usable(self):
+        messages = [
+            "{",
+            "42",
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":1,"method":"missing"}',
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":[]}',
+            '{"jsonrpc":"2.0","id":3,"method":"ping"}',
+        ]
+        output = subprocess.check_output(
+            [sys.executable, "-I", host_tools.__file__], input="\n".join(messages) + "\n", text=True
+        )
+        replies = [json.loads(line) for line in output.splitlines()]
+        self.assertEqual(
+            [(r["id"], r["error"]["code"]) for r in replies[:-1]],
+            [(None, -32700), (None, -32600), (1, -32601), (2, -32602)],
+        )
+        self.assertEqual(replies[-1]["result"], {})
+
     def test_batch_source_passes_only_on_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:
             connector = Path(tmp) / "batch.py"
@@ -128,6 +170,15 @@ class HostWorkerTest(unittest.TestCase):
                 self.assertEqual(json.loads(result), [["plan", "example", "-"], source])
                 result = host_tools.batch({"action": "logs", "name": "example", "stream": "stderr"})
                 self.assertEqual(json.loads(result)[0], ["logs", "example", "--stream", "stderr"])
+                connector.write_text('print("sample  \\n")\n')
+                self.assertEqual(
+                    host_tools.batch({"action": "logs", "name": "example"}), "sample  \n\n"
+                )
+                connector.write_text(
+                    'print(\'{"placement_failures":{"batch":"insufficient CPU"}}\')\nraise SystemExit(1)\n'
+                )
+                with self.assertRaisesRegex(RuntimeError, "insufficient CPU"):
+                    host_tools.batch({"action": "plan", "name": "example", "source": "pass"})
 
     def test_source_and_installed_zipapp_mcp_entrypoints(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,6 +242,21 @@ class HostWorkerTest(unittest.TestCase):
             path.write_bytes(b"modified")
             with self.assertRaisesRegex(ValueError, "does not match"):
                 provision.payload(manifest, catalog)
+
+    def test_enrollment_rejects_writable_or_linked_managed_units(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            unit = Path(tmp) / provision.SERVICE
+            provision.regular_destination(unit)
+            unit.write_text(provision.unit_contents("operator")[provision.SERVICE])
+            unit.chmod(0o644)
+            provision.regular_destination(unit)
+            unit.chmod(0o664)
+            with self.assertRaises(ValueError):
+                provision.regular_destination(unit)
+            symlink = Path(tmp) / "linked.service"
+            symlink.symlink_to(unit)
+            with self.assertRaises(ValueError):
+                provision.regular_destination(symlink)
 
     def test_pre_enrollment_probe_uses_approved_revision_after_catalog_edits(self):
         with tempfile.TemporaryDirectory() as tmp:

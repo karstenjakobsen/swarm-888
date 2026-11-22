@@ -3,13 +3,12 @@
 import asyncio
 import json
 import os
-import signal
 import sys
-from contextlib import suppress
 from pathlib import Path
 
 from .host_tools import BATCH_ACTIONS, SERVICE_ACTIONS
-from .store import BlockedTask
+from .process import stop_process
+from .store import SHARED_CATALOG_PROJECT, BlockedTask
 
 OUTCOME_SCHEMA = {
     "type": "object",
@@ -27,19 +26,6 @@ Read MEMORY.md when present for durable project facts. Update it when decisions 
 Use the project's existing files and conversation for continuity. Verify changes before reporting completion.
 Report completed only after verifying the requested result. Report blocked when a dependency or unavailable tool prevents completion.
 Credentials belong outside source files and chat. Explain any external dependency that prevents completion."""
-
-
-async def stop_process(proc):
-    if proc.returncode is not None:
-        return
-    with suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGTERM)
-    try:
-        await asyncio.wait_for(proc.wait(), 3)
-    except TimeoutError:
-        with suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        await proc.wait()
 
 
 def host_tool_config(catalog_dir=None):
@@ -64,7 +50,7 @@ async def run(store, job, executable):
     project = store.project(job["project"])
     cwd = str(store.workspace(project["id"]))
     instructions = INSTRUCTIONS
-    if store.catalog_dir and cwd == str(store.catalog_dir):
+    if project["id"] == SHARED_CATALOG_PROJECT:
         instructions = (
             "Maintain the shared Git catalog in this checkout. Edit reusable content in skills/<name>/SKILL.md, "
             "connectors/<name>/, and projects/<name>/. The operator handles Git synchronization and publishing. "
@@ -77,9 +63,7 @@ async def run(store, job, executable):
             "Make local task edits in this workspace. Shared contributions are made in the Shared catalog workspace."
         )
     adapter_args = []
-    if project["id"] != "shared-catalog" and not store.query(
-        "SELECT 1 FROM invites WHERE project=? LIMIT 1", (project["id"],)
-    ):
+    if project["id"] != SHARED_CATALOG_PROJECT and not store.is_peer_project(project["id"]):
         adapter_args = host_tool_config(store.catalog_dir)
         instructions += (
             "\nUse the swarm_host nomad_service and nomad_batch tools for requested local Nomad operations. "
@@ -103,12 +87,15 @@ async def run(store, job, executable):
         start_new_session=True,
     )
 
+    stdin, stdout = proc.stdin, proc.stdout
+    assert stdin is not None and stdout is not None  # Both streams were requested as PIPE.
+
     async def send(method, params, ident=None):
         msg = {"method": method, "params": params}
         if ident is not None:
             msg["id"] = ident
-        proc.stdin.write(json.dumps(msg).encode() + b"\n")
-        await proc.stdin.drain()
+        stdin.write(json.dumps(msg).encode() + b"\n")
+        await stdin.drain()
 
     async def start_thread():
         params = {
@@ -130,12 +117,12 @@ async def run(store, job, executable):
             {"clientInfo": {"name": "swarm888", "title": "Swarm 888", "version": "0.1.0"}},
             1,
         )
-        while line := await proc.stdout.readline():
+        while line := await stdout.readline():
             msg = json.loads(line)
             ident, method = msg.get("id"), msg.get("method", "")
             if method and ident is not None:
                 # Unattended runs never grant permissions or solicit interactive user input.
-                proc.stdin.write(
+                stdin.write(
                     json.dumps(
                         {
                             "id": ident,
@@ -144,7 +131,7 @@ async def run(store, job, executable):
                     ).encode()
                     + b"\n"
                 )
-                await proc.stdin.drain()
+                await stdin.drain()
                 continue
             if "error" in msg and ident is not None:
                 raise RuntimeError(str(msg["error"].get("message", "Codex request failed"))[:1200])
@@ -192,7 +179,7 @@ async def run(store, job, executable):
                             "fileChange": "Editing files",
                             "mcpToolCall": "Calling a connector",
                             "webSearch": "Searching the web",
-                        }.get(item.get("type"))
+                        }.get(item.get("type", ""))
                         if item.get("type") == "mcpToolCall" and item.get("server") == "swarm_host":
                             args = item.get("arguments")
                             action = args.get("action") if isinstance(args, dict) else None
@@ -218,7 +205,7 @@ async def run(store, job, executable):
             "Codex disconnected before completing the run. Check Codex authentication and version."
         )
     finally:
-        proc.stdin.close()
+        stdin.close()
         await stop_process(proc)
 
 
