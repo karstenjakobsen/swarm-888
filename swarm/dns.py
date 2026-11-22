@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import cached_property
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from .connectors import CredentialNeeded, RemoteMCP
 from .state import State, digest, encode
@@ -50,7 +50,9 @@ class DNSProvider:
 
     @cached_property
     def remote(self) -> RemoteMCP:
-        return self._remote() if callable(self._remote) else self._remote
+        if callable(self._remote):
+            return cast(Callable[[], RemoteMCP], self._remote)()
+        return self._remote
 
     async def observe(self, intent: Intent) -> Observation:
         matches = []

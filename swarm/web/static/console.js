@@ -2,10 +2,12 @@ document.addEventListener("alpine:init", () => {
   Alpine.data("disclosure", () => ({ open: false, toggle() { this.open = !this.open } }))
 })
 document.addEventListener("DOMContentLoaded", () => {
-  const task = document.querySelector("#console")?.dataset.task
+  const view = document.querySelector("#console")
+  const task = view?.dataset.task
   if (!task) return
   const feed = document.querySelector("#feed")
-  const source = new EventSource("/activity")
+  const snapshotCursor = Number(view.dataset.eventCursor)
+  const source = new EventSource("/activity?task=" + encodeURIComponent(task))
   const connection = document.querySelector("#connection")
   source.onopen = () => { connection.textContent = "Connected" }
   source.onerror = () => { connection.textContent = "Reconnecting…" }
@@ -32,6 +34,8 @@ document.addEventListener("DOMContentLoaded", () => {
       text.textContent = row.data.text || row.data.error || row.data.message
       document.querySelector("#messages").append(text)
     }
+    // Historical activity is replayed in full. The rendered task already includes its status.
+    if (row.id <= snapshotCursor) return
     if (row.kind === "run.started") document.querySelector("#status").textContent = "running"
     if (row.kind === "credential.required") {
       document.querySelector("#credential-destination").textContent = row.data.destination

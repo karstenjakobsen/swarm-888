@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +47,7 @@ def state_path() -> Path:
 
 
 @contextlib.contextmanager
-def exclusive(path: Path) -> Iterator[None]:
+def exclusive(path: Path) -> Generator[None, None, None]:
     with path.open("a") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -119,7 +119,7 @@ class State:
             (self.path / directory).mkdir(mode=0o700, exist_ok=True)
 
     @contextlib.contextmanager
-    def tx(self) -> Iterator[sqlite3.Connection]:
+    def tx(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(self.db, timeout=10)
         conn.row_factory = sqlite3.Row
         try:
@@ -181,15 +181,49 @@ class State:
                 self.event(task, kind, data, transaction)
             return
         payload = encode(self.redact(data))
-        if len(payload) > 24000:
+        # The runtime resumes from these messages. Their text is bounded at submission.
+        if len(payload) > 24000 and kind not in ("owner.message", "owner.followup"):
             payload = encode({"excerpt": payload[:23000], "truncated": True})
         conn.execute(
             "INSERT INTO events(task,run,kind,data,at) VALUES (?,(SELECT run FROM tasks WHERE id=?),?,?,?)",
             (task, task, kind, payload, self.clock()),
         )
 
-    def events(self, after: int = 0) -> list[dict]:
-        rows = self.rows("SELECT * FROM events WHERE id>? ORDER BY id LIMIT 100", after)
+    def apply_answer_check(self, task: str, conn: sqlite3.Connection) -> None:
+        """Project the independent grade for the answer produced in this run."""
+        answer = conn.execute(
+            """SELECT t.run, t.status, c.id AS call, c.checked,
+                      json_extract(t.checkpoint,'$.last_verified.run') AS call_run
+               FROM tasks t JOIN calls c
+                 ON c.task=t.id AND c.id=json_extract(t.checkpoint,'$.last_verified.call')
+               WHERE t.id=? AND t.status IN ('answered','verified') AND c.checked IS NOT NULL
+                 AND EXISTS (SELECT 1 FROM events WHERE task=t.id AND run=t.run
+                     AND kind='run.status' AND json_extract(data,'$.status')='answered')""",
+            (task,),
+        ).fetchone()
+        if answer is None:
+            return
+        call_run = answer["call_run"]
+        if call_run is None:
+            # Older checkpoints identify the call. Its completion event identifies the run.
+            recorded = conn.execute(
+                """SELECT run FROM events WHERE task=? AND kind='tool.completed'
+                   AND json_extract(data,'$.result.call')=? LIMIT 1""",
+                (task, answer["call"]),
+            ).fetchone()
+            call_run = recorded["run"] if recorded else None
+        status = "verified" if json.loads(answer["checked"])["passed"] else "answered"
+        if call_run == answer["run"] and answer["status"] != status:
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task))
+            self.event(task, "run.status", {"status": status, "call": answer["call"]}, conn)
+
+    def events(self, after: int = 0, task: str | None = None) -> list[dict]:
+        if task is None:
+            rows = self.rows("SELECT * FROM events WHERE id>? ORDER BY id LIMIT 100", after)
+        else:
+            rows = self.rows(
+                "SELECT * FROM events WHERE task=? AND id>? ORDER BY id LIMIT 100", task, after
+            )
         for row in rows:
             row["data"] = json.loads(row["data"])
         return rows

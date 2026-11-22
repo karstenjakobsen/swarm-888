@@ -12,13 +12,10 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import jsonschema
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
+from .contracts import Contract
 from .state import NAME, ROOT, State, digest, encode, identity, name
-
-
-class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 class HelperFailed(ValueError):
@@ -97,29 +94,40 @@ def validate_schema(schema: dict) -> None:
         "enum",
         "additionalProperties",
     }
-    if set(schema) - allowed or schema.get("type") not in {
-        "object",
-        "array",
-        "string",
-        "number",
-        "integer",
-        "boolean",
-        "null",
-    }:
+    if (
+        not isinstance(schema, dict)
+        or set(schema) - allowed
+        or schema.get("type")
+        not in (
+            "object",
+            "array",
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null",
+        )
+    ):
         raise ValueError(
             "Use inline JSON types, properties, items, required, enum or additionalProperties"
         )
     if not isinstance(schema.get("additionalProperties", True), bool):
         raise ValueError("additionalProperties must be boolean")
-    for child in schema.get("properties", {}).values():
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise ValueError("Schema properties must be an object")
+    for child in properties.values():
         validate_schema(child)
     if "items" in schema:
         validate_schema(schema["items"])
-    jsonschema.Draft7Validator.check_schema(schema)
+    try:
+        jsonschema.Draft7Validator.check_schema(schema)
+    except jsonschema.SchemaError as exc:
+        raise ValueError("Invalid skill JSON schema: " + exc.message[:300]) from exc
 
 
 def validate_value(value: dict, schema: dict) -> None:
-    error = next(jsonschema.Draft7Validator(schema).iter_errors(value), None)
+    error = next(iter(jsonschema.Draft7Validator(schema).iter_errors(value)), None)
     if error:
         raise ValueError(error.message[:300])
 
@@ -233,6 +241,14 @@ class Catalog:
             target.write_text(encode(self.state.redact(definition)) + "\n")
             return {"revision": self.commit(rel, "Define " + key)}
 
+    def active_packages(self) -> list[dict]:
+        rows = self.state.rows(
+            "SELECT a.name,a.rev,r.spec FROM active a JOIN revisions r ON a.rev=r.rev ORDER BY a.name"
+        )
+        return [
+            {"name": r["name"], "revision": r["rev"], "spec": json.loads(r["spec"])} for r in rows
+        ]
+
     def search(self, query: str = "") -> list[dict]:
         entries = [
             {
@@ -244,12 +260,10 @@ class Catalog:
         entries.extend(
             {
                 "name": r["name"],
-                "revision": r["rev"],
-                "description": json.loads(r["spec"])["instructions"][:200],
+                "revision": r["revision"],
+                "description": r["spec"]["instructions"][:200],
             }
-            for r in self.state.rows(
-                "SELECT r.* FROM active a JOIN revisions r ON a.rev=r.rev ORDER BY a.name"
-            )
+            for r in self.active_packages()
         )
         return [
             e
@@ -267,6 +281,11 @@ class Catalog:
 
     def active(self, key: str) -> str:
         return self.state.one("SELECT rev FROM active WHERE name=?", key)["rev"]
+
+    def generation(self) -> int:
+        return self.state.one("SELECT coalesce(max(id),0) AS generation FROM activations")[
+            "generation"
+        ]
 
     def revision(self, rev: str) -> dict:
         row = self.state.one("SELECT * FROM revisions WHERE rev=?", rev)
@@ -548,9 +567,5 @@ class Catalog:
                 {"call": call, **evidence, "verified_reuse": reuse},
                 conn,
             )
-            if passed:
-                conn.execute(
-                    "UPDATE tasks SET status='verified' WHERE id=? AND status='answered'",
-                    (row["task"],),
-                )
+            self.state.apply_answer_check(row["task"], conn)
         return {"passed": passed, "verified_reuse": reuse}

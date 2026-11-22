@@ -16,7 +16,8 @@ from mcp.client.streamable_http import streamable_http_client
 from pydantic import Field, ValidationError
 from referencing import Registry
 
-from .catalog import Catalog, Connector, Contract
+from .catalog import Catalog, Connector
+from .contracts import Contract
 from .state import State, digest, encode, name
 
 
@@ -81,7 +82,7 @@ class RemoteMCP:
             cursor = None
             tools = {}
             for _ in range(32):
-                page = await client.list_tools(cursor=cursor)
+                page = await client.list_tools(params=types.PaginatedRequestParams(cursor=cursor))
                 for tool in page.tools:
                     if tool.name in tools:
                         raise ValueError("Provider returned duplicate tool names")
@@ -121,9 +122,12 @@ class RemoteMCP:
             if result.structuredContent is not None:
                 value = result.structuredContent
             else:
-                if any(item.type != "text" for item in result.content):
-                    raise ValueError("This observation requires JSON or text output")
-                text = "\n".join(item.text for item in result.content)
+                parts = []
+                for item in result.content:
+                    if not isinstance(item, types.TextContent):
+                        raise ValueError("This observation requires JSON or text output")
+                    parts.append(item.text)
+                text = "\n".join(parts)
                 try:
                     value = json.loads(text)
                 except ValueError:

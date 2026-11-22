@@ -13,9 +13,11 @@ from .state import exclusive
 
 def export_state(state: Path, archive: Path) -> None:
     state, archive = state.resolve(), archive.resolve()
-    if archive == state or state in archive.parents or archive.exists():
-        raise ValueError("Choose a new archive path outside the state directory")
     catalog = Path(os.environ.get("SWARM_CATALOG", state / "catalog")).resolve()
+    if state.is_relative_to(catalog):
+        raise ValueError("The catalog must not contain the private state directory")
+    if archive.is_relative_to(state) or archive.is_relative_to(catalog) or archive.exists():
+        raise ValueError("Choose a new archive path outside the state directory and catalog")
     with exclusive(state / "worker.lock"):
         if not (state / "state.sqlite").is_file():
             raise ValueError("No installation to export")

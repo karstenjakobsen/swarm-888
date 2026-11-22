@@ -1,9 +1,9 @@
 import json
-import re
 from contextlib import contextmanager
 
 import httpx
 import pytest
+from conftest import NoRuntime, csrf_token
 from fastapi.testclient import TestClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -64,7 +64,7 @@ def test_observe_credential_ui_and_skill_composition(app, tmp_path, monkeypatch,
         assert app.catalog.test("setup", rev)["passed"]
         app.catalog.activate("setup", rev)
 
-        class Consumer:
+        class Consumer(NoRuntime):
             async def run(self, application, row):
                 tools = application.tools(row["id"])
                 observed = tools.call("connector_result", {"owner_task": row["id"]})
@@ -82,7 +82,7 @@ def test_observe_credential_ui_and_skill_composition(app, tmp_path, monkeypatch,
             client.post("/login", data={"key": owner_key(app.state.path)})
             page = client.get("/?task=" + task).text
             assert endpoint in page and 'type="password"' in page
-            csrf = re.search('name="csrf" value="([^"]+)"', page)[1]
+            csrf = csrf_token(page)
             response = client.post(
                 "/action/credential",
                 data={"task": task, "csrf": csrf, "token": "synthetic-access-token"},

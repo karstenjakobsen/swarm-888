@@ -15,7 +15,8 @@ from typing import Literal
 import httpx
 from pydantic import Field, field_validator
 
-from .catalog import Catalog, Contract
+from .catalog import Catalog
+from .contracts import Contract
 from .dns import DNSReconciler, Intent
 from .ingress import verify_ingress
 from .state import NAME, State, digest, encode, name
@@ -59,6 +60,8 @@ class Site(Contract):
         if not path:
             raise ValueError("Set SWARM_INGRESS_CONFIG to the owner's ingress configuration")
         doc = json.loads(Path(path).read_text())
+        if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict):
+            raise ValueError("Ingress configuration must contain a services object")
         services = doc.pop("services")
         if key not in services:
             raise ValueError("Service has no configured ingress binding")

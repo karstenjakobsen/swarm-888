@@ -32,15 +32,23 @@ def test_author_restart_reuse_and_sourced_log(app, run):
         "passed": True,
         "verified_reuse": False,
     }
+    app.catalog.attest(first["id"], answer, "Repeated independent check")
+    verified = [
+        e
+        for e in app.state.events(task=original)
+        if e["kind"] == "run.status" and e["data"]["status"] == "verified"
+    ]
+    assert len(verified) == 1 and verified[0]["id"] <= app.task_summary(original)["event_cursor"]
     origin = app.catalog.revision(first["rev"])["origin"]
     assert app.catalog.git("show", origin + ":skills/failed-services/package.json")
     assert app.runtime.trace[-4:] == ["skill_stage", "skill_test", "skill_activate", "skill_run"]
-    fresh = Application(app.state, Catalog(app.state), AuthorRuntime())
+    runtime = AuthorRuntime()
+    fresh = Application(app.state, Catalog(app.state), runtime)
     later, second, answer = task_result(
         fresh, run, "Summarize this supplied log.\n" + (FIXTURES / "held-out.log").read_text()
     )
     assert later != original and second["rev"] == first["rev"]
-    assert fresh.runtime.trace == ["skill_search", "skill_run"]
+    assert runtime.trace == ["skill_search", "skill_run"]
     expected = {"failed": ["queue.service", "reports.service"]}
     assert answer == expected
     assert fresh.catalog.attest(second["id"], expected, "Checked held-out source lines")[
@@ -53,6 +61,65 @@ def test_author_restart_reuse_and_sourced_log(app, run):
     assert any(
         "unrelated-action" in str(e["data"]) for e in fresh.state.events() if e["task"] == later
     )
+
+
+def test_check_applies_to_the_current_runs_answer(app, run):
+    task, first, answer = task_result(app, run, "Build summary.\norders.service failed")
+    # Earlier checkpoints stored the call ID without its run.
+    app.state.change(
+        "UPDATE tasks SET checkpoint=json_remove(checkpoint,'$.last_verified.run') WHERE id=?", task
+    )
+    app.catalog.attest(first["id"], answer, "Match")
+    assert app.task_summary(task)["status"] == "verified"
+    app.catalog.attest(first["id"], {"failed": []}, "Corrected independent expectation")
+    assert app.task_summary(task)["status"] == "answered"
+    run(app.follow(task, "Check the next observation"))
+
+    class ReplyRuntime(AuthorRuntime):
+        async def run(self, app, task):
+            return "completed"
+
+    app.runtime = ReplyRuntime()
+    run(app.step())
+    app.catalog.attest(first["id"], answer, "Recheck earlier result")
+    assert app.task_summary(task)["status"] == "answered"
+
+
+def test_check_received_before_turn_completion_is_applied(app, run):
+    class GradedRuntime(AuthorRuntime):
+        async def run(self, app, task):
+            result = await super().run(app, task)
+            call = app.state.one("SELECT id FROM calls WHERE task=?", task["id"])
+            app.catalog.attest(call["id"], {"failed": ["orders.service"]}, "Graded while running")
+            assert app.task_summary(task["id"])["status"] == "running"
+            return result
+
+    app.runtime = GradedRuntime()
+    task = app.submit("Build summary.\norders.service failed")
+    run(app.step())
+    assert app.task_summary(task)["status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "properties": []},
+        {"type": "object", "properties": {"nested": 7}},
+        {"type": "object", "required": 7},
+        {"type": ["object"]},
+    ],
+)
+def test_invalid_schema_rejected_before_staging(app, schema):
+    task = app.submit("Create a skill")
+    app.state.change("UPDATE tasks SET status='running' WHERE id=?", task)
+    tools = app.tools(task)
+    package = tools.skill_template()
+    package["input_schema"] = schema
+    head = app.catalog.git("rev-parse", "HEAD")
+    with pytest.raises(ValueError):
+        tools.call("skill_stage", {"package": package})
+    assert app.catalog.git("rev-parse", "HEAD") == head
+    assert [s["name"] for s in app.catalog.search()] == ["skill-author"]
 
 
 def test_regression_old_and_new_cases(app, run):
@@ -112,6 +179,19 @@ def test_git_backup_restore(app, tmp_path, run):
         == call["rev"]
     )
     assert not list((restored.path / "secrets").iterdir())
+
+
+def test_backup_rejects_paths_overlapping_catalog(app, tmp_path, monkeypatch):
+    catalog = tmp_path / "external-catalog"
+    catalog.mkdir()
+    monkeypatch.setenv("SWARM_CATALOG", str(catalog))
+    archive = catalog / "backup.zip"
+    with pytest.raises(ValueError, match="outside"):
+        export_state(app.state.path, archive)
+    assert not list(catalog.iterdir())
+    monkeypatch.setenv("SWARM_CATALOG", str(tmp_path))
+    with pytest.raises(ValueError, match="private state"):
+        export_state(app.state.path, tmp_path / "backup.zip")
 
 
 def test_inflight_pinning(app, monkeypatch):

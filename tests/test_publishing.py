@@ -73,6 +73,19 @@ class TestEdge(Caddy):
         return {"verified": self.correct_response, "http_status": 200}
 
 
+@pytest.mark.parametrize("config", [[], {"services": []}])
+def test_malformed_ingress_config_waits_for_owner(app, tmp_path, monkeypatch, run, config):
+    path = tmp_path / "ingress.json"
+    path.write_text(json.dumps(config))
+    monkeypatch.setenv("SWARM_INGRESS_CONFIG", str(path))
+    task = app.submit("Publish the orders service at orders.example.test with TLS")
+    run(app.step())
+    assert app.task_summary(task)["status"] == "waiting"
+    questions = [e for e in app.state.events(task=task) if e["kind"] == "question"]
+    assert "services object" in questions[-1]["data"]["text"]
+    assert not app.state.rows("SELECT id FROM operations")
+
+
 def test_publish_restart_on_lost_ingress_reply(app, tmp_path, monkeypatch, run, clock):
     site = configure(tmp_path, monkeypatch)
     with provider_server() as (zone, endpoint):

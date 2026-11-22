@@ -45,6 +45,7 @@ To use an owner-configured monitoring provider, submit `/observe monitoring orde
 
 ```sh
 make lint
+make typecheck
 make format
 make test
 uv run --locked pytest tests/test_skills.py::test_author_restart_reuse_and_sourced_log

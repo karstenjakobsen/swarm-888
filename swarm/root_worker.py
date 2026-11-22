@@ -53,6 +53,8 @@ class FixtureWorker:
         self.uid = self.request({"op": "identity"}) if self.channel else os.geteuid()
 
     def request(self, request: dict):
+        if self.channel is None:
+            raise ValueError("Fixture broker channel is unavailable")
         self.channel.sendall(json.dumps(request).encode())
         reply = json.loads(self.channel.recv(4096))
         if "error" in reply:

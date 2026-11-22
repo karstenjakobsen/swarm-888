@@ -251,10 +251,14 @@ class CodexRuntime:
             self.thread = response["thread"]["id"]
             state.change("UPDATE tasks SET thread=? WHERE id=?", self.thread, key)
             owner_input = state.one(
-                "SELECT data FROM events WHERE task=? AND kind IN ('owner.message','owner.followup') ORDER BY id DESC LIMIT 1",
+                "SELECT kind,data FROM events WHERE task=? AND kind IN ('owner.message','owner.followup') ORDER BY id DESC LIMIT 1",
                 key,
             )
-            latest = json.loads(owner_input["data"])["text"]
+            latest = json.loads(owner_input["data"]).get("text")
+            if latest is None:
+                if owner_input["kind"] == "owner.followup":
+                    raise ValueError("This historical follow-up was truncated. Resend its text.")
+                latest = task["goal"]
             if self.interrupt_requested:
                 return "interrupted"
             self.queued_steering.clear()  # Earlier steering is already in the persisted context.

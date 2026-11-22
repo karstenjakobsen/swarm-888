@@ -9,10 +9,9 @@ from dataclasses import asdict
 from typing import Protocol
 
 from .catalog import Catalog
-from .connectors import ConnectorObservations, RemoteMCP
+from .connectors import ConnectorObservations, CredentialNeeded, RemoteMCP
 from .dns import (
     DO_ENDPOINT,
-    CredentialNeeded,
     DNSProvider,
     DNSReconciler,
     Intent,
@@ -26,7 +25,7 @@ from .tools import TaskTools
 
 
 class Runtime(Protocol):
-    async def run(self, app: Application, task: dict) -> str: ...
+    async def run(self, app: Application, task: dict, /) -> str: ...
     async def interrupt(self) -> None: ...
     async def steer(self, text: str) -> None: ...
 
@@ -221,6 +220,7 @@ class Application:
                     "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", (identity(), task)
                 )
                 self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
+                self.state.event(task, "run.status", {"status": "queued"}, conn)
             return
         if (
             row["kind"] in ("dns", "publish")
@@ -248,6 +248,7 @@ class Application:
                         (self.state.clock() + 600, task),
                     )
                 self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
+                self.state.event(task, "run.status", {"status": "queued"}, conn)
             return
         if row["status"] == "credential":
             raise ValueError("Supply the pending credential to resume this task")
@@ -264,25 +265,30 @@ class Application:
         text = self.state.redact(text.strip())
         if not 1 <= len(text) <= 24000:
             raise ValueError("Invalid follow-up")
-        self.state.event(task, "owner.followup", {"text": text})
         if self.model_task == task and row["status"] == "running":
             await self.runtime.steer(text)
+            self.state.event(task, "owner.followup", {"text": text})
             return
         if self.current == task and row["status"] != "waiting":
             raise ValueError("Turn is finishing. Retry the follow-up shortly")
-        self.state.change(
-            "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", identity(), task
-        )
+        with self.state.tx() as conn:
+            conn.execute(
+                "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", (identity(), task)
+            )
+            self.state.event(task, "owner.followup", {"text": text}, conn)
+            self.state.event(task, "run.status", {"status": "queued"}, conn)
 
     async def stop(self, task: str) -> None:
         row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
         if row["status"] not in ("queued", "running", "waiting", "credential", "observing"):
             raise ValueError("This task has already stopped")
-        if self.model_task == task:
-            self.state.change("UPDATE tasks SET status='stopping' WHERE id=?", task)
+        active = self.model_task == task
+        status = "stopping" if active else "interrupted"
+        with self.state.tx() as conn:
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task))
+            self.state.event(task, "run.status", {"status": status}, conn)
+        if active:
             await self.runtime.interrupt()
-        else:
-            self.state.change("UPDATE tasks SET status='interrupted' WHERE id=?", task)
         self.state.event(
             task,
             "owner.interrupt",
@@ -324,6 +330,7 @@ class Application:
                 {"destination": dest.endpoint, "secret": dest.secret},
                 conn,
             )
+            self.state.event(task, "run.status", {"status": "queued"}, conn)
 
     async def step(self) -> bool:
         async with self.lock:
@@ -373,9 +380,11 @@ class Application:
                 )
             finally:
                 self.current = None
-            self.state.event(
-                key, "run.status", self.state.one("SELECT status FROM tasks WHERE id=?", key)
-            )
+            with self.state.tx() as conn:
+                status = conn.execute("SELECT status FROM tasks WHERE id=?", (key,)).fetchone()[0]
+                self.state.event(key, "run.status", {"status": status}, conn)
+                if status == "answered":
+                    self.state.apply_answer_check(key, conn)
             return True
 
     async def run_model(self, row: dict) -> str:
@@ -555,7 +564,8 @@ class Application:
     def task_summary(self, task: str) -> dict:
         return self.state.one(
             """SELECT id,goal,status,created,
-            json_extract(checkpoint,'$.credential_request.endpoint') AS credential_destination
+            json_extract(checkpoint,'$.credential_request.endpoint') AS credential_destination,
+            (SELECT coalesce(max(id),0) FROM events WHERE task=tasks.id) AS event_cursor
             FROM tasks WHERE id=?""",
             task,
         )

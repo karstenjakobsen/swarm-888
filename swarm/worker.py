@@ -4,22 +4,28 @@ import asyncio
 import contextlib
 import inspect
 import os
+import socket
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import Field, ValidationError
 
 from .application import Application
 from .catalog import Catalog
+from .contracts import Contract, input_contract
 from .runtime import CodexRuntime
 from .state import State, exclusive, state_path
 
 
-class RPC(BaseModel):
+class RPC(Contract):
     method: str
-    params: dict = {}
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 def service(app: Application, schedule: bool = True) -> FastAPI:
@@ -36,7 +42,19 @@ def service(app: Application, schedule: bool = True) -> FastAPI:
                     await runner
 
     api = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    methods = {
+
+    @api.exception_handler(RequestValidationError)
+    async def invalid_request(_request, _exc):
+        # FastAPI's default validation response includes the rejected request body.
+        return JSONResponse({"detail": "Supply an RPC method and a parameters object"}, 422)
+
+    def definitions(task: str) -> list[dict]:
+        return app.tools(task).definitions()
+
+    def call(task: str, key: str, arguments: dict) -> dict:
+        return app.tools(task).call(key, arguments)
+
+    handlers: dict[str, Callable[..., Any]] = {
         "summary": app.summary,
         "task": app.task_summary,
         "events": app.state.events,
@@ -47,18 +65,30 @@ def service(app: Application, schedule: bool = True) -> FastAPI:
         "skill": app.skill_view,
         "artifact": app.artifact,
         "attest": app.catalog.attest,
-        "generation": lambda: app.state.one("SELECT coalesce(max(id),0) AS v FROM activations")[
-            "v"
-        ],
-        "definitions": lambda task: app.tools(task).definitions(),
-        "call": lambda task, key, arguments: app.tools(task).call(key, arguments),
+        "generation": app.catalog.generation,
+        "definitions": definitions,
+        "call": call,
     }
+    contracts = {name: input_contract(handler) for name, handler in handlers.items()}
 
     @api.post("/rpc")
     async def dispatch(request: RPC):
-        if request.method not in methods:
+        if request.method not in handlers:
             raise HTTPException(404, "Unknown method")
-        method = methods[request.method]
+        method = handlers[request.method]
+        try:
+            contracts[request.method].model_validate(request.params, strict=True)
+        except ValidationError as exc:
+            # Unknown field names and invalid values can both contain credentials.
+            fields = contracts[request.method].model_fields
+            errors = exc.errors(include_input=False, include_context=False, include_url=False)
+            detail = ", ".join(
+                f"{e['loc'][0]}: {e['type']}" if e["loc"] and e["loc"][0] in fields else e["type"]
+                for e in errors
+            )
+            raise HTTPException(
+                400, f"Invalid {request.method} parameters: {detail[:500]}"
+            ) from exc
         try:
             if inspect.iscoroutinefunction(method):
                 return await method(**request.params)
@@ -93,8 +123,6 @@ def worker() -> None:
             app.maintenance.host.channel.set_inheritable(False)
         sock = path / "worker.sock"
         # Uvicorn chmods pathname sockets to 0666. Bind explicitly inside the private state directory.
-        import socket
-
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
             if sock.is_socket():
                 sock.unlink()

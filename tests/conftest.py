@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,12 @@ def isolate_installation_config(monkeypatch, request):
         monkeypatch.delenv("SWARM_CODEX_AUTH", raising=False)
 
 
+def csrf_token(page: str) -> str:
+    match = re.search(r'name="csrf" value="([^"]+)"', page)
+    assert match, "Missing CSRF field"
+    return match[1]
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -46,7 +53,7 @@ class NoRuntime:
     def __init__(self):
         self.calls = 0
 
-    async def run(self, app, task):
+    async def run(self, app, task, /):
         self.calls += 1
         raise AssertionError("Unexpected model call")
 

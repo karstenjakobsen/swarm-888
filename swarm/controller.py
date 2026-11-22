@@ -4,14 +4,15 @@ import asyncio
 import hmac
 import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .state import ROOT, encode
 
@@ -23,13 +24,18 @@ def owner_key(state: Path) -> str:
     if state.stat().st_mode & 0o077 or state.stat().st_uid != os.getuid():
         raise ValueError("State must be private and owned by the controller user")
     key = state / "controller.key"
-    try:
-        fd = os.open(key, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return key.read_text().strip()
-    token = secrets.token_urlsafe(32)
-    with os.fdopen(fd, "w") as f:
-        f.write(token + "\n")
+    if not key.exists():
+        # Concurrent controller and CLI starts must both see the same complete key.
+        with tempfile.NamedTemporaryFile(mode="w", dir=state) as candidate:
+            candidate.write(secrets.token_urlsafe(32) + "\n")
+            candidate.flush()
+            try:
+                os.link(candidate.name, key)
+            except FileExistsError:
+                pass
+    token = key.read_text().strip()
+    if not token:
+        raise ValueError("The controller key is empty. Restore a valid owner key before starting.")
     return token
 
 
@@ -95,9 +101,7 @@ def controller(state: Path, transport: httpx.AsyncBaseTransport | None = None) -
         except HTTPException:
             return templates.TemplateResponse(request, "login.html", {})
         summary = await rpc("summary")
-        selected = next((r for r in summary["tasks"] if r["id"] == task), None)
-        if task and (selected is None or selected["status"] == "credential"):
-            selected = await rpc("task", task=task)
+        selected = await rpc("task", task=task) if task else None
         return templates.TemplateResponse(
             request, "home.html", {"state": summary, "selected": selected, "csrf": csrf}
         )
@@ -163,7 +167,9 @@ def controller(state: Path, transport: httpx.AsyncBaseTransport | None = None) -
         return await rpc("artifact", key=revision)
 
     @api.get("/activity")
-    async def activity(request: Request, after: int = 0, once: bool = False):
+    async def activity(
+        request: Request, after: int = 0, once: bool = False, task: str | None = None
+    ):
         session(request)
         try:
             cursor = max(0, int(request.headers.get("last-event-id", after)))
@@ -173,8 +179,11 @@ def controller(state: Path, transport: httpx.AsyncBaseTransport | None = None) -
         async def stream():
             nonlocal cursor
             while not await request.is_disconnected():
-                session(request)
-                events = await rpc("events", after=cursor)
+                try:
+                    session(request)
+                except HTTPException:
+                    return
+                events = await rpc("events", after=cursor, task=task)
                 for event in events:
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {encode(event)}\n\n"

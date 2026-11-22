@@ -33,7 +33,7 @@ Set `SWARM_NOTIFY_DIR` to a monitored, owner-controlled local directory to recei
 
 ## Optional UID 0 fixture worker
 
-Stop the ordinary worker before starting this alternative. Use the prepared virtual environment and the same unprivileged controller:
+For a supervised development run, stop the ordinary worker and use the prepared virtual environment and the same unprivileged controller.
 
 ```sh
 uv run --locked python -m swarm owner-key
@@ -41,7 +41,9 @@ sudo .venv/bin/python -I -S swarm/root_worker.py --owner "$(id -un)" \
   --state "${SWARM_STATE:-$HOME/.local/state/swarm-888}" --user-path "$PATH"
 ```
 
-The privileged parent opens the private state directory and handles fixture observations and conditional mode changes through an inherited Unix socket. The child permanently drops UID, GID and supplementary groups to the specified account before it starts the application. The console shows both observed execution identities. An owner-controlled root process can change host code and local data and can read locally available credentials. Protect the interpreter and launcher that you invoke with sudo. The CLI's existing file-backed login can also be configured directly in the private `sessions/` Codex home.
+The privileged parent opens the private state directory and handles fixture observations and conditional mode changes through an inherited Unix socket. Before starting the application, the child loads the selected account's supplementary groups with `initgroups` and switches its real, effective and saved UID and GID to that account. The console reports both process UIDs. Check `id ACCOUNT` for the privileges the worker inherits.
+
+For unattended privileged startup, use a dedicated account without Docker socket access or sudo grants. The interpreter, privileged launcher and their parent directories must be controlled by root. An account that can edit or replace the launcher controls what executes at the next privileged start. The development command above assumes an owner-supervised checkout. The CLI's existing file-backed login can also be configured directly in the private `sessions/` Codex home.
 
 ## DNS and ingress
 

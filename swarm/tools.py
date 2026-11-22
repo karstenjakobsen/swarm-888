@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
-from typing import Any, Literal, get_type_hints
+from typing import Literal
 
-from pydantic import create_model
-
-from .catalog import Catalog, Contract, Package
+from .catalog import Catalog, Package
 from .connectors import ConnectorObservations
+from .contracts import input_contract
 from .dns import DNSReconciler
 from .goals import Maintenance
 from .learning import Learning
@@ -171,17 +169,16 @@ class TaskTools:
             if key.startswith(prefixes) or key == "ask_owner"
         }
 
-    @staticmethod
-    def contract(method: Any) -> type[Contract]:
-        hints = get_type_hints(method)
-        fields = {
-            p.name: (hints[p.name], ... if p.default == p.empty else p.default)
-            for p in inspect.signature(method).parameters.values()
-        }
-        return create_model(method.__name__ + "Input", __base__=Contract, **fields)
+    contract = staticmethod(input_contract)
 
     def definitions(self) -> list[dict]:
-        task = self.s.one("SELECT kind FROM tasks WHERE id=?", self.task)
+        kind = self.s.one("SELECT kind FROM tasks WHERE id=?", self.task)["kind"]
+        restricted = {
+            "dns": {"connector_observe_recovery"},
+            "learn": self.learning.tools,
+            "diagnose": self.maintenance.diagnostic_tools,
+            "improve": self.maintenance.improvement_tools,
+        }.get(kind)
         definitions = [
             {
                 "name": key,
@@ -189,16 +186,14 @@ class TaskTools:
                 "inputSchema": self.contract(method).model_json_schema(),
             }
             for key, method in self.methods().items()
-            if task["kind"] != "dns" or key == "connector_observe_recovery"
-            if task["kind"] == "project" or not key.startswith("project_")
-            if task["kind"] != "learn" or key in self.learning.tools
+            if restricted is None or key in restricted
+            if kind == "dns" or key != "connector_observe_recovery"
+            if kind == "project" or not key.startswith("project_")
         ]
-        if task["kind"] in ("dns", "learn"):
+        if restricted is not None:
             return definitions
-        for row in self.s.rows(
-            "SELECT r.name,r.spec FROM active a JOIN revisions r ON a.rev=r.rev"
-        ):
-            spec = json.loads(row["spec"])
+        for row in self.catalog.active_packages():
+            spec = row["spec"]
             if spec["named"]:
                 definitions.append(
                     {
@@ -217,7 +212,7 @@ class TaskTools:
         return definitions
 
     def call(self, key: str, arguments: dict) -> dict:
-        task = self.s.one("SELECT status,kind,input FROM tasks WHERE id=?", self.task)
+        task = self.s.one("SELECT run,status,kind,input FROM tasks WHERE id=?", self.task)
         if task["status"] != "running":
             raise ValueError("Task is not running")
         arguments = self.s.redact(arguments)
@@ -231,30 +226,7 @@ class TaskTools:
                 )
             if task["kind"] in ("diagnose", "improve"):
                 inc = json.loads(task["input"])["incident"]
-                if not self.maintenance.consume(inc, "tool"):
-                    raise ValueError("Incident budget exhausted")
-                allowed = {
-                    "skill_read",
-                    "skill_search",
-                    "skill_template",
-                    "skill_run",
-                    "memory_read",
-                    "memory_search",
-                }
-                if task["kind"] == "improve":
-                    allowed.update({"skill_stage", "skill_test", "skill_activate"})
-                if key not in allowed:
-                    raise ValueError("Tool outside incident follow-up scope")
-                bound = self.s.one(
-                    "SELECT g.skill FROM goals g JOIN incidents i ON i.goal=g.id WHERE i.id=?", inc
-                )["skill"]
-                if key == "skill_stage" and arguments["package"]["name"] != bound:
-                    raise ValueError("Revise the incident's bound skill")
-                if (
-                    key in ("skill_activate", "skill_test")
-                    and self.catalog.revision(arguments["revision"])["name"] != bound
-                ):
-                    raise ValueError("Revision is outside the incident")
+                self.maintenance.authorize_tool(inc, task["kind"], key, arguments)
             if key.startswith("local_"):
                 skill = key[6:].replace("_", "-")
                 if set(arguments) != {"arguments"} or not isinstance(arguments["arguments"], dict):
@@ -284,6 +256,7 @@ class TaskTools:
             if result.get("call"):
                 checkpoint["last_verified"] = {
                     "call": result["call"],
+                    "run": task["run"],
                     "revision": rev,
                     "result": result["result"],
                 }

@@ -41,7 +41,9 @@ def independent_request(host, port, roots):
         socket.create_connection(("127.0.0.1", port), timeout=3) as tcp,
         ctx.wrap_socket(tcp, server_hostname=host) as tls,
     ):
-        fingerprint = hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+        certificate = tls.getpeercert(binary_form=True)
+        assert certificate is not None
+        fingerprint = hashlib.sha256(certificate).hexdigest()
         tls.sendall(f"GET / HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
         with tls.makefile("rb") as response:
             body = response.read(8192)
@@ -106,7 +108,7 @@ def test_real_caddy_pebble_publish_and_renew(app, tmp_path, monkeypatch, clock, 
             self.end_headers()
             self.wfile.write(b"orders-v1")
 
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
 
     env = {
@@ -121,8 +123,10 @@ def test_real_caddy_pebble_publish_and_renew(app, tmp_path, monkeypatch, clock, 
 
     def start(stack, name, *args):
         log = stack.enter_context((tmp_path / (name + ".log")).open("w"))
+        binary = binaries[name]
+        assert binary is not None
         process = subprocess.Popen(
-            [binaries[name], *args], cwd=tmp_path, env=env, stdout=log, stderr=subprocess.STDOUT
+            [binary, *args], cwd=tmp_path, env=env, stdout=log, stderr=subprocess.STDOUT
         )
 
         def finish():

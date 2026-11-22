@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from conftest import NoRuntime
 
 from swarm.application import Application
 from swarm.catalog import Catalog, FailedInvocation, Package
@@ -66,7 +67,7 @@ def test_failed_helper_can_be_reproduced_and_corrected_after_restart(app, run):
     assert source["actual"] is None and source["failure"]["exit_status"] == 1
     task = app.submit("/learn " + failure["call"])
 
-    class FixPort:
+    class FixPort(NoRuntime):
         async def run(self, fresh, row):
             tools = fresh.tools(row["id"])
             record = tools.call("skill_evidence", {"call": failure["call"]})

@@ -21,7 +21,8 @@ def bind(app, run):
 
 def test_standing_goal_restart_healthy_drift_pause(app, run, clock):
     path, goal = bind(app, run)
-    fresh = Application(app.state, Catalog(app.state), NoRuntime())
+    runtime = NoRuntime()
+    fresh = Application(app.state, Catalog(app.state), runtime)
     fresh.recover()
     clock.advance()
     run(fresh.step())
@@ -44,7 +45,7 @@ def test_standing_goal_restart_healthy_drift_pause(app, run, clock):
     fresh.submit("/resume " + goal["id"])
     run(fresh.step())
     run(fresh.step())
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and fresh.runtime.calls == 0
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and runtime.calls == 0
 
 
 def test_budget_across_restart_and_followup(app, run, clock, monkeypatch):
@@ -59,9 +60,12 @@ def test_budget_across_restart_and_followup(app, run, clock, monkeypatch):
         async def run(self, app, task):
             self.calls += 1
             tools = app.tools(task["id"])
+            advertised = {item["name"] for item in tools.definitions()}
             if task["kind"] == "diagnose":
+                assert advertised == app.maintenance.diagnostic_tools
                 tools.call("skill_read", {"name": goal["skill"]})
             else:
+                assert advertised == app.maintenance.improvement_tools
                 package = dict(app.catalog.revision(goal["rev"])["spec"])
                 package["instructions"] += " Verify the observed result after a lost repair reply."
                 candidate = tools.call("skill_stage", {"package": package})["revision"]
@@ -69,7 +73,8 @@ def test_budget_across_restart_and_followup(app, run, clock, monkeypatch):
                 tools.call("skill_activate", {"revision": candidate})
             return "completed"
 
-    fresh = Application(app.state, Catalog(app.state), IncidentRuntime())
+    runtime = IncidentRuntime()
+    fresh = Application(app.state, Catalog(app.state), runtime)
     for command in ("/diagnose " + inc["id"], "/improve " + inc["id"]):
         key = fresh.submit(command)
         run(fresh.step())
@@ -77,7 +82,7 @@ def test_budget_across_restart_and_followup(app, run, clock, monkeypatch):
             "answered",
             "failed",
         }
-    assert fresh.runtime.calls == 2
+    assert runtime.calls == 2
     stages = fresh.state.rows("SELECT rev FROM revisions WHERE author=?", key)
     assert len(stages) == 1 and stages[0]["rev"] != goal["rev"]
     for _ in range(20):

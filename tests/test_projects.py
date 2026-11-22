@@ -2,6 +2,7 @@ import json
 import subprocess
 
 import pytest
+from conftest import NoRuntime
 
 from swarm.application import Application
 from swarm.backup import export_state, restore_state
@@ -9,7 +10,7 @@ from swarm.catalog import Catalog
 from swarm.state import State
 
 
-class ProjectAuthor:
+class ProjectAuthor(NoRuntime):
     async def run(self, app, task):
         tools = app.tools(task["id"])
         base = tools.call("project_status", {})["commit"]

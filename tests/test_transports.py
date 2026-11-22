@@ -7,13 +7,16 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
+import pytest
 import uvicorn
+from conftest import csrf_token
 from fastapi.testclient import TestClient
-from mcp import ClientSession, StdioServerParameters
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
 from swarm.controller import controller, owner_key
@@ -70,7 +73,7 @@ def test_mcp_hotplug_inflight_rollback(app, monkeypatch):
                     ClientSession(read, write, message_handler=handle) as client,
                 ):
                     init = await client.initialize()
-                    assert init.capabilities.tools.listChanged
+                    assert init.capabilities.tools and init.capabilities.tools.listChanged
 
                     async def names():
                         return [t.name for t in (await client.list_tools()).tools]
@@ -115,6 +118,7 @@ def test_mcp_hotplug_inflight_rollback(app, monkeypatch):
                     )
                     assert failed.isError
                     recorded = app.skill_view("count-lines")["calls"][0]
+                    assert isinstance(failed.content[0], types.TextContent)
                     assert recorded["id"] in failed.content[0].text
                     evidence = await call("skill_evidence", call=recorded["id"])
                     assert evidence["failure"]["exit_status"] == 1 and evidence["actual"] is None
@@ -152,25 +156,58 @@ def test_ui_auth_replay_artifact_and_wait(app):
         )
         assert client.post("/login", data={"key": owner_key(app.state.path)}).status_code == 200
         assert client.post("/message", data={"text": "no token"}).status_code == 403
-        import re
-
-        csrf = re.search(r'name="csrf" value="([^"]+)"', client.get("/").text)[1]
+        csrf = csrf_token(client.get("/").text)
         response = client.post("/message", data={"csrf": csrf, "text": "<script>alert(1)</script>"})
         assert response.status_code == 200 and "<script>alert" not in response.text
         task = app.summary()["tasks"][0]["id"]
         before = client.get("/activity?once=true").text
         events = [json.loads(line[6:]) for line in before.splitlines() if line.startswith("data: ")]
         cursor = events[-1]["id"]
+        assert f'data-event-cursor="{cursor}"' in response.text
+        other = app.submit("Unrelated conversation")
+        scoped = client.get("/activity", params={"task": task, "once": "true"}).text
+        assert task in scoped and other not in scoped
         app.state.change("UPDATE tasks SET status='running' WHERE id=?", task)
         app.tools(task).call("ask_owner", {"question": "Which project?"})
-        replay = client.get("/activity?once=true", headers={"Last-Event-ID": str(cursor)}).text
+        resume = {"Last-Event-ID": str(cursor)}
+        assert other in client.get("/activity?once=true", headers=resume).text
+        replay = client.get("/activity", params={"task": task, "once": "true"}, headers=resume).text
         assert '"kind":"question"' in replay and '"kind":"owner.message"' not in replay
         response = client.post("/message", data={"task": task, "csrf": csrf, "text": "Orders"})
-        assert response.status_code == 200 and app.summary()["tasks"][0]["status"] == "queued"
+        assert response.status_code == 200 and app.task_summary(task)["status"] == "queued"
         assert client.get("/artifacts/..%2Fcontroller.key").status_code == 404
         assert client.get("/skills/skill-author").status_code == 200
         assert client.post("/action/logout", data={"csrf": csrf}).status_code == 200
         assert client.get("/activity?once=true").status_code == 401
+
+
+def test_owner_key_is_published_complete_and_empty_keys_fail_closed(tmp_path):
+    state = tmp_path / "private"
+    with ThreadPoolExecutor(8) as pool:
+        keys = list(pool.map(lambda _: owner_key(state), range(16)))
+    assert len(set(keys)) == 1 and keys[0]
+    key = state / "controller.key"
+    assert key.stat().st_mode & 0o777 == 0o600
+    key.write_text("\n")
+    with pytest.raises(ValueError, match="empty"):
+        controller(state)
+
+
+def test_worker_rpc_validates_arguments_before_dispatch(app):
+    with TestClient(service(app, schedule=False)) as client:
+        for method, params in [
+            ("submit", {"text": []}),
+            ("credential", {"task": "missing", "token": ["private-value"]}),
+            ("generation", {"private-value": "private-value"}),
+            ("attest", {"call": "missing", "expected": [], "observation": "checked"}),
+        ]:
+            r = client.post("/rpc", json={"method": method, "params": params})
+            assert r.status_code == 400 and "private-value" not in r.text
+        assert client.post("/rpc", json={"method": "unknown"}).status_code == 404
+        invalid = client.post("/rpc", json={"method": "credential", "params": ["private-value"]})
+        assert invalid.status_code == 422 and "private-value" not in invalid.text
+        assert client.post("/rpc", json={"method": "generation"}).json() == 0
+        assert app.summary()["tasks"] == []
 
 
 def test_tls_service_specific_probe(tmp_path):
@@ -204,7 +241,7 @@ def test_tls_service_specific_probe(tmp_path):
             self.end_headers()
             self.wfile.write(b"orders-service build 42")
 
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
 
     with HTTPServer(("127.0.0.1", 0), Service) as server:
@@ -217,8 +254,6 @@ def test_tls_service_specific_probe(tmp_path):
             opts = {"ca_file": str(cert), "port": server.server_port}
             assert verify_ingress("localhost", "orders-service", **opts)["verified"]
             assert not verify_ingress("localhost", "accounts-service", **opts)["verified"]
-            import pytest
-
             with pytest.raises(httpx.ConnectError):
                 verify_ingress("127.0.0.1", "orders-service", **opts)
         finally:

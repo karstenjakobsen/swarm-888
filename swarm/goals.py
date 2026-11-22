@@ -12,6 +12,18 @@ from .state import State, encode, identity, name
 class Maintenance:
     """A serialized scheduler. Skills classify observations and propose a file mode."""
 
+    diagnostic_tools = frozenset(
+        {
+            "skill_read",
+            "skill_search",
+            "skill_template",
+            "skill_run",
+            "memory_read",
+            "memory_search",
+        }
+    )
+    improvement_tools = diagnostic_tools | {"skill_stage", "skill_test", "skill_activate"}
+
     def __init__(
         self, state: State, catalog: Catalog, limit: int = 10, seconds: int = 180, cooldown: int = 5
     ):
@@ -86,6 +98,23 @@ class Maintenance:
             "Owner action needed for " + row["resource"] + ". Last observation: " + row["evidence"],
         )
         return False
+
+    def authorize_tool(self, inc: str, kind: str, tool: str, arguments: dict) -> None:
+        if not self.consume(inc, "tool"):
+            raise ValueError("Incident budget exhausted")
+        allowed = self.improvement_tools if kind == "improve" else self.diagnostic_tools
+        if tool not in allowed:
+            raise ValueError("Tool outside incident follow-up scope")
+        if tool not in {"skill_stage", "skill_activate", "skill_test"}:
+            return
+        bound = self.s.one(
+            "SELECT g.skill FROM goals g JOIN incidents i ON i.goal=g.id WHERE i.id=?", inc
+        )["skill"]
+        if tool == "skill_stage":
+            if arguments["package"]["name"] != bound:
+                raise ValueError("Revise the incident's bound skill")
+        elif self.catalog.revision(arguments["revision"])["name"] != bound:
+            raise ValueError("Revision is outside the incident")
 
     def followup(self, inc: str, revision: str | None = None) -> dict:
         row = self.s.one(

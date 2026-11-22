@@ -4,6 +4,8 @@ import os
 import socket
 import threading
 
+import pytest
+
 from swarm.application import Application
 from swarm.root_worker import FixtureWorker, broker
 from swarm.runtime import CodexRuntime
@@ -39,13 +41,14 @@ for line in sys.stdin:
     binary.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.delenv("SWARM_CODEX_AUTH", raising=False)
-    actual = Application(app.state, app.catalog, CodexRuntime())
+    runtime = CodexRuntime()
+    actual = Application(app.state, app.catalog, runtime)
 
     async def scenario():
         task = actual.submit("Start a transcript test")
         work = asyncio.create_task(actual.step())
         async with asyncio.timeout(5):
-            while not actual.runtime.turn:
+            while not runtime.turn:
                 await asyncio.sleep(0.01)
         await actual.follow(task, "Use the billing project")
         await actual.stop(task)
@@ -53,7 +56,8 @@ for line in sys.stdin:
         assert (
             actual.state.one("SELECT status FROM tasks WHERE id=?", task)["status"] == "interrupted"
         )
-        await actual.follow(task, "Finish now")
+        followup = "Finish now " + "a" * (24000 - len("Finish now "))
+        await actual.follow(task, followup)
         await actual.step()
         assert actual.state.one("SELECT status FROM tasks WHERE id=?", task)["status"] == "answered"
         requests = [
@@ -65,7 +69,16 @@ for line in sys.stdin:
         names = [r["method"] for r in requests]
         assert names.count("thread/start") == 1 and names.count("thread/resume") == 1
         assert "turn/steer" in names and "turn/interrupt" in names
-        assert requests[-1]["params"]["input"][0]["text"].endswith("Finish now")
+        assert requests[-1]["params"]["input"][0]["text"].endswith(followup)
+
+        actual.current = task
+        with pytest.raises(ValueError, match="finishing"):
+            await actual.follow(task, "This turn should not be recorded")
+        assert not actual.state.rows(
+            "SELECT 1 FROM events WHERE task=? AND kind='owner.followup' AND json_extract(data,'$.text')=?",
+            task,
+            "This turn should not be recorded",
+        )
 
     asyncio.run(scenario())
 
@@ -85,13 +98,12 @@ def test_fixture_broker_protocol_without_elevation(app):
             assert worker.apply("sample") == "644"
             worker.apply("sample", "644", "600")
             assert worker.apply("sample") == "600"
-            import pytest
-
             with pytest.raises(ValueError):
                 worker.apply("../secrets", "600", "644")
             with pytest.raises(ValueError):
                 worker.apply("sample", "600", "777")
         finally:
+            assert worker.channel is not None
             worker.channel.close()
             thread.join(2)
             os.close(fd)

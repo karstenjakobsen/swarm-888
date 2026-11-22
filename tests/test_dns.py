@@ -204,13 +204,14 @@ def test_dns_crash_recovery(tmp_path, unreadable):
         ([{"broken": True}], "unknown"),
     ],
 )
-def test_observation(records, answer):
-    class Remote:
-        async def call(self, *args):
-            return {"domain_records": records}
+def test_observation(records, answer, app, monkeypatch):
+    async def list_records(*args):
+        return {"domain_records": records}
 
+    remote = app.remote
+    monkeypatch.setattr(remote, "call", list_records)
     observed = asyncio.run(
-        DNSProvider(Remote()).observe(Intent("example.test", "orders", "192.0.2.8"))
+        DNSProvider(remote).observe(Intent("example.test", "orders", "192.0.2.8"))
     )
     assert observed.status == answer
 
