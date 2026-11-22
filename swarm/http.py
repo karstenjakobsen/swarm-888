@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from urllib.parse import parse_qs, urlsplit
 
-from . import catalog, web
+from . import catalog, shared_catalog, web
 from .store import Conflict, uid
 
 ASSETS = {
@@ -157,10 +157,13 @@ class Handler(BaseHTTPRequestHandler):
                     "projects": db.query(
                         "SELECT id,name,repo,repo_ref,revision,auto_publish FROM projects ORDER BY rowid"
                     ),
+                    "sharedCatalog": shared_catalog.info(db),
                     "peers": db.query("SELECT id,name,url FROM peers ORDER BY name"),
                     "jobs": jobs,
                     "active": running,
-                    "catalog": catalog.assets(db.workspace(p["id"])),
+                    "catalog": []
+                    if p["id"] == shared_catalog.PROJECT
+                    else catalog.assets(db.workspace(p["id"])),
                     "queued": db.one("SELECT count(*) AS n FROM jobs WHERE state='queued'")["n"],
                 },
             )
@@ -179,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/projects":
                 repo = text(data, "repository", 2048, True)
                 if repo:
-                    repo = catalog.https_url(repo)
+                    repo = catalog.repository_url(repo)
                 return self.reply(
                     201,
                     db.create_project(

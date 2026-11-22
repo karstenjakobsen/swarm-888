@@ -80,8 +80,9 @@ if ! id swarm-operator >/dev/null 2>&1; then
     useradd --system --user-group --home-dir "$state" --shell /usr/sbin/nologin swarm-operator
 fi
 install -d -m 0700 -o swarm-operator -g swarm-operator "$state"
+python3 -I "$src/scripts/host-worker/provision.py" --user swarm-operator
 install -m 0644 "$src/scripts/swarm-operator.service" /etc/systemd/system/swarm-operator.service
 systemctl daemon-reload
 systemctl enable swarm-operator.service
 systemctl restart swarm-operator.service
-echo "Service installed. Access link: sudo -u swarm-operator /usr/local/bin/swarm-operator url"
+echo "Operator and host worker installed. Private dashboard link: $state/access.url"

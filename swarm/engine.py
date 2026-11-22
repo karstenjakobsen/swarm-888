@@ -2,7 +2,7 @@ import asyncio
 import logging
 import threading
 
-from . import catalog, codex, mesh
+from . import catalog, codex, mesh, shared_catalog
 from .store import BlockedTask
 
 
@@ -71,6 +71,12 @@ class Engine:
     async def _run(self, job):
         if job["target"]:
             return await mesh.delegate(self.store, job)
+        if job["project"] == shared_catalog.PROJECT and self.store.catalog_dir:
+            async with shared_catalog.locked(self.store):
+                if job["kind"] in ("import", "publish"):
+                    return await shared_catalog.operate(self.store, job["kind"])
+                await shared_catalog.operate(self.store, "import")
+                return await codex.run(self.store, job, self.executable)
         if job["kind"] in ("import", "publish"):
             return await catalog.operate(self.store, job)
         project = self.store.project(job["project"])

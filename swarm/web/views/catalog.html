@@ -1,43 +1,84 @@
 <section x-show="selectedTab === 'catalog'">
-  <div class="panel catalog-source">
-    <h2>Repository</h2>
-    <p class="mono wrap" x-text="project.repo || 'Local workspace'"></p>
-    <template x-if="project.repo"
-      ><div>
-        <p class="muted" x-text="project.revision"></p>
-        <button
-          class="secondary"
-          x-show="!project.revision"
-          @click="catalogAction('import')"
-          :disabled="busy"
-        >
-          Retry import
+  <template x-if="sharedCatalog">
+    <div>
+      <div class="panel catalog-source">
+        <h2>Shared repository</h2>
+        <p class="mono wrap" x-text="sharedCatalog.repo"></p>
+        <p class="muted wrap" x-text="sharedCatalog.directory"></p>
+        <p class="muted" x-text="sharedRevision"></p>
+        <button class="primary" @click="selectProject(sharedCatalog.id)">
+          Work on catalog
         </button>
         <button
           class="secondary"
-          x-show="project.revision"
-          @click="catalogAction('publish')"
+          @click="catalogAction('import', sharedCatalog.id)"
+          :disabled="busy"
+        >
+          Sync catalog
+        </button>
+        <button
+          class="secondary"
+          @click="catalogAction('publish', sharedCatalog.id)"
           :disabled="busy"
         >
           Publish changes
         </button>
-      </div></template
-    >
-  </div>
-  <div class="section-head">
-    <h2>Workspace assets</h2>
-    <span class="muted" x-text="catalog.length"></span>
-  </div>
-  <div class="empty" x-show="!catalog.length">
-    <h3>No catalog assets yet</h3>
-    <p>
-      Ask a worker to create a project, skill, or connector in this workspace.
-    </p>
-  </div>
-  <template x-for="asset in catalog" :key="asset.path"
-    ><div class="asset">
-      <span class="chip" x-text="asset.kind"></span
-      ><strong x-text="asset.name"></strong
-      ><code x-text="asset.path"></code></div
-  ></template>
+      </div>
+      <div class="section-head">
+        <h2>Shared assets</h2>
+        <span class="muted" x-text="sharedCatalog.assets.length"></span>
+      </div>
+      <div class="empty" x-show="!sharedCatalog.assets.length">
+        <h3>No shared packages yet</h3>
+        <p>Choose Work on catalog to create a skill, connector, or project.</p>
+      </div>
+      <template x-for="asset in sharedCatalog.assets" :key="asset.path">
+        <div class="asset">
+          <span class="chip" x-text="asset.kind"></span
+          ><strong x-text="asset.name"></strong
+          ><code x-text="asset.path"></code>
+        </div>
+      </template>
+    </div>
+  </template>
+  <template x-if="showWorkspaceCatalog">
+    <div>
+      <div class="panel catalog-source">
+        <h2>Workspace repository</h2>
+        <p class="mono wrap" x-text="project.repo || 'Local workspace'"></p>
+        <template x-if="project.repo">
+          <div>
+            <p class="muted" x-text="project.revision"></p>
+            <button
+              class="secondary"
+              x-show="!project.revision"
+              @click="catalogAction('import')"
+              :disabled="busy"
+            >
+              Retry import
+            </button>
+            <button
+              class="secondary"
+              x-show="project.revision"
+              @click="catalogAction('publish')"
+              :disabled="busy"
+            >
+              Publish workspace changes
+            </button>
+          </div>
+        </template>
+      </div>
+      <div class="section-head">
+        <h2>Workspace assets</h2>
+        <span class="muted" x-text="catalog.length"></span>
+      </div>
+      <template x-for="asset in catalog" :key="asset.path">
+        <div class="asset">
+          <span class="chip" x-text="asset.kind"></span
+          ><strong x-text="asset.name"></strong
+          ><code x-text="asset.path"></code>
+        </div>
+      </template>
+    </div>
+  </template>
 </section>

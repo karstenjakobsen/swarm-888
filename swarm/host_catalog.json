@@ -1,0 +1,12 @@
+{
+  "revision": "4181c8cc30059d4597f8e7a737f9b437bab60704",
+  "files": {
+    "connectors/local-nomad/batch.py": "86a8f14e9abc426088160abef693282a7836e21a477cf1ef1f4389625c48f213",
+    "connectors/local-nomad/host_environment.py": "c901ae9dc03e250af21d2a7efa98b3b7abe84fd43270d68e09b354dc1015c48a",
+    "connectors/local-nomad/nomad_api.py": "c4b9a1f63511fb13685b2661e586b530d5ac89bfb3f56d6ce0b86c84f0519a64",
+    "projects/local-nomad/agent.hcl.in": "08734ff9de141e7a88b90902a2a282326bba9174cd9b7775f6c609d57467fc25",
+    "projects/local-nomad/catalog-nomad.service": "48d33cd92cadf81b56c661e0929c0f8efebd7e10e2df4c33823145b22c7b44b8",
+    "projects/local-nomad/install.py": "fddff0b856258f63878be2f2ef8b941168d0d49bcab275e0c61bb73fd1b7b956",
+    "projects/local-nomad/release.py": "89375730d9ef10a0bb47cb73a5d9574823012e455f8d2c35a3e26ca3d5002a16"
+  }
+}

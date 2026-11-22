@@ -9,12 +9,17 @@ import signal
 import sys
 from pathlib import Path
 
+from . import shared_catalog
 from .engine import Engine
 from .http import Dashboard
 from .store import Store
 
 
 def main():
+    if sys.argv[1:] == ["host-tools"]:
+        from .host_tools import main as serve_host_tools
+
+        return serve_host_tools()
     parser = argparse.ArgumentParser(prog="swarm-operator")
     parser.add_argument("command", nargs="?", choices=("serve", "url", "doctor"), default="serve")
     parser.add_argument("--data", default=os.environ.get("SWARM_DATA", ".swarm"))
@@ -22,6 +27,16 @@ def main():
     parser.add_argument("--workers", type=int, default=int(os.environ.get("SWARM_WORKERS", "2")))
     parser.add_argument("--name", default=os.environ.get("SWARM_NAME", "Local operator"))
     parser.add_argument("--codex", default=os.environ.get("SWARM_CODEX", "codex"))
+    parser.add_argument(
+        "--catalog-dir",
+        default=os.environ.get("SWARM_CATALOG_DIR"),
+        help="Local checkout for the operator-wide catalog",
+    )
+    parser.add_argument(
+        "--catalog-repo",
+        default=os.environ.get("SWARM_CATALOG_REPO"),
+        help="Shared catalog Git remote",
+    )
     args = parser.parse_args()
     if not 1 <= args.workers <= 32 or not 0 <= args.port <= 65535:
         parser.error("use 1–32 workers and a valid port")
@@ -74,6 +89,7 @@ def main():
             signal.signal(signal.SIGTERM, shutdown)
             signal.signal(signal.SIGINT, shutdown)
             server.timeout = 0.25
+            shared_catalog.configure(store, args.catalog_dir, args.catalog_repo)
             engine.start()
             try:
                 while not stop:

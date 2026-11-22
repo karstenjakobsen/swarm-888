@@ -30,6 +30,15 @@ def https_url(raw, local=False):
     return raw.rstrip("/")
 
 
+def repository_url(raw):
+    if raw.startswith("git@"):
+        match = re.fullmatch(r"git@([A-Za-z0-9][A-Za-z0-9.-]*):([A-Za-z0-9_][A-Za-z0-9_./-]*)", raw)
+        if not match or any(part in ("", ".", "..") for part in match[2].split("/")):
+            raise ValueError("Use a Git SSH address such as git@github.com:owner/catalog.git")
+        return raw
+    return https_url(raw)
+
+
 def git_ref(raw):
     value = raw or "HEAD"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", value) or ".." in value:
@@ -37,9 +46,9 @@ def git_ref(raw):
     return value
 
 
-def assets(workspace):
+def assets(workspace, roots=ROOTS):
     found = []
-    for root, kind in ROOTS.items():
+    for root, kind in roots.items():
         parent = workspace / root
         if not parent.is_dir() or parent.resolve() != parent:
             continue
@@ -53,8 +62,9 @@ def assets(workspace):
 
 async def git(*args, cwd=None, allow_failure=False):
     env = dict(
-        os.environ, GIT_TERMINAL_PROMPT="0", GIT_ALLOW_PROTOCOL="https", GIT_CONFIG_NOSYSTEM="1"
+        os.environ, GIT_TERMINAL_PROMPT="0", GIT_ALLOW_PROTOCOL="https:ssh", GIT_CONFIG_NOSYSTEM="1"
     )
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     proc = await asyncio.create_subprocess_exec(
         "git",
         "-c",

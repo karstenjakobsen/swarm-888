@@ -6,6 +6,7 @@ document.addEventListener("alpine:init", () => {
     peers: [],
     jobs: [],
     catalog: [],
+    sharedCatalog: null,
     active: [],
     capacity: 0,
     queued: 0,
@@ -90,13 +91,26 @@ document.addEventListener("alpine:init", () => {
     get activeCount() {
       return this.active.length;
     },
+    get sharedRevision() {
+      const { branch, revision } = this.sharedCatalog;
+      return revision
+        ? branch + " · " + revision.slice(0, 12)
+        : branch + " · Awaiting sync";
+    },
+    get showWorkspaceCatalog() {
+      return (
+        !this.sharedCatalog ||
+        (this.projectId !== this.sharedCatalog.id &&
+          (this.project.repo || this.catalog.length > 0))
+      );
+    },
     get slotLabel() {
       return this.activeCount + " of " + this.capacity + " active";
     },
     get viewTitle() {
       return {
         runs: "Run desk",
-        catalog: "Project catalog",
+        catalog: "Catalog",
         workers: "Worker pool",
         peers: "Peer operators",
       }[this.selectedTab];
@@ -199,15 +213,16 @@ document.addEventListener("alpine:init", () => {
     showDetail(id) {
       return this.selectedRun === id && this.detail !== null;
     },
-    async catalogAction(kind) {
+    async catalogAction(kind, projectId = this.projectId) {
       this.busy = true;
       this.error = "";
       try {
         const job = await SwarmAPI.request("runs", {
-          project: this.projectId,
+          project: projectId,
           kind,
           request_id: crypto.randomUUID(),
         });
+        if (projectId !== this.projectId) await this.selectProject(projectId);
         this.selectedRun = job.id;
         this.tab("runs");
         await this.refresh();

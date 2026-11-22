@@ -4,8 +4,11 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from contextlib import suppress
+from pathlib import Path
 
+from .host_tools import BATCH_ACTIONS, SERVICE_ACTIONS
 from .store import BlockedTask
 
 OUTCOME_SCHEMA = {
@@ -39,14 +42,56 @@ async def stop_process(proc):
         await proc.wait()
 
 
+def host_tool_config(catalog_dir=None):
+    # A packaged operator re-enters its zipapp. An editable checkout runs the stdlib adapter directly.
+    archive = getattr(globals().get("__loader__"), "archive", None)
+    if archive:
+        args = ["-I", str(Path(archive).resolve()), "host-tools"]
+    else:
+        args = ["-I", "-B", str(Path(__file__).resolve().with_name("host_tools.py"))]
+    config = (
+        "mcp_servers.swarm_host={command="
+        + json.dumps(sys.executable)
+        + ",args="
+        + json.dumps(args)
+        + (",env={SWARM_NOMAD_CATALOG=" + json.dumps(str(catalog_dir)) + "}" if catalog_dir else "")
+        + ',cwd="/",tool_timeout_sec=1000,default_tools_approval_mode="approve"}'
+    )
+    return ["-c", config]
+
+
 async def run(store, job, executable):
     project = store.project(job["project"])
     cwd = str(store.workspace(project["id"]))
+    instructions = INSTRUCTIONS
+    if store.catalog_dir and cwd == str(store.catalog_dir):
+        instructions = (
+            "Maintain the shared Git catalog in this checkout. Edit reusable content in skills/<name>/SKILL.md, "
+            "connectors/<name>/, and projects/<name>/. The operator handles Git synchronization and publishing. "
+            "Keep credentials, conversations, and private memory out of the repository. Verify requested changes."
+        )
+    elif store.catalog_dir:
+        instructions += (
+            f"\nThe shared catalog is available for reference at {store.catalog_dir}. "
+            "Read relevant SKILL.md files under skills/ and reuse projects/ and connectors/ from there. "
+            "Make local task edits in this workspace. Shared contributions are made in the Shared catalog workspace."
+        )
+    adapter_args = []
+    if project["id"] != "shared-catalog" and not store.query(
+        "SELECT 1 FROM invites WHERE project=? LIMIT 1", (project["id"],)
+    ):
+        adapter_args = host_tool_config(store.catalog_dir)
+        instructions += (
+            "\nUse the swarm_host nomad_service and nomad_batch tools for requested local Nomad operations. "
+            "Inspect nomad_batch(action=environment) before installing to identify WSL or native Linux and the actual Docker runtime. "
+            "Verify tool outcomes. If host enrollment is missing for an installation, report blocked."
+        )
     env = os.environ.copy()
     api_key = env.pop("OPENAI_API_KEY", None)
     proc = await asyncio.create_subprocess_exec(
         executable,
         "app-server",
+        *adapter_args,
         "--listen",
         "stdio://",
         cwd=cwd,
@@ -70,7 +115,7 @@ async def run(store, job, executable):
             "cwd": cwd,
             "sandbox": "workspace-write",
             "approvalPolicy": "never",
-            "developerInstructions": INSTRUCTIONS,
+            "developerInstructions": instructions,
         }
         method = "thread/start"
         if project["thread"]:
@@ -148,6 +193,13 @@ async def run(store, job, executable):
                             "mcpToolCall": "Calling a connector",
                             "webSearch": "Searching the web",
                         }.get(item.get("type"))
+                        if item.get("type") == "mcpToolCall" and item.get("server") == "swarm_host":
+                            args = item.get("arguments")
+                            action = args.get("action") if isinstance(args, dict) else None
+                            if item.get("tool") == "nomad_service" and action in SERVICE_ACTIONS:
+                                label = f"Nomad service · {action}"
+                            elif item.get("tool") == "nomad_batch" and action in BATCH_ACTIONS:
+                                label = f"Nomad batch · {action}"
                         if label:
                             store.event(job["id"], label)
                     elif method == "item/completed" and item.get("type") == "agentMessage":

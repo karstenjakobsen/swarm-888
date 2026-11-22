@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS projects (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, repo TEXT NOT NULL DEFAULT '',
  revision TEXT NOT NULL DEFAULT '', thread TEXT NOT NULL DEFAULT '',
  auto_publish INTEGER NOT NULL DEFAULT 0, repo_ref TEXT NOT NULL DEFAULT 'HEAD');
+CREATE TABLE IF NOT EXISTS shared_catalog(id INTEGER PRIMARY KEY CHECK(id=1),directory TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS peers (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, token TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS invites (
@@ -55,6 +56,7 @@ class Store:
         self.root = Path(directory).expanduser().resolve()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.root / "operator.sqlite3"
+        self.catalog_dir = None
         with self.connection() as db:
             db.executescript(SCHEMA)
             if "repo_ref" not in {row["name"] for row in db.execute("PRAGMA table_info(projects)")}:
@@ -89,6 +91,8 @@ class Store:
     def workspace(self, project):
         # Only database-generated project IDs may become path components.
         self.project(project)
+        if project == "shared-catalog" and self.catalog_dir is not None:
+            return self.catalog_dir
         path = self.root / "workspaces" / project
         path.mkdir(parents=True, exist_ok=True)
         return path
