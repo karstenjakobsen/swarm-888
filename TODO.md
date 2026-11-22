@@ -10,9 +10,19 @@ The V1 checkout began with [PROMPT.md](PROMPT.md). The approved design checkout 
 
 ### 1. Import the approved UI and establish its baseline
 
-- [ ] Record the source SHA, Git status and any local changes included. Copy application source, assets, package metadata, lockfile and notices into `web/`. Exclude Git metadata, dependencies, build output, environment secrets and hosting credentials. Make the import its own commit and record its V1 SHA.
-- [ ] Run the copy with the declared `pnpm@12.3.4` and frozen lockfile. Exercise the Morning brief, task timeline, skill and Inspect pages, composer and placeholder credential flow at desktop and phone widths.
-- [ ] Use `components/operator/store.tsx` as the integration boundary. It already consumes the event stream and posts actions. The Next.js handlers under `app/api/{events,commands,secrets}`, fixture log in `lib/operator/server-log.ts` and replay in `lib/operator/project.ts` form the demo baseline. **Pass when** the copied UI builds and replays its fixture scenario, including its DNS/TLS examples.
+- [x] Imported the clean design checkout at `af0bb8cc4299ddc02c5a609323797fec205ab750` into [web/](web/) in local commit `412278b257f20a6376f0a6d52aa09493294ec864`. All 52 tracked files were copied, with zero local source changes included. The imported subtree and source tree share Git tree ID `df57fc0bc1b0cb7a77788386a0d2f3363aaf4cfa`.
+- [x] Installed with the frozen lockfile and `pnpm@12.3.4` on WSL2. The Next.js production build and separate TypeScript check passed. Playwright exercised the production copy at 1440 × 900 and 390 × 844. At both widths the Morning brief loaded, the composer created a task, its answer and evidence survived reload, and Inspect linked to memory, projects, connectors and skill revisions. The DNS/TLS task displayed the fixture's DNS and certificate observations.
+- [x] Exercised the placeholder credential dialog at both widths. It offered no value-entry field and posted only the fixture request ID. The backup task resumed. After a 14-second simulated disconnect, each run caught up and matched a full replay of 120 events. The demo uses the [operator store](web/components/operator/store.tsx) for UI actions and subscriptions, the [Next.js API handlers](web/app/api) for commands, events and demo credentials, the [fixture log](web/lib/operator/server-log.ts) for ordered events and the [projection](web/lib/operator/project.ts) for replay.
+
+To run the verified production copy locally, use Node.js 24 with Corepack. The build fetches the declared IBM Plex fonts.
+
+```sh
+cd web
+corepack pnpm install --frozen-lockfile
+corepack pnpm run build
+corepack pnpm exec tsc --noEmit
+corepack pnpm run start --hostname 127.0.0.1 --port 3000
+```
 
 ### 2. Carry one owner message through the live system
 
