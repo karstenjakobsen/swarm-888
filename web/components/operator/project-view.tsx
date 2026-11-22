@@ -6,12 +6,12 @@ import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { OutcomeChip } from './outcome-chip'
 import { Meta, projectSource, RowLink, SourceLink } from './inspect-parts'
-import { taskOutcome } from '@/lib/operator/project'
+import { recordById, taskOutcome } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 
 export function ProjectView({ id }: { id: string }) {
   const { state, loaded } = useOperator()
-  const p = state.projects[id]
+  const p = recordById(state.projects, id)
   const mem = p?.memory ? state.memories[p.memory] : undefined
   return (
     <div className="flex min-h-dvh flex-col">

@@ -2,13 +2,13 @@ import hashlib
 import secrets
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .config import Settings
-from .contracts import Event, Kind, Outcome, OwnerMessage, Profile, Snapshot, TaskState
+from .contracts import Event, Kind, Profile, Snapshot, TaskState
 
 SCHEMA = (
     "CREATE TABLE profile(id TEXT PRIMARY KEY, name TEXT, purpose TEXT, instructions TEXT)",
@@ -20,18 +20,8 @@ SCHEMA = (
 )
 
 
-def event_from_row(row: sqlite3.Row) -> Event:
-    kind = row["kind"]
-    key, label = {
-        "received": ("working", "Queued"),
-        "owner_message": ("working", "Queued"),
-        "started": ("working", "Working"),
-        "answered": ("unverified", "Acknowledged"),
-        "completed": ("unverified", "Acknowledged"),
-    }[kind]
-    return Event(
-        **dict(row), outcome=Outcome(key=key, label=label, seq=row["seq"], why=row["text"])
-    )
+class RequestConflict(ValueError):
+    """The client reused an accepted request ID with different content."""
 
 
 class State:
@@ -52,7 +42,7 @@ class State:
                 db.execute("PRAGMA user_version=1")
 
     @contextmanager
-    def transaction(self, *, write=False) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, write: bool = False) -> Generator[sqlite3.Connection, None, None]:
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
@@ -70,22 +60,19 @@ class State:
             (datetime.now(UTC).isoformat(), task, kind, text),
         )
 
-    def submit(self, command: OwnerMessage) -> str:
+    def submit(self, request_id: UUID, text: str) -> str:
         with self.transaction(write=True) as db:
-            request_id = str(command.requestId)
             existing = db.execute(
-                "SELECT id,text FROM tasks WHERE request_id=?", (request_id,)
+                "SELECT id,text FROM tasks WHERE request_id=?", (str(request_id),)
             ).fetchone()
             if existing:
-                if existing["text"] != command.text:
-                    raise ValueError("Request ID already used with different text")
+                if existing["text"] != text:
+                    raise RequestConflict("Request ID already used with different text")
                 return existing["id"]
             task = uuid4().hex
-            db.execute(
-                "INSERT INTO tasks VALUES (?,?,?,'queued')", (task, request_id, command.text)
-            )
-            self.append(db, task, "received", command.text)
-            self.append(db, task, "owner_message", command.text)
+            db.execute("INSERT INTO tasks VALUES (?,?,?,'queued')", (task, str(request_id), text))
+            self.append(db, task, "received", text)
+            self.append(db, task, "owner_message", text)
             return task
 
     def claim(self) -> str | None:
@@ -101,7 +88,7 @@ class State:
                 self.append(db, task, "started", "The worker picked up this message.")
             return task
 
-    def finish(self, task: str, answer: str):
+    def finish(self, task: str, answer: str, summary: str):
         with self.transaction(write=True) as db:
             changed = db.execute(
                 "UPDATE tasks SET checkpoint='completed' WHERE id=? AND checkpoint='running'",
@@ -109,13 +96,14 @@ class State:
             ).rowcount
             if changed:
                 self.append(db, task, "answered", answer)
-                self.append(db, task, "completed", "The worker acknowledged the owner’s message.")
+                self.append(db, task, "completed", summary)
 
     def snapshot(self) -> Snapshot:
         with self.transaction() as db:
             profile = Profile(**dict(db.execute("SELECT * FROM profile").fetchone()))
             events = [
-                event_from_row(row) for row in db.execute("SELECT * FROM events ORDER BY seq")
+                Event.model_validate(dict(row))
+                for row in db.execute("SELECT * FROM events ORDER BY seq")
             ]
             latest = {event.task: event.outcome for event in events}
             tasks = [
@@ -126,10 +114,17 @@ class State:
                 profile=profile, cursor=events[-1].seq if events else 0, tasks=tasks, events=events
             )
 
+    def stream_head(self) -> tuple[str, int]:
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT id, (SELECT COALESCE(MAX(seq),0) FROM events) FROM profile"
+            ).fetchone()
+            return row[0], row[1]
+
     def after(self, cursor: int) -> list[Event]:
         with self.transaction() as db:
             rows = db.execute("SELECT * FROM events WHERE seq>? ORDER BY seq LIMIT 128", (cursor,))
-            return [event_from_row(row) for row in rows]
+            return [Event.model_validate(dict(row)) for row in rows]
 
     def new_session(self, lifetime: int) -> str:
         token = secrets.token_urlsafe(32)

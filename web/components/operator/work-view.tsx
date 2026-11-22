@@ -11,14 +11,14 @@ import { OutcomeChip } from './outcome-chip'
 import { EvidenceTrail } from './evidence-trail'
 import { CredentialButton } from './credential-dialog'
 import { Evidence } from './home-view'
-import { incidentOutcome, isTaskFinished, taskOutcome, type Incident, type Projection, type Task } from '@/lib/operator/project'
+import { recordById, incidentOutcome, isTaskFinished, taskOutcome, type Incident, type Projection, type Task } from '@/lib/operator/project'
 import { clock, dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function WorkView({ id }: { id: string }) {
   const { state, loaded, mode } = useOperator()
-  const task = state.tasks[id]
-  const incident = state.incidents[id]
+  const task = recordById(state.tasks, id)
+  const incident = recordById(state.incidents, id)
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/', label: 'Back to brief' }} />

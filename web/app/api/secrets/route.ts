@@ -12,7 +12,10 @@ export async function POST(req: Request) {
   } catch {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 })
   }
-  const { requestId } = (body ?? {}) as { requestId?: unknown }
+  if (!body || typeof body !== 'object' || !('requestId' in body) || Object.keys(body).length !== 1) {
+    return Response.json({ error: 'Expected only a demo request ID' }, { status: 400 })
+  }
+  const { requestId } = body
   if (typeof requestId !== 'string') {
     return Response.json({ error: 'Bad request' }, { status: 400 })
   }

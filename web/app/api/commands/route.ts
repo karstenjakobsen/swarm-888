@@ -3,19 +3,17 @@ import { getLog, resetLog } from '@/lib/operator/server-log'
 
 export const dynamic = 'force-dynamic'
 
-type Body =
-  | { kind: 'message'; text: string; taskId?: string }
-  | { kind: 'stop'; taskId: string }
-  | { kind: 'decide'; requestId: string; optionId: string }
-  | { kind: 'reset' }
-
 const isStr = (v: unknown, max = 200): v is string => typeof v === 'string' && v.length > 0 && v.length <= max
 
 export async function POST(req: Request) {
   if (operatorMode() !== 'demo') return new Response(null, { status: 503 })
-  let body: Body
+  let body: Record<string, unknown>
   try {
-    body = (await req.json()) as Body
+    const parsed = await req.json()
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return Response.json({ error: 'Expected a command object' }, { status: 400 })
+    }
+    body = parsed
   } catch {
     return Response.json({ error: 'Invalid JSON' }, { status: 400 })
   }
@@ -25,7 +23,7 @@ export async function POST(req: Request) {
       const text = typeof body.text === 'string' ? body.text.trim() : ''
       if (!text || text.length > 2000) return Response.json({ error: 'Message is empty or too long' }, { status: 400 })
       if (body.taskId !== undefined && !isStr(body.taskId)) return Response.json({ error: 'Bad task' }, { status: 400 })
-      log.message(text, body.taskId)
+      if (!log.message(text, body.taskId)) return Response.json({ error: 'Unknown task' }, { status: 404 })
       return Response.json({ ok: true })
     }
     case 'stop':

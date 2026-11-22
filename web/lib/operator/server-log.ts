@@ -10,13 +10,14 @@ import {
   liveScript,
   seedHistory,
 } from './scenario'
-import { replay } from './project'
+import { apply, emptyProjection, recordById } from './project'
 
 type Pending = { due: number; ev: EventDraft }
 
 class OperatorLog {
   readonly epoch = randomUUID()
   private events: OperatorEvent[] = []
+  private state = emptyProjection
   private pending: Pending[] = []
   private started = false
   private counter = 0
@@ -30,6 +31,7 @@ class OperatorLog {
   private append(d: EventDraft): OperatorEvent {
     const e = { ...d, seq: this.events.length + 1, at: d.at ?? new Date().toISOString() } as OperatorEvent
     this.events.push(e)
+    this.state = apply(this.state, e)
     return e
   }
 
@@ -44,13 +46,13 @@ class OperatorLog {
     while (this.pending.length && this.pending[0].due <= now) {
       const p = this.pending.shift()!
       const task = p.ev.ref.task
-      if (task && this.state().tasks[task]?.stopped) continue
+      if (task && this.state.tasks[task]?.stopped) continue
       this.append(p.ev)
     }
   }
 
-  private state() {
-    return replay(this.events)
+  get cursor() {
+    return this.events.length
   }
 
   /** The overnight task keeps running from the moment the owner first connects. */
@@ -62,7 +64,7 @@ class OperatorLog {
 
   readAfter(seq: number) {
     this.flush()
-    return this.events.filter((e) => e.seq > seq)
+    return this.events.slice(seq)
   }
 
   private nextTaskId() {
@@ -72,8 +74,8 @@ class OperatorLog {
 
   message(text: string, taskId?: string) {
     this.flush()
-    const s = this.state()
-    const task = taskId ? s.tasks[taskId] : undefined
+    const task = taskId ? recordById(this.state.tasks, taskId) : undefined
+    if (taskId && !task) return false
 
     if (task) {
       if (task.waiting?.on === 'reply') {
@@ -88,13 +90,13 @@ class OperatorLog {
         } else {
           this.schedule([[1_500, draft('operator.message', { task: task.id }, { text: 'Noted. I will hold the change. Reply "apply" when you want it made.' })]])
         }
-        return
+        return true
       }
       this.append(draft('owner.message', { task: task.id }, { text, intent: 'steer' }))
       this.schedule([
         [1_500, draft('operator.message', { task: task.id }, { text: `Noted for "${task.title}". I will apply that from the next step.` })],
       ])
-      return
+      return true
     }
 
     const id = this.nextTaskId()
@@ -109,7 +111,7 @@ class OperatorLog {
         [4_500, draft('operator.message', { task: id }, { text: 'I have the change ready and have not applied it. Reply "apply" on this task to go ahead.' })],
         [4_600, draft('task.waiting', { task: id }, { on: 'reply' })],
       ])
-      return
+      return true
     }
 
     const answer = this.cannedAnswer(text)
@@ -120,10 +122,11 @@ class OperatorLog {
       [6_000, draft('task.verification', { task: id }, { result: 'passed', method: 'independent', check: 'Re-ran the source command and compared the values quoted in the answer.', command: answer.command, output: answer.output })],
       [6_300, draft('task.completed', { task: id }, { summary: 'Answered.' })],
     ])
+    return true
   }
 
   private cannedAnswer(text: string) {
-    const s = this.state()
+    const s = this.state
     if (/disk|space|storage|var/i.test(text)) {
       const g = s.goals['g-disk']
       return { text: `${g?.observed ?? '/var usage unknown'}. Largest consumer is the ingest-worker log.`, command: 'df -h /var', output: g?.output ?? '' }
@@ -140,7 +143,7 @@ class OperatorLog {
 
   stop(taskId: string) {
     this.flush()
-    const t = this.state().tasks[taskId]
+    const t = recordById(this.state.tasks, taskId)
     if (!t || t.stopped || t.completed) return false
     this.pending = this.pending.filter((p) => p.ev.ref.task !== taskId)
     this.append(draft('task.stopped', { task: taskId }, { by: 'owner' }))
@@ -149,7 +152,7 @@ class OperatorLog {
 
   decide(requestId: string, optionId: string) {
     this.flush()
-    const s = this.state()
+    const s = this.state
     const inc = Object.values(s.incidents).find((i) => i.decision?.requestId === requestId)
     const option = inc?.decision?.options.find((o) => o.id === optionId)
     if (!inc || !option || inc.decision?.decided) return false
@@ -182,27 +185,14 @@ class OperatorLog {
 
   supplyDemoCredential(requestId: string) {
     this.flush()
-    const req = this.state().credentials[requestId]
+    const s = this.state
+    const req = recordById(s.credentials, requestId)
     if (!req || req.supplied) return { ok: false as const, error: 'This request is no longer open.' }
-    return this.supplyCredential(requestId, Object.fromEntries(req.fields.map((f) => [f.name, `demo-placeholder-${f.name}`])))
-  }
-
-  private supplyCredential(requestId: string, fields: Record<string, string>) {
-    this.flush()
-    const s = this.state()
-    const req = s.credentials[requestId]
-    if (!req || req.supplied) return { ok: false as const, error: 'This request is no longer open.' }
-    for (const f of req.fields) {
-      const v = fields[f.name]
-      if (typeof v !== 'string' || !v.trim() || v.length > 512) {
-        return { ok: false as const, error: `${f.label} is required.` }
-      }
-    }
-    this.vault.set(requestId, Object.fromEntries(req.fields.map((f) => [f.name, fields[f.name].trim()])))
-    const fingerprint =
-      'sha256:' +
-      createHash('sha256').update(req.fields.map((f) => fields[f.name]).join('\u0000')).digest('hex').slice(0, 10)
-    this.append(draft('credential.supplied', { task: req.task, request: requestId }, { fingerprint, fields: req.fields.map((f) => f.name) }))
+    const fields = req.fields.map(f => f.name)
+    const values = fields.map(name => `demo-placeholder-${name}`)
+    this.vault.set(requestId, Object.fromEntries(fields.map((name, i) => [name, values[i]])))
+    const fingerprint = 'sha256:' + createHash('sha256').update(values.join('\u0000')).digest('hex').slice(0, 10)
+    this.append(draft('credential.supplied', { task: req.task, request: requestId }, { fingerprint, fields }))
 
     const t = req.task
     const items: [number, EventDraft][] = [

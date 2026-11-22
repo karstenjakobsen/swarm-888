@@ -1,24 +1,11 @@
 import fcntl
-import logging
 import os
 import socket
+import stat
 from contextlib import closing
 
 from .config import Settings
 from .state import State
-
-
-def wake_worker(settings: Settings):
-    # SQLite is the durable queue. Startup and timed reconciliation also find a
-    # committed message when a notification is lost or the worker is offline.
-    with closing(socket.socket(socket.AF_UNIX)) as client:
-        client.settimeout(0.2)
-        try:
-            client.connect(str(settings.socket))
-        except (FileNotFoundError, ConnectionRefusedError, TimeoutError):
-            return
-        except OSError as error:
-            logging.getLogger(__name__).warning("Worker notification failed: %s", error.strerror)
 
 
 class MessageWorker:
@@ -28,7 +15,9 @@ class MessageWorker:
 
     def drain(self):
         while task := self.state.claim():
-            self.state.finish(task, "I received your message.")
+            self.state.finish(
+                task, "I received your message.", "The worker acknowledged the owner’s message."
+            )
 
     def serve(self):
         path = self.settings.socket
@@ -38,7 +27,14 @@ class MessageWorker:
         ):
             # Only the lock holder can replace a stale socket or recover running tasks.
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            path.unlink(missing_ok=True)
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISSOCK(mode):
+                    raise FileExistsError(f"Worker socket path is occupied by a non-socket: {path}")
+                path.unlink()
             server.bind(str(path))
             try:
                 path.chmod(0o600)

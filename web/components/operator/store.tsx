@@ -1,11 +1,11 @@
 'use client'
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { AccessError, operatorSource, post, type Action as OwnerAction } from '@/lib/operator/source'
+import { AccessError, operatorSource } from '@/lib/operator/source'
 import type { OperatorMode } from '@/lib/operator/mode'
 import { OwnerLogin } from './owner-login'
-import type { OperatorEvent } from '@/lib/operator/types'
-import { apply, emptyProjection, replay, verdictDigest, type Projection } from '@/lib/operator/project'
+import type { OperatorEvent, OwnerAction } from '@/lib/operator/types'
+import { apply, emptyProjection, type Projection } from '@/lib/operator/project'
 
 export type Connection = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
@@ -28,7 +28,6 @@ type Ctx = {
   events: OperatorEvent[]
   loaded: boolean
   connection: Connection
-  consistent: boolean
   catchUp: CatchUp | null
   dismissCatchUp: () => void
   simulateDisconnect: (ms?: number) => void
@@ -65,11 +64,14 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     dispatch({ type: 'reset' })
 
     function flushEvents() {
+      clearTimeout(flushTimer)
       if (buffer.length) dispatch({ type: 'batch', events: buffer })
       buffer = []
     }
-    function flush() {
+    function caughtUp() {
       flushEvents()
+      setAccess('ready')
+      setConnection('live')
       if (missed) {
         setCatchUp({ ...missed, toSeq: cursor })
         missed = undefined
@@ -78,7 +80,6 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     function stopStream() {
       stream?.close()
       stream = undefined
-      clearTimeout(flushTimer)
       flushEvents()
     }
     function pause(reason: CatchUp['reason'], ms: number) {
@@ -99,36 +100,27 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
           setName(snapshot.name)
           dispatch({ type: 'batch', events: snapshot.events })
           initialized = true
-        } else if (mode === 'live') {
-          const probe = await fetch('/api/session', { cache: 'no-store', signal: abort.signal })
-          if (!probe.ok) throw new AccessError(probe.status)
+        } else {
+          await source.checkSession(abort.signal)
           if (abort.signal.aborted) return
         }
-        const current = source.subscribe(cursor, epoch, event => {
-          if (stream !== current || event.seq <= cursor) return
-          if (event.seq !== cursor + 1) {
-            current.close()
-            reload()
-            return
-          }
-          cursor = event.seq
-          buffer.push(event)
-          clearTimeout(flushTimer)
-          flushTimer = setTimeout(flush, 0)
+        function reset() {
+          if (stream !== current) return
+          stopStream()
+          reload()
+        }
+        const current = source.subscribe(cursor, epoch, {
+          event(event) {
+            if (stream !== current || event.seq <= cursor) return
+            if (event.seq !== cursor + 1) return reset()
+            cursor = event.seq
+            buffer.push(event)
+            if (buffer.length === 1) flushTimer = setTimeout(flushEvents, 0)
+          },
+          reset,
+          caughtUp() { if (stream === current) caughtUp() },
         })
         stream = current
-        current.addEventListener('hello', e => {
-          if (epoch && JSON.parse(e.data).epoch !== epoch) {
-            current.close()
-            reload()
-          }
-        })
-        current.onopen = () => {
-          if (stream !== current) return
-          setAccess('ready')
-          setConnection('live')
-          flushTimer = setTimeout(flush, 100)
-        }
         current.onerror = () => {
           if (stream === current) pause('network', 1200)
         }
@@ -163,10 +155,6 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
       return { ok: false, error: error instanceof AccessError ? error.message : 'Could not reach the operator.' }
     }
   }, [source])
-  const consistent = useMemo(
-    () => verdictDigest(store.live) === verdictDigest(replay(store.events)),
-    [store.live, store.events],
-  )
   if (mode === 'live' && access === 'login') return <OwnerLogin onLogin={reload} />
   if (mode === 'live' && access !== 'ready') {
     return <main className="mx-auto max-w-md p-6" role="status">
@@ -174,7 +162,7 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     </main>
   }
   const value: Ctx = {
-    mode, name, state: store.live, events: store.events, loaded: store.loaded, connection, consistent, catchUp,
+    mode, name, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
     dismissCatchUp: () => setCatchUp(null),
     simulateDisconnect: (ms = 14_000) => disconnect.current(ms),
     resetScenario: async () => {
@@ -182,9 +170,8 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     },
     send,
     applyDemoCredential: async requestId => {
-      if (mode !== 'demo') return { ok: false }
       try {
-        await post('/api/secrets', { requestId })
+        await source.applyDemoCredential(requestId)
         return { ok: true }
       } catch (error) {
         return { ok: false, error: error instanceof AccessError ? error.message : 'Could not resume the demo task.' }

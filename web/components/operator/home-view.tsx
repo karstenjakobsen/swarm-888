@@ -299,7 +299,7 @@ export function Evidence({ command, output, seq }: { command?: string; output?: 
 function SkillCard({ skill }: { skill: Skill }) {
   const tests = skill.selfTests.filter((t) => t.revision === skill.revision).at(-1)?.tests ?? []
   const passed = tests.filter((t) => t.passed).length
-  const verified = skill.verifications.length > 0
+  const verified = skill.verifications.filter((v) => v.revision === skill.revision).length
   return (
     <Link href={`/skills/${skill.id}`} className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4 hover:bg-secondary/60">
       <div className="flex items-start gap-3">
@@ -313,10 +313,10 @@ function SkillCard({ skill }: { skill: Skill }) {
       <ol className="flex flex-wrap gap-2 text-xs" aria-label="Skill progression">
         <li className="rounded-full bg-secondary px-2.5 py-1">Built {dayClock(skill.createdAt)}</li>
         <li className="rounded-full border border-dashed border-muted-foreground/60 px-2.5 py-1 text-muted-foreground">
-          Passed own tests {passed}/{tests.length}
+          {tests.length ? `Self-tests passed ${passed}/${tests.length}` : 'No self-tests recorded'}
         </li>
         <li className={cn('rounded-full px-2.5 py-1', verified ? 'bg-verified/15 text-verified' : 'bg-secondary text-muted-foreground')}>
-          {verified ? `Verified on later task · ${skill.verifications.length}` : 'Not yet verified on new input'}
+          {verified ? `Verified on later task · ${verified}` : 'Not yet verified on new input'}
         </li>
       </ol>
     </Link>

@@ -5,7 +5,7 @@ import { useDeferredValue, useState } from 'react'
 import { KeyRound, Search } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
-import { current, lastUse, memoryKind, Rev, sourceOf, useLabel } from './inspect-parts'
+import { current, lastUse, memoryKind, Rev, sourceOf } from './inspect-parts'
 import type { Projection } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
@@ -131,7 +131,7 @@ function SkillsTab({ state }: { state: Projection }) {
     <ul className="flex flex-col gap-3" aria-label="Installed skills">
       {skills.map((s) => {
         const u = lastUse(s)
-        const t = u ? useLabel(state, u) : undefined
+        const t = u ? sourceOf(state, u) : undefined
         return (
           <li key={s.id}>
             <Link href={`/skills/${s.id}`} className="flex flex-col gap-2.5 rounded-xl border border-border bg-card p-4 hover:bg-secondary/40">

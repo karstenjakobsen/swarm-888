@@ -591,6 +591,7 @@ export function seedHistory(now: number): EventDraft[] {
       { skill: HTTPS_SKILL },
       {
         task: API_TASK,
+        revision: 'a41f9c2',
         check: 'DNS, certificate, and the API health response read from outside the VPS, without the skill.',
         command: 'dig @1.1.1.1; openssl s_client; curl https://api.kj.dev/healthz',
         output: `api.kj.dev A ${VPS_IP}\nLet's Encrypt E6, valid to Feb 18 2027\n{"service":"kj-api","status":"ok"}`,
@@ -1015,6 +1016,7 @@ export function seedHistory(now: number): EventDraft[] {
       { skill: SKILL_ID },
       {
         task: r,
+        revision: 'c51d8e0',
         check: 'Ground truth taken directly from systemd and the journal, without the skill.',
         command: 'systemctl --failed; journalctl --since -24h -p err',
         output: 'apt-daily-upgrade.service failed\nphp8.3-fpm.service failed (02:13), active since',

@@ -6,13 +6,13 @@ import { MessageSquareText } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { memoryKind, sourceOf } from './inspect-parts'
-import type { Memory, Projection } from '@/lib/operator/project'
+import { recordById, type Memory, type Projection } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function MemoryView({ id }: { id: string }) {
   const { state, loaded } = useOperator()
-  const memory = state.memories[id]
+  const memory = recordById(state.memories, id)
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/inspect', label: 'Back to memory' }} />

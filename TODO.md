@@ -14,7 +14,7 @@ The V1 checkout began with [PROMPT.md](PROMPT.md). The approved design checkout 
 - [x] Installed with the frozen lockfile and `pnpm@12.3.4` on WSL2. The Next.js production build and separate TypeScript check passed. Playwright exercised the production copy at 1440 × 900 and 390 × 844. At both widths the Morning brief loaded, the composer created a task, its answer and evidence survived reload, and Inspect linked to memory, projects, connectors and skill revisions. The DNS/TLS task displayed the fixture's DNS and certificate observations.
 - [x] Exercised the placeholder credential dialog at both widths. It offered no value-entry field and posted only the fixture request ID. The backup task resumed. After a 14-second simulated disconnect, each run caught up and matched a full replay of 120 events. The demo uses the [operator store](web/components/operator/store.tsx) for UI actions and subscriptions, the [Next.js API handlers](web/app/api) for commands, events and demo credentials, the [fixture log](web/lib/operator/server-log.ts) for ordered events and the [projection](web/lib/operator/project.ts) for replay.
 
-To run the verified production copy locally, use Node.js 24 with Corepack. The build fetches the declared IBM Plex fonts.
+To run the verified production copy locally, use Node.js 24 with Corepack. The locked frontend packages supply the IBM Plex fonts.
 
 ```sh
 cd web
@@ -26,7 +26,7 @@ corepack pnpm run start --hostname 127.0.0.1 --port 3000
 
 ### 2. Carry one owner message through the live system
 
-- [x] Added the root Makefile, locked uv environment, Ruff, pytest, generated API type check, Next.js build and separate TypeScript check. `make check-fresh` runs `make setup` then `make check` in a new local clone. Font files are installed with the frontend lockfile.
+- [x] Added the root Makefile, locked uv environment, Ruff, pytest, generated API type check and a Next.js production build that enforces TypeScript checks. `make check-fresh` runs `make setup` then `make check` in a new local clone.
 - [x] FastAPI journals an authenticated owner message and queued task together in migrated SQLite, then wakes the worker over a mode-0600 Unix socket. The worker records pickup, acknowledgment and completion. The operator profile, owner instructions, messages, checkpoints, session hashes and ordered events survive process restarts in the external state directory.
 - [x] The approved screens use a snapshot, command and event interface selected on the server. In live mode Caddy serves one loopback origin and routes API requests directly to FastAPI. Each task displays the outcome computed in Python.
 - [x] The API test covers a message committed between snapshot and subscription, then resumes with `Last-Event-ID` and compares every event and the terminal outcome with a fresh snapshot. It also checks a lost worker notification, a running checkpoint and idempotent submission.

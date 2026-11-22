@@ -1,10 +1,14 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, computed_field
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 Kind = Literal["received", "owner_message", "started", "answered", "completed"]
+
+
+class ApiError(BaseModel):
+    detail: str
 
 
 class OwnerLogin(BaseModel):
@@ -16,11 +20,11 @@ class OwnerMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["message"]
     text: Text
-    requestId: UUID
+    request_id: UUID = Field(alias="requestId")
 
 
 class Receipt(BaseModel):
-    taskId: str
+    task_id: str = Field(serialization_alias="taskId")
 
 
 class Profile(BaseModel):
@@ -43,7 +47,15 @@ class Event(BaseModel):
     task: str
     kind: Kind
     text: str
-    outcome: Outcome
+
+    @computed_field
+    @property
+    def outcome(self) -> Outcome:
+        if self.kind in ("received", "owner_message"):
+            return Outcome(key="working", label="Queued", seq=self.seq, why=self.text)
+        if self.kind == "started":
+            return Outcome(key="working", label="Working", seq=self.seq, why=self.text)
+        return Outcome(key="unverified", label="Acknowledged", seq=self.seq, why=self.text)
 
 
 class TaskState(BaseModel):

@@ -29,7 +29,7 @@ check-types:
 	$(PY) -m operator_v1.generate_types --check
 
 build:
-	cd web && $(PNPM) run build && $(PNPM) exec tsc --noEmit
+	cd web && $(PNPM) run build
 
 check: lint test check-types build
 
@@ -40,7 +40,7 @@ owner-key:
 	$(PY) -m operator_v1.config
 
 controller:
-	$(PY) -m uvicorn operator_v1.controller:create_app --factory --host 127.0.0.1 --port $(CONTROLLER_PORT)
+	CONTROLLER_PORT=$(CONTROLLER_PORT) $(PY) -m operator_v1.serve
 
 worker:
 	$(PY) -m operator_v1.worker

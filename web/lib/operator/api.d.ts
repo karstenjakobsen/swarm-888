@@ -77,6 +77,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ApiError */
+        ApiError: {
+            /** Detail */
+            detail: string;
+        };
         /** Event */
         Event: {
             /** Seq */
@@ -92,12 +97,7 @@ export interface components {
             kind: "received" | "owner_message" | "started" | "answered" | "completed";
             /** Text */
             text: string;
-            outcome: components["schemas"]["Outcome"];
-        };
-        /** HTTPValidationError */
-        HTTPValidationError: {
-            /** Detail */
-            detail?: components["schemas"]["ValidationError"][];
+            readonly outcome: components["schemas"]["Outcome"];
         };
         /** Outcome */
         Outcome: {
@@ -173,19 +173,6 @@ export interface components {
             checkpoint: "queued" | "running" | "completed";
             outcome: components["schemas"]["Outcome"];
         };
-        /** ValidationError */
-        ValidationError: {
-            /** Location */
-            loc: (string | number)[];
-            /** Message */
-            msg: string;
-            /** Error Type */
-            type: string;
-            /** Input */
-            input?: unknown;
-            /** Context */
-            ctx?: Record<string, never>;
-        };
     };
     responses: never;
     parameters: never;
@@ -211,6 +198,24 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
         };
     };
     login_api_session_post: {
@@ -233,13 +238,31 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Validation Error */
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };
@@ -260,6 +283,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Snapshot"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };
@@ -286,13 +327,40 @@ export interface operations {
                     "application/json": components["schemas"]["Receipt"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflicting request ID */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };
@@ -301,6 +369,7 @@ export interface operations {
         parameters: {
             query?: {
                 after?: number;
+                epoch?: string | null;
             };
             header?: {
                 "Last-Event-ID"?: number | null;
@@ -316,16 +385,25 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/event-stream": unknown;
+                    "text/event-stream": string;
                 };
             };
-            /** @description Validation Error */
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
         };

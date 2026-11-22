@@ -5,13 +5,13 @@ import { KeyRound, Lock } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { connectorSource, Meta, SourceLink } from './inspect-parts'
-import type { Connector, Projection } from '@/lib/operator/project'
+import { recordById, type Connector, type Projection } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function ConnectorView({ id }: { id: string }) {
   const { state, loaded } = useOperator()
-  const connector = state.connectors[id]
+  const connector = recordById(state.connectors, id)
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/inspect?tab=connectors', label: 'Back to connectors' }} />

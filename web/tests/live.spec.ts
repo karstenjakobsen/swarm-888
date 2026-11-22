@@ -45,8 +45,7 @@ test('private owner message survives a controller outage and replays through Cad
     children.push(child)
     return child
   }
-  const controller = () => run(python, ['-m', 'uvicorn', 'operator_v1.controller:create_app', '--factory',
-    '--host', '127.0.0.1', '--port', controllerPort, '--timeout-graceful-shutdown', '1'])
+  const controller = () => run(python, ['-m', 'operator_v1.serve'])
   try {
     expect((await once(run(python, ['-m', 'operator_v1.config']), 'exit'))[0]).toBe(0)
     const firstController = controller()
@@ -69,6 +68,17 @@ test('private owner message survives a controller outage and replays through Cad
     expect((await page.request.post(origin + '/api/commands', {data:command, headers:{...headers, Origin:'http://elsewhere.invalid'}})).status()).toBe(403)
     expect((await (await page.request.get(origin + '/api/snapshot')).json()).cursor).toBe(0)
 
+    // Deliver the command, lose its receipt, and retry from a freshly loaded UI.
+    await page.route('**/api/commands', async route => {
+      const accepted = await route.fetch()
+      expect(accepted.status()).toBe(202)
+      await accepted.dispose()
+      await route.abort('failed')
+    }, { times: 1 })
+    await page.getByRole('textbox').fill(command.text)
+    await page.getByRole('button', {name:'Send'}).click()
+    await expect(page.getByText('Could not reach the operator.', {exact:true})).toBeVisible()
+    await page.reload()
     await page.getByRole('textbox').fill(command.text)
     await page.getByRole('button', {name:'Send'}).click()
     const queued = page.getByRole('link', {name: new RegExp(command.text + ' Queued')})
@@ -78,9 +88,14 @@ test('private owner message survives a controller outage and replays through Cad
     const taskId = new URL(page.url()).pathname.split('/').at(-1)
     expect(taskId).toMatch(/^[a-f0-9]{32}$/)
 
+    const snapshot = await (await page.request.get(origin + '/api/snapshot')).json()
+    expect(snapshot.cursor).toBe(2)
+    expect(snapshot.tasks).toHaveLength(1)
+
     const streams: string[] = []
     page.on('request', r => { if (r.resourceType() === 'eventsource') streams.push(r.url()) })
     await stop(firstController)
+    expect(firstController.signalCode).not.toBe('SIGKILL')
     await expect(page.getByRole('status')).toContainText('Operator unavailable')
     const reopened = await context.newPage()
     await reopened.goto(page.url())
@@ -104,6 +119,10 @@ test('private owner message survives a controller outage and replays through Cad
     expect(await timeline.innerText()).toBe(text)
     await page.getByRole('link', {name:'Back to brief'}).click()
     await expect(page.locator('a[href="/work/' + taskId + '"]')).toContainText('Acknowledged')
+    // Acknowledged submissions release their retry ID.
+    await page.getByRole('textbox').fill(command.text)
+    await page.getByRole('button', {name:'Send'}).click()
+    await expect(page.getByRole('region', {name:'What happened'}).getByRole('link').filter({hasText:command.text})).toHaveCount(2)
   } finally {
     await context.close()
     for (const child of children.reverse()) await stop(child)
@@ -121,6 +140,11 @@ test('fixture mode replays its own history and uses a placeholder credential', a
     await expect.poll(async () => {
       try { return (await request.get(origin + '/api/snapshot')).status() } catch { return 0 }
     }).toBe(200)
+    const stale = await request.get(origin + '/api/events?after=999999')
+    expect(await stale.text()).toContain('event: reset')
+    expect((await request.post(origin + '/api/commands', {headers:{'Content-Type':'application/json'}, data:'null'})).status()).toBe(400)
+    expect((await request.post(origin + '/api/commands', {data:{kind:'message', text:'follow up', taskId:'missing-task'}})).status()).toBe(404)
+    expect((await request.post(origin + '/api/secrets', {data:{requestId:'r-s3', extra:true}})).status()).toBe(400)
     await page.goto(origin)
     await expect(page.getByRole('heading',{name:'Morning brief'})).toBeVisible()
     await expect(page.getByText('Demo',{exact:true})).toBeVisible()
@@ -135,8 +159,22 @@ test('fixture mode replays its own history and uses a placeholder credential', a
     const reply = await sent
     expect(reply.status()).toBe(200)
     expect(reply.request().postDataJSON()).toEqual({requestId:'r-s3'})
+    // Reset in another client. This tab must release its original fixture log.
+    await expect(page.getByRole('button', {name:'Review credential request'})).toHaveCount(0)
+    expect((await request.post(origin + '/api/commands', {data:{kind:'reset'}})).status()).toBe(200)
+    await expect(page.getByRole('button', {name:'Review credential request'}).first()).toBeVisible()
     await page.goto(origin + '/work/t-api')
     await expect(page.getByRole('heading',{name:'Serve api.kj.dev over HTTPS from this VPS'})).toBeVisible()
+    const skillUrl = origin + '/skills/s-https-subdomain?rev='
+    await page.goto(skillUrl + 'a41f9c2')
+    const verified = page.getByRole('heading', {name:'Verified on a later task'})
+    await expect(verified).toBeVisible()
+    await page.goto(skillUrl + '3e07b18')
+    await expect(page.getByRole('heading', {name:'Procedure at 3e07b18'})).toBeVisible()
+    await expect(verified).toHaveCount(0)
+    await page.goto(skillUrl + 'unknown')
+    await expect(page.getByText(/is not in this skill.s history/)).toBeVisible()
+    await expect(page.getByRole('region', {name:'Procedure'})).toHaveCount(0)
   } finally {
     await page.close()
     await stop(server)

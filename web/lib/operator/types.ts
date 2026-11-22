@@ -1,5 +1,11 @@
 import type { components } from './api'
 
+export type OwnerAction =
+  | { kind: 'message'; text: string; taskId?: string }
+  | { kind: 'stop'; taskId: string }
+  | { kind: 'decide'; requestId: string; optionId: string }
+  | { kind: 'reset' }
+
 export type Ref = {
   task?: string
   incident?: string
@@ -151,6 +157,7 @@ type DataMap = {
   'connector.used': { task: string; tool: string; summary: string; record?: DnsRecordChange }
   'skill.verified': {
     task: string
+    revision?: string
     check: string
     command: string
     output: string

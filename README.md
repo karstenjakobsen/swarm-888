@@ -25,6 +25,8 @@ Start each foreground service in its own terminal using the same configuration.
 
 Open [the private UI](http://127.0.0.1:8080), sign in with the key from the file, and submit a message. Open the task from the brief to see its timeline. An offline worker leaves the task queued. Starting it picks up the saved message. A controller outage shows an unavailable state and the browser reconnects when the controller returns.
 
+If a submission loses its receipt, retry the same text in the same tab. The browser keeps the request ID across reloads when session storage is available. The controller returns the original task for a matching retry. Once the receipt arrives, sending the same text again starts a new task.
+
 Caddy sends `/api/*` directly to FastAPI. The session cookie is HTTP-only and scoped to `/api`. Browser writes require the configured origin and a custom request header. If you change the gateway port, set both `OPERATOR_PORT` and `OPERATOR_ORIGIN` (for example, `http://127.0.0.1:8081`). `WEB_PORT` and `CONTROLLER_PORT` configure the upstream ports.
 
 ## Demo and verification

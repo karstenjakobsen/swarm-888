@@ -6,6 +6,7 @@ import type {
   CredentialField,
   DecisionOption,
   DnsRecordChange,
+  EventData,
   OperatorEvent,
   SelfTest,
   VerificationMethod,
@@ -230,15 +231,7 @@ export type Skill = {
   selfTests: SkillSelfTest[]
   activations: { revision: string; seq: number; at: string; task?: string; reason: string }[]
   uses: SkillUse[]
-  verifications: {
-    seq: number
-    at: string
-    task: string
-    check: string
-    command: string
-    output: string
-    matched: string
-  }[]
+  verifications: (EventData<'skill.verified'> & { seq: number; at: string })[]
 }
 
 export type Goal = {
@@ -280,6 +273,10 @@ export type Projection = {
   goals: Record<string, Goal>
   goalOrder: string[]
   messages: Message[]
+}
+
+export function recordById<T>(records: Record<string, T>, id: string): T | undefined {
+  return Object.hasOwn(records, id) ? records[id] : undefined
 }
 
 export const emptyProjection: Projection = {
@@ -923,10 +920,15 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
       }))
     }
     case 'skill.verified':
-      return withSkill(p, e.ref.skill, (s) => ({
-        ...s,
-        verifications: [...s.verifications, { ...base, ...e.data }],
-      }))
+      return withSkill(p, e.ref.skill, (s) => {
+        let revision = e.data.revision
+        if (!revision) {
+          // Older events identified only the task. Attribute them when its runs agree.
+          const revisions = new Set(s.uses.filter(u => u.task === e.data.task).map(u => u.revision))
+          if (revisions.size === 1) revision = revisions.values().next().value
+        }
+        return { ...s, verifications: [...s.verifications, { ...base, ...e.data, revision }] }
+      })
     default:
       return p
   }

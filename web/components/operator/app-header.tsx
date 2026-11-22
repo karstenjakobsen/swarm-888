@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { ArrowLeft, Check, MoreHorizontal, RotateCcw, ScanSearch, Unplug, X } from 'lucide-react'
 import { useOperator, type Connection } from './store'
-import { replay, taskOutcome, incidentOutcome } from '@/lib/operator/project'
+import { replay, taskOutcome, incidentOutcome, verdictDigest } from '@/lib/operator/project'
 import { clock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
@@ -17,8 +17,9 @@ const connLabel: Record<Connection, string> = {
 }
 
 export function AppHeader({ back }: { back?: { href: string; label: string } }) {
-  const { mode, name, connection, state, consistent, simulateDisconnect, resetScenario } = useOperator()
+  const { mode, name, connection, state, events, simulateDisconnect, resetScenario } = useOperator()
   const [open, setOpen] = useState(false)
+  const consistent = open && verdictDigest(state) === verdictDigest(replay(events))
   const inspecting = usePathname().startsWith('/inspect')
   const menuRef = useRef<HTMLDivElement>(null)
 

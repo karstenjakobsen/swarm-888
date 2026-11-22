@@ -5,14 +5,14 @@ import { Check, X } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { Evidence } from './home-view'
-import { Rev, skillSource, SourceLink, useLabel } from './inspect-parts'
+import { Rev, skillSource, SourceLink, sourceOf } from './inspect-parts'
 import { dayClock } from '@/lib/operator/format'
-import type { Projection, Skill } from '@/lib/operator/project'
+import { recordById, type Projection, type Skill } from '@/lib/operator/project'
 import { cn } from '@/lib/utils'
 
 export function SkillView({ id, rev }: { id: string; rev?: string }) {
   const { state, loaded } = useOperator()
-  const skill = state.skills[id]
+  const skill = recordById(state.skills, id)
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/inspect?tab=skills', label: 'Back to skills' }} />
@@ -35,8 +35,8 @@ function testsAt(skill: Skill, revision: string) {
 
 function Ladder({ skill, state, rev }: { skill: Skill; state: Projection; rev?: string }) {
   const requested = rev ? skill.revisions.find((r) => r.revision === rev) : undefined
-  const shown =
-    requested ?? skill.revisions.find((r) => r.revision === skill.revision) ?? skill.revisions[skill.revisions.length - 1]
+  const shown = rev ? requested : skill.revisions.find((r) => r.revision === skill.revision) ?? skill.revisions.at(-1)
+  const uses = rev ? skill.uses.filter((u) => u.revision === shown?.revision) : skill.uses
   const shownTests = shown ? testsAt(skill, shown.revision) : undefined
   const shownActivation = shown ? skill.activations.filter((a) => a.revision === shown.revision).at(-1) : undefined
   const origin = skill.fromTask ? state.tasks[skill.fromTask] : undefined
@@ -228,9 +228,9 @@ function Ladder({ skill, state, rev }: { skill: Skill; state: Projection; rev?: 
           </Rung>
         ) : null}
 
-        {skill.uses.map((u) => {
-          const where = useLabel(state, u)
-          const v = u.task ? skill.verifications.find((x) => x.task === u.task) : undefined
+        {uses.map((u) => {
+          const where = sourceOf(state, u)
+          const v = skill.verifications.find((x) => x.task === u.task && x.revision === u.revision)
           const inc = u.incident ? state.incidents[u.incident] : undefined
           return (
             <Rung

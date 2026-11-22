@@ -1,6 +1,6 @@
 import Link from 'next/link'
 import { ChevronRight, FileCode2 } from 'lucide-react'
-import type { Connector, Memory, MemoryVersion, Project, Projection, Skill } from '@/lib/operator/project'
+import type { Connector, Memory, Project, Projection, Skill } from '@/lib/operator/project'
 import type { CatalogSource } from '@/lib/operator/types'
 import { cn } from '@/lib/utils'
 
@@ -60,14 +60,7 @@ export function projectSource(p: Project) {
   return [`name: ${p.name}`, `hostname: ${p.hostname}`, `repo: ${p.repo}`, `upstream: ${p.upstream}`, `description: ${p.description}`].join('\n')
 }
 
-export function useLabel(state: Projection, u: { task?: string; incident?: string }) {
-  if (u.task && state.tasks[u.task]) return { href: `/work/${u.task}`, label: state.tasks[u.task].title }
-  if (u.incident && state.incidents[u.incident])
-    return { href: `/work/${u.incident}`, label: `Incident: ${state.incidents[u.incident].symptom}` }
-  return undefined
-}
-
-export function sourceOf(state: Projection, src: MemoryVersion['source']) {
+export function sourceOf(state: Projection, src: { task?: string; incident?: string }) {
   if (src.task && state.tasks[src.task]) return { href: `/work/${src.task}`, label: state.tasks[src.task].title }
   if (src.incident && state.incidents[src.incident])
     return { href: `/work/${src.incident}`, label: `Incident: ${state.incidents[src.incident].symptom}` }

@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ import pytest
 
 from operator_v1.config import Settings
 from operator_v1.state import State
+from operator_v1.worker import MessageWorker
 
 
 def message():
@@ -56,6 +58,17 @@ def test_private_api_and_idempotent_submission(tmp_path):
             assert client.post("/api/commands", json=body, headers=denied).status_code == 403
         before = client.get("/api/snapshot").json()
         assert before["cursor"] == 0 and before["tasks"] == []
+        for field in (
+            {"params": {"after": "9223372036854775808"}},
+            {"headers": {"Last-Event-ID": "-1"}},
+        ):
+            invalid = client.get("/api/events", **field)
+            assert invalid.status_code == 422
+            assert invalid.json() == {"detail": "Invalid request"}
+        for query in ({"after": 1}, {"epoch": "different-state"}):
+            reset = client.get("/api/events", params=query)
+            assert reset.status_code == 200
+            assert "event: reset" in reset.text
         # Observe the actual controller notification at the private worker endpoint.
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(str(settings.socket))
@@ -64,10 +77,6 @@ def test_private_api_and_idempotent_submission(tmp_path):
             created = client.post("/api/commands", json=body, headers=headers(settings))
             listener.accept()[0].close()
         assert created.status_code == 202
-        assert (
-            client.post("/api/commands", json=body, headers=headers(settings)).json()
-            == created.json()
-        )
         assert (
             client.post(
                 "/api/commands",
@@ -173,11 +182,19 @@ def test_worker_restart_and_stream_resume(tmp_path):
                 "GET", "/api/events?after=0", headers={"Last-Event-ID": str(first["seq"])}
             ) as resumed:
                 replay = [first]
+                event_type = None
                 for line in resumed.iter_lines():
-                    if line.startswith("data: "):
-                        replay.append(json.loads(line[6:]))
-                        if replay[-1]["kind"] == "completed":
+                    if line.startswith("event: "):
+                        event_type = line[7:]
+                    elif line.startswith("data: "):
+                        data = json.loads(line[6:])
+                        if event_type == "caught-up":
+                            assert data == replay[-1]["seq"]
                             break
+                        assert event_type == "op"
+                        replay.append(data)
+                else:
+                    pytest.fail("Stream ended before catch-up")
             snapshot = client.get("/api/snapshot").json()
             assert replay == snapshot["events"]
             assert snapshot["cursor"] == replay[-1]["seq"]
@@ -192,3 +209,36 @@ def test_worker_restart_and_stream_resume(tmp_path):
                 {"id": task, "checkpoint": "completed", "outcome": replay[-1]["outcome"]}
             ]
             assert replay[-1]["outcome"]["label"] == "Acknowledged"
+
+
+def test_concurrent_message_retry(tmp_path):
+    settings = Settings(tmp_path)
+    settings.create_owner_key()
+    body = message()
+    with controller(settings) as client:
+        login(client, settings)
+
+        def submit(_):
+            response = client.post("/api/commands", json=body, headers=headers(settings))
+            assert response.status_code == 202
+            return response.json()["taskId"]
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            assert len(set(pool.map(submit, range(4)))) == 1
+        assert client.get("/api/snapshot").json()["cursor"] == 2
+
+
+def test_private_state_files(tmp_path):
+    settings = Settings(tmp_path)
+    settings.create_owner_key()
+    original = settings.read_owner_key()
+    with pytest.raises(FileExistsError):
+        settings.create_owner_key()
+    assert settings.read_owner_key() == original
+    settings.owner_key.chmod(0o644)
+    with pytest.raises(PermissionError):
+        settings.read_owner_key()
+    settings.socket.write_text("existing file")
+    with pytest.raises(FileExistsError):
+        MessageWorker(settings).serve()
+    assert settings.socket.read_text() == "existing file"

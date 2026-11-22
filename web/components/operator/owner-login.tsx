@@ -1,8 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AccessError, post } from '@/lib/operator/source'
-import type { components } from '@/lib/operator/api'
+import { AccessError, signIn } from '@/lib/operator/source'
 
 export function OwnerLogin({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState('')
@@ -14,10 +13,9 @@ export function OwnerLogin({ onLogin }: { onLogin: () => void }) {
         e.preventDefault()
         const form = e.currentTarget
         const key = String(new FormData(form).get('key') ?? '')
-        const login: components['schemas']['OwnerLogin'] = { key }
         setBusy(true)
         try {
-          await post('/api/session', login)
+          await signIn(key)
           form.reset()
           onLogin()
         } catch (err) {
