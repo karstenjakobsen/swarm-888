@@ -1,0 +1,13 @@
+{
+  "name": "Operator · vps-fra-1",
+  "short_name": "Operator",
+  "description": "What your VPS operator did, whether the server is as you asked, and what needs you.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#171b22",
+  "theme_color": "#171b22",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/apple-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

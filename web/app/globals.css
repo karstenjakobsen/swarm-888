@@ -1,0 +1,138 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-verified: var(--verified);
+  --color-verified-foreground: var(--verified-foreground);
+  --color-attention: var(--attention);
+  --color-attention-foreground: var(--attention-foreground);
+  --color-well: var(--well);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+:root {
+  color-scheme: light;
+  --background: oklch(0.965 0.004 250);
+  --foreground: oklch(0.22 0.018 255);
+  --card: oklch(0.995 0.001 250);
+  --card-foreground: oklch(0.22 0.018 255);
+  --popover: oklch(0.995 0.001 250);
+  --popover-foreground: oklch(0.22 0.018 255);
+  --primary: oklch(0.22 0.018 255);
+  --primary-foreground: oklch(0.98 0.003 250);
+  --secondary: oklch(0.93 0.006 250);
+  --secondary-foreground: oklch(0.22 0.018 255);
+  --muted: oklch(0.93 0.006 250);
+  --muted-foreground: oklch(0.46 0.015 255);
+  --accent: oklch(0.93 0.006 250);
+  --accent-foreground: oklch(0.22 0.018 255);
+  --destructive: oklch(0.55 0.19 27);
+  --border: oklch(0.88 0.008 250);
+  --input: oklch(0.86 0.008 250);
+  --ring: oklch(0.6 0.14 70);
+  --attention: oklch(0.62 0.15 62);
+  --attention-foreground: oklch(0.99 0.01 80);
+  --verified: oklch(0.5 0.09 182);
+  --verified-foreground: oklch(0.99 0.01 180);
+  --well: oklch(0.94 0.005 250);
+  --radius: 0.75rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.185 0.014 255);
+    --foreground: oklch(0.94 0.006 250);
+    --card: oklch(0.225 0.016 255);
+    --card-foreground: oklch(0.94 0.006 250);
+    --popover: oklch(0.25 0.017 255);
+    --popover-foreground: oklch(0.94 0.006 250);
+    --primary: oklch(0.94 0.006 250);
+    --primary-foreground: oklch(0.2 0.015 255);
+    --secondary: oklch(0.28 0.017 255);
+    --secondary-foreground: oklch(0.94 0.006 250);
+    --muted: oklch(0.28 0.017 255);
+    --muted-foreground: oklch(0.72 0.014 250);
+    --accent: oklch(0.28 0.017 255);
+    --accent-foreground: oklch(0.94 0.006 250);
+    --destructive: oklch(0.7 0.17 27);
+    --border: oklch(0.32 0.016 255);
+    --input: oklch(0.36 0.017 255);
+    --ring: oklch(0.8 0.14 75);
+    --attention: oklch(0.82 0.14 75);
+    --attention-foreground: oklch(0.22 0.04 70);
+    --verified: oklch(0.8 0.1 180);
+    --verified-foreground: oklch(0.2 0.03 190);
+    --well: oklch(0.16 0.013 255);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/60;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+  }
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  details > summary {
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
+  dialog::backdrop {
+    background: oklch(0.1 0.01 255 / 0.6);
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation: none;
+  }
+}
