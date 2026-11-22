@@ -27,7 +27,7 @@ export class Store extends EventEmitter {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL;');
     this.db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS fts_capability_check USING fts5(content); DROP TABLE fts_capability_check;');
     this.db.exec('CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)');
-    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql','009-conversation-deletion.sql','010-packages.sql','011-repository-leases.sql','012-package-finalizations.sql','013-repository-push.sql','014-connection-packages.sql'].entries()){
+    for(const [index,file] of ['001-core.sql','002-projects.sql','003-managed-source.sql','004-connector-checks.sql','005-runtime-receipts.sql','006-worker-platform.sql','007-credentials.sql','008-project-runtime.sql','009-conversation-deletion.sql','010-packages.sql','011-repository-leases.sql','012-package-finalizations.sql','013-repository-push.sql','014-connection-packages.sql','015-repository-main.sql'].entries()){
       if(this.db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(index+1))continue;
       this.transaction(()=>{this.db.exec(readFileSync(new URL(`../migrations/${file}`,import.meta.url),'utf8'));this.db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(index+1,new Date().toISOString());});
     }

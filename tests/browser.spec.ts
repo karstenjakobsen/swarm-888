@@ -60,12 +60,16 @@ test('Repositories creates three package kinds in one local checkout and reimpor
   await login(page);
   await page.getByRole('button', { name: 'Repositories', exact: true }).click();
   await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: /branch/i })).toHaveCount(0);
   await page.getByLabel('Repository name', { exact: true }).fill(name);
   await expect(page.getByRole('button', { name: 'Register repository', exact: true })).toBeDisabled();
   await page.getByLabel('Remote URL', { exact: true }).fill(`https://example.invalid/operator-${suffix}.git`);
   await page.getByRole('button', { name: 'Register repository', exact: true }).click();
   await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
-  await expect(page.getByText('Commits are saved locally before remote publishing.')).toBeVisible();
+  await expect(page.getByText('Commits are saved locally, then published to main.')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Git sync', exact: true }).getByLabel('Automatically publish to main', { exact: true })).toBeChecked();
+  const registered = (await (await page.request.get('/api/repositories')).json()).find((value: { name: string }) => value.name === name);
+  expect(registered).toMatchObject({ syncMode: 'main', branch: 'main', sourceBranch: 'main', push: { enabled: true, autoPush: true, pushUrl: registered.remoteUrl, branch: 'main' } });
   for (const kind of ['project', 'connector', 'skill']) {
     await page.getByRole('button', { name: 'Create package', exact: true }).click();
     const editor = page.locator('.repository-package-editor');
@@ -96,10 +100,10 @@ test('Repositories creates three package kinds in one local checkout and reimpor
   expect(pageErrors).toEqual([]);
 });
 
-test('Repository publishing saves owner settings and preserves local packages across a failed push and retry', async ({ page }) => {
+test('Repository main publishing saves its automatic setting and preserves packages across a failed push and retry', async ({ page }) => {
   const id = randomUUID(), packageId = randomUUID(), commit = 'd'.repeat(40);
-  const repository = { id, name: 'Published packages', remoteUrl: 'https://example.invalid/owner/packages.git', directory: '/tmp/published-packages', branch: 'operator/packages', sourceBranch: 'main', status: 'ready', head: commit };
-  let push: RepositoryPushStatus = { enabled: false, autoPush: false, pushUrl: null, branch: null, state: 'disabled', commit: null, pushedCommit: null, error: null, updatedAt: null };
+  const repository = { id, name: 'Published packages', remoteUrl: 'https://example.invalid/owner/packages.git', directory: '/tmp/published-packages', syncMode: 'main', branch: 'main', sourceBranch: 'main', status: 'ready', head: commit };
+  let push: RepositoryPushStatus = { enabled: true, autoPush: true, pushUrl: repository.remoteUrl, branch: 'main', state: 'idle', commit: null, pushedCommit: null, error: null, updatedAt: null };
   let pushCalls = 0;
   const settings: Record<string, unknown>[] = [];
   await page.route('**/api/repositories', route => route.fulfill({ json: [{ ...repository, push }] }));
@@ -108,7 +112,7 @@ test('Repository publishing saves owner settings and preserves local packages ac
     expect(route.request().method()).toBe('PATCH');
     expect(route.request().headers()['x-csrf-token']).toBeTruthy();
     const input = route.request().postDataJSON(); settings.push(input);
-    push = { ...push, ...input, pushUrl: input.pushUrl === null ? repository.remoteUrl : input.pushUrl, state: input.enabled ? 'idle' : 'disabled' };
+    push = { ...push, ...input, state: input.enabled ? 'idle' : 'disabled' };
     return route.fulfill({ json: { ...repository, push } });
   });
   await page.route(`**/api/repositories/${id}/push`, route => {
@@ -125,71 +129,87 @@ test('Repository publishing saves owner settings and preserves local packages ac
   });
   await login(page);
   await page.getByRole('button', { name: 'Repositories', exact: true }).click();
-  const publishing = page.getByRole('region', { name: 'Remote publishing', exact: true });
-  await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeDisabled();
-  await publishing.getByLabel('Allow remote pushes', { exact: true }).check();
-  await publishing.getByLabel('Push remote URL', { exact: true }).fill('git@example.invalid:owner/packages.git');
-  await publishing.getByLabel('Push branch', { exact: true }).fill('release/published');
-  await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeDisabled();
-  await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(settings[0]).toEqual({ enabled: true, autoPush: false, pushUrl: 'git@example.invalid:owner/packages.git', branch: 'release/published' });
-  await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeEnabled();
+  const publishing = page.getByRole('region', { name: 'Git sync', exact: true });
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).toBeChecked();
+  await expect(publishing.getByRole('textbox')).toHaveCount(0);
+  await expect(publishing.getByRole('button', { name: 'Publish now', exact: true })).toBeEnabled();
+  expect(settings).toEqual([]);
   await expect(publishing.getByLabel(/password|token|private key/i)).toHaveCount(0);
-  await publishing.getByRole('button', { name: 'Push now', exact: true }).click();
-  await expect(publishing.getByText('Push failed', { exact: true })).toBeVisible();
+  await publishing.getByRole('button', { name: 'Publish now', exact: true }).click();
+  await expect(publishing.getByText('Publishing failed', { exact: true })).toBeVisible();
   await expect(publishing).toContainText('SSH authentication failed. Local commits remain saved.');
   await expect(page.locator('.repository-package')).toContainText('Saved local package');
   await expect(page.locator('.repository-package')).toContainText('v1.0.0');
-  await publishing.getByRole('button', { name: 'Retry push', exact: true }).click();
-  await expect(publishing.getByText('Pushed', { exact: true })).toBeVisible();
-  await expect(publishing.locator(`code[title="${commit}"]`)).toHaveCount(2);
+  await publishing.getByRole('button', { name: 'Retry publishing', exact: true }).click();
+  await expect(publishing.getByText('Published', { exact: true })).toBeVisible();
   expect(pushCalls).toBe(2);
-  await publishing.getByLabel('Push remote URL', { exact: true }).fill('');
-  await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(settings[1]).toEqual({ enabled: true, autoPush: false, pushUrl: null, branch: 'release/published' });
-  await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue(repository.remoteUrl);
-  await publishing.getByLabel('Allow remote pushes', { exact: true }).uncheck();
-  await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(settings[2]).toEqual({ enabled: false, autoPush: false, pushUrl: repository.remoteUrl, branch: 'release/published' });
-  await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeDisabled();
+  await publishing.getByLabel('Automatically publish to main', { exact: true }).click();
+  await expect.poll(() => settings).toEqual([{ enabled: false, autoPush: false }]);
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).not.toBeChecked();
+  await expect(publishing.getByRole('button', { name: 'Publish now', exact: true })).toBeDisabled();
+  await publishing.getByLabel('Automatically publish to main', { exact: true }).click();
+  await expect.poll(() => settings).toEqual([{ enabled: false, autoPush: false }, { enabled: true, autoPush: true }]);
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).toBeChecked();
+  await expect(publishing.getByRole('button', { name: 'Publish now', exact: true })).toBeEnabled();
 });
 
-test('Repository automatic publishing keeps the existing Git push URL when no override is supplied', async ({ page }) => {
+test('Repository legacy settings stay unchanged until explicitly converted to main', async ({ page }) => {
   const id = randomUUID(), commit = 'e'.repeat(40);
-  const repository = { id, name: 'Automatic packages', remoteUrl: 'https://example.invalid/owner/packages.git', directory: '/tmp/automatic-packages', branch: 'operator/work', sourceBranch: 'main', status: 'ready', head: commit };
-  let push: RepositoryPushStatus = { enabled: false, autoPush: false, pushUrl: null, branch: null, state: 'disabled', commit: null, pushedCommit: null, error: null, updatedAt: null };
-  let submitted: unknown;
+  let repository = { id, name: 'Legacy packages', remoteUrl: 'https://example.invalid/owner/packages.git', directory: '/tmp/legacy-packages', syncMode: 'legacy', branch: 'operator/work', sourceBranch: 'release/stable', status: 'ready', head: commit };
+  let push: RepositoryPushStatus = { enabled: true, autoPush: false, pushUrl: 'git@example.invalid:owner/legacy.git', branch: 'release/published', state: 'idle', commit: null, pushedCommit: null, error: null, updatedAt: null };
+  let conversions = 0, settingsChanges = 0;
   await page.route('**/api/repositories', route => route.fulfill({ json: [{ ...repository, push }] }));
   await page.route('**/api/packages', route => route.fulfill({ json: [] }));
   await page.route(`**/api/repositories/${id}/push-settings`, route => {
-    submitted = route.request().postDataJSON();
-    push = { ...push, enabled: true, autoPush: true, pushUrl: 'git@example.invalid:owner/packages.git', branch: 'operator/work', state: 'pending', commit };
+    settingsChanges++;
+    return route.fulfill({ status: 409, json: { error: 'Legacy publishing must not change implicitly.' } });
+  });
+  await page.route(`**/api/repositories/${id}/use-main`, route => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().headers()['x-csrf-token']).toBeTruthy();
+    expect(route.request().postDataJSON()).toEqual({});
+    conversions++;
+    if (conversions === 1) return route.fulfill({ status: 409, json: { error: 'Remote main has diverged. Your existing repository settings were preserved.' } });
+    repository = { ...repository, syncMode: 'main', branch: 'main', sourceBranch: 'main' };
+    push = { ...push, enabled: true, autoPush: true, pushUrl: repository.remoteUrl, branch: 'main', state: 'idle' };
     return route.fulfill({ json: { ...repository, push } });
   });
   await page.route(`**/api/repositories/${id}`, route => {
-    push = { ...push, state: 'pushed', pushedCommit: commit };
     return route.fulfill({ json: { ...repository, push } });
   });
   await login(page);
   await page.getByRole('button', { name: 'Repositories', exact: true }).click();
-  const publishing = page.getByRole('region', { name: 'Remote publishing', exact: true });
-  await expect(publishing.getByLabel('Automatically push package commits', { exact: true })).toBeDisabled();
-  await publishing.getByLabel('Allow remote pushes', { exact: true }).check();
-  await publishing.getByLabel('Automatically push package commits', { exact: true }).check();
-  await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue('');
-  await expect(publishing.getByLabel('Push branch', { exact: true })).toHaveValue('operator/work');
-  await publishing.getByRole('button', { name: 'Save publishing settings', exact: true }).click();
-  expect(submitted).toEqual({ enabled: true, autoPush: true, pushUrl: null, branch: 'operator/work' });
-  await expect(publishing.getByText('Pushed', { exact: true })).toBeVisible();
-  await expect(publishing.getByLabel('Push remote URL', { exact: true })).toHaveValue('git@example.invalid:owner/packages.git');
-  await expect(publishing.getByLabel('Automatically push package commits', { exact: true })).toBeChecked();
-  await expect(publishing.getByRole('button', { name: 'Push now', exact: true })).toBeEnabled();
+  const publishing = page.getByRole('region', { name: 'Git sync', exact: true });
+  await expect(publishing.getByRole('button', { name: 'Use main', exact: true })).toBeVisible();
+  await expect(publishing.getByRole('textbox')).toHaveCount(0);
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).toHaveCount(0);
+  const details = page.locator('details').filter({ has: page.locator('summary').filter({ hasText: /^Repository details$/ }) });
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').click();
+  await expect(details).toContainText('operator/work');
+  await expect(details).toContainText('release/stable');
+  expect(conversions).toBe(0);
+  expect(settingsChanges).toBe(0);
+  expect(push).toMatchObject({ pushUrl: 'git@example.invalid:owner/legacy.git', branch: 'release/published', autoPush: false });
+  await publishing.getByRole('button', { name: 'Use main', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Remote main has diverged.');
+  await expect(publishing.getByRole('button', { name: 'Use main', exact: true })).toBeEnabled();
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).toHaveCount(0);
+  await expect(details).toContainText('operator/work');
+  expect(push).toMatchObject({ pushUrl: 'git@example.invalid:owner/legacy.git', branch: 'release/published', autoPush: false });
+  await publishing.getByRole('button', { name: 'Use main', exact: true }).click();
+  await expect(publishing.getByLabel('Automatically publish to main', { exact: true })).toBeChecked();
+  await expect(publishing.getByRole('button', { name: 'Use main', exact: true })).toHaveCount(0);
+  expect(conversions).toBe(2);
+  expect(settingsChanges).toBe(0);
+  expect(push).toMatchObject({ enabled: true, autoPush: true, pushUrl: repository.remoteUrl, branch: 'main' });
+  await expect(page.getByRole('heading', { name: repository.name, exact: true })).toBeVisible();
 });
 
 test('Repository publishing polls one request at a time and cancels it when changing repositories', async ({ page }) => {
   await page.clock.install();
   const id = randomUUID(), otherId = randomUUID(), commit = 'a'.repeat(40);
-  const repository = { id, name: 'Pending repository', remoteUrl: 'https://example.invalid/pending.git', directory: '/tmp/pending', branch: 'operator/work', sourceBranch: 'main', status: 'ready', head: commit };
+  const repository = { id, name: 'Pending repository', remoteUrl: 'https://example.invalid/pending.git', directory: '/tmp/pending', syncMode: 'main', branch: 'main', sourceBranch: 'main', status: 'ready', head: commit };
   const push: RepositoryPushStatus = { enabled: true, autoPush: false, pushUrl: repository.remoteUrl, branch: repository.branch, state: 'pending', commit, pushedCommit: null, error: null, updatedAt: null };
   const other = { ...repository, id: otherId, name: 'Other repository', directory: '/tmp/other' };
   let polls = 0, release = () => {};
@@ -215,7 +235,7 @@ test('Repository publishing polls one request at a time and cancels it when chan
 
 test('Repository import preview isolates invalid manifests and preserves last imported package after a failed update', async ({ page }) => {
   const id = randomUUID(), packageId = randomUUID(), commit = 'a'.repeat(40);
-  const repository = { id, name: 'Review packages', remoteUrl: 'https://example.invalid/review.git', directory: '/tmp/review', branch: 'operator/work', sourceBranch: 'release/stable', status: 'ready' };
+  const repository = { id, name: 'Review packages', remoteUrl: 'https://example.invalid/review.git', directory: '/tmp/review', syncMode: 'main', branch: 'main', sourceBranch: 'main', status: 'ready' };
   const manifest = { schemaVersion: 1, id: packageId, kind: 'project', name: 'Known project', version: '1.0.0' };
   const item = { id: packageId, repositoryId: id, path: 'apps/known', kind: 'project', name: manifest.name, version: manifest.version, manifest, lastImportedCommit: commit, lastImportedAt: '2026-11-18T10:00:00Z' };
   let submitted: unknown, importCalls = 0, remoteFetches = 0;
@@ -224,10 +244,10 @@ test('Repository import preview isolates invalid manifests and preserves last im
   await page.route(`**/api/repositories/${id}/discover`, route => {
     if (route.request().method() === 'POST') {
       remoteFetches++;
-      expect(route.request().postDataJSON()).toEqual({ refresh: true, branch: 'feature/review' });
+      expect(route.request().postDataJSON()).toEqual({ refresh: true });
       expect(route.request().headers()['x-csrf-token']).toBeTruthy();
     }
-    return route.fulfill({ json: { repository, commit, ...(route.request().method() === 'POST' ? { remoteBranch: 'feature/review' } : {}), packages: [{ path: item.path, manifest, imported: true }, { path: 'apps/broken', error: 'schemaVersion must be 1' }], errors: [] } });
+    return route.fulfill({ json: { repository, commit, ...(route.request().method() === 'POST' ? { remoteBranch: 'main' } : {}), packages: [{ path: item.path, manifest, imported: true }, { path: 'apps/broken', error: 'schemaVersion must be 1' }], errors: [] } });
   });
   await page.route(`**/api/repositories/${id}/import`, route => { submitted = route.request().postDataJSON(); importCalls++; return route.fulfill({ json: importCalls === 1 ? { packages: [], imports: [{ id: 'failed-current', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit, error: 'Duplicate canonical package ID in another repository.' }] } : { packages: [item], imports: [], registrations: [{ packageId, notice: 'Source imported; runtime registration needs attention: worker unavailable.' }] } }); });
   await page.route(`**/api/repositories/${id}/imports`, route => route.fulfill({ json: [{ id: 'failed', packageId, path: item.path, status: 'failed', packageVersion: '2.0.0', schemaVersion: 1, commit: 'b'.repeat(40), error: 'Duplicate canonical package ID in another repository.', createdAt: '2026-11-18T11:00:00Z' }, { id: 'success', packageId, path: item.path, status: 'imported', packageVersion: '1.0.0', schemaVersion: 1, commit, createdAt: item.lastImportedAt }] }));
@@ -236,11 +256,10 @@ test('Repository import preview isolates invalid manifests and preserves last im
   await page.getByRole('button', { name: 'Discover packages', exact: true }).click();
   await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
   expect(remoteFetches).toBe(0);
-  await expect(page.getByLabel('Remote branch to fetch', { exact: true })).toHaveValue('release/stable');
-  await page.getByLabel('Remote branch to fetch', { exact: true }).fill('feature/review');
+  await expect(page.getByRole('textbox', { name: /branch/i })).toHaveCount(0);
   await page.getByRole('button', { name: 'Fetch & preview remote' }).click();
   await expect(page.getByLabel('Import apps/broken', { exact: true })).toBeDisabled();
-  await expect(page.getByLabel('Discovered packages')).toContainText('feature/review');
+  await expect(page.getByLabel('Discovered packages')).toContainText('main');
   expect(remoteFetches).toBe(1);
   await expect(page.getByText('schemaVersion must be 1', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Import selected (1)', exact: true }).click();
@@ -259,7 +278,7 @@ test('Repository import preview isolates invalid manifests and preserves last im
 
 test('Repositories clones a selected remote and adopts connector metadata without running it', async ({ page }) => {
   const id = randomUUID(), packageId = randomUUID(), commit = 'c'.repeat(40);
-  const repository = { id, name: 'Cloned tools', remoteUrl: 'git@example.invalid:owner/tools.git', directory: '/tmp/cloned-tools', branch: 'operator/work', sourceBranch: 'master', status: 'ready' };
+  const repository = { id, name: 'Cloned tools', remoteUrl: 'git@example.invalid:owner/tools.git', directory: '/tmp/cloned-tools', syncMode: 'main', branch: 'main', sourceBranch: 'main', status: 'ready' };
   let registered = false, adopted = false, cloneInput: unknown, adoptInput: unknown;
   await page.route('**/api/repositories', route => {
     if (route.request().method() === 'POST') { cloneInput = route.request().postDataJSON(); registered = true; return route.fulfill({ json: repository }); }
@@ -274,6 +293,7 @@ test('Repositories clones a selected remote and adopts connector metadata withou
   await page.getByLabel('Repository name', { exact: true }).fill(repository.name);
   await page.getByLabel('Remote URL', { exact: true }).fill(repository.remoteUrl);
   await page.getByLabel('Start with', { exact: true }).selectOption('clone');
+  await expect(page.getByRole('textbox', { name: /branch/i })).toHaveCount(0);
   await page.getByRole('button', { name: 'Register repository', exact: true }).click();
   await expect(page.getByRole('heading', { name: repository.name, exact: true })).toBeVisible();
   expect(cloneInput).toEqual({ name: repository.name, remoteUrl: repository.remoteUrl, mode: 'clone' });

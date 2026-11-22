@@ -33,12 +33,15 @@ export class RepositoryPublisher {
     return {enabled:config?.enabled===1,autoPush:config?.autoPush===1,pushUrl:config?.pushUrl??null,branch:config?.branch??null,state:!config?.enabled?'disabled':latest?.state as RepositoryPushStatus['state']??'idle',commit:latest?.commitSha??null,pushedCommit:pushed?.commitSha??null,error:latest?.error??null,updatedAt:latest?.updatedAt??config?.updatedAt??null};
   }
   async configure(id:string,raw:unknown):Promise<void>{
-    const input=repositoryPushSettingsInput.parse(raw);
-    await this.host.exclusive(id,()=>{
-      const repository=this.host.repository(id),previous=this.settings(id);
+    await this.host.exclusive(id,()=>this.configureLocked(this.host.repository(id),raw));
+  }
+  /** The caller holds the repository lock; usable inside registration/conversion transactions. */
+  configureLocked(repository:RepositoryRecord,raw:unknown):void {
+      const input=repositoryPushSettingsInput.parse(raw),id=repository.id,previous=this.settings(id);
+      if(repository.syncMode==='main'&&(input.branch!==undefined&&input.branch!=='main'||input.pushUrl!=null&&input.pushUrl!==repository.remoteUrl))throw fail('This repository uses its origin URL and main branch for publishing.');
       const configuredUrl=input.pushUrl===undefined?previous?.pushUrl:input.pushUrl;
-      const pushUrl=remoteUrlSchema.parse(configuredUrl??this.host.git(repository.directory,['remote','get-url','--push','origin']).trim());
-      const branch=input.branch??previous?.branch??repository.branch;
+      const pushUrl=remoteUrlSchema.parse(repository.syncMode==='main'?repository.remoteUrl:configuredUrl??this.host.git(repository.directory,['remote','get-url','--push','origin']).trim());
+      const branch=repository.syncMode==='main'?'main':input.branch??previous?.branch??repository.branch;
       this.host.assertSafe({pushUrl,branch});
       const unchanged=previous&&previous.enabled===Number(input.enabled)&&previous.autoPush===Number(input.autoPush)&&previous.pushUrl===pushUrl&&previous.branch===branch;
       if(!unchanged)transaction(this.db,()=>{
@@ -46,7 +49,6 @@ export class RepositoryPublisher {
         this.db.prepare('INSERT INTO repository_push_settings(repositoryId,enabled,autoPush,pushUrl,branch,revision,updatedAt) VALUES(?,?,?,?,?,?,?) ON CONFLICT(repositoryId) DO UPDATE SET enabled=excluded.enabled,autoPush=excluded.autoPush,pushUrl=excluded.pushUrl,branch=excluded.branch,revision=excluded.revision,updatedAt=excluded.updatedAt').run(id,Number(input.enabled),Number(input.autoPush),pushUrl,branch,(previous?.revision??0)+1,new Date().toISOString());
       });
       if(input.enabled&&input.autoPush)this.enqueue(id,this.host.git(repository.directory,['rev-parse','HEAD']).trim(),false);
-    });
   }
   enqueue(id:string,commit:string,retry=false):void {
     const config=this.settings(id);if(!config?.enabled)throw fail('Remote pushing is disabled for this repository. Enable it in Repositories first.');
@@ -98,13 +100,17 @@ export class RepositoryPublisher {
         const published=async()=>{
           const value=await this.host.remoteGit(repository.directory,['ls-remote','--heads','--',config.pushUrl,ref]);
           const tip=value.trim().split(/\s+/)[0]??'';
-          if(tip===item.commitSha)return true;
+          if(tip===item.commitSha){
+            if(repository.syncMode==='main')this.host.git(repository.directory,['update-ref','refs/remotes/origin/main',tip]);
+            return true;
+          }
           if(!/^[0-9a-f]{40,64}$/.test(tip))return false;
           if(this.host.git(repository.directory,['rev-parse','--verify',`${tip}^{commit}`],true).trim()!==tip){
             // Read missing history without changing the authoring checkout, its
             // tracking branches, or a pending remote-import preview in FETCH_HEAD.
             await this.host.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','--no-write-fetch-head','--',config.pushUrl,ref]);
           }
+          if(repository.syncMode==='main')this.host.git(repository.directory,['update-ref','refs/remotes/origin/main',tip]);
           return this.host.git(repository.directory,['merge-base',item.commitSha,tip],true).trim()===item.commitSha;
         };
         if(!await published()){

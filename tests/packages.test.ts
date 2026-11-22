@@ -8,11 +8,11 @@ import { join } from 'node:path';
 import { Store } from '../src/store.ts';
 import type { Config } from '../src/config.ts';
 import { PackageService } from '../src/packages/service.ts';
-import { packageManifestSchema, packagePath, remoteUrlSchema } from '../src/packages/schemas.ts';
+import { packageManifestSchema, packagePath, remoteUrlSchema, repositoryInput } from '../src/packages/schemas.ts';
 
 function git(directory:string,...args:string[]):string{return execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@example.test','-C',directory,...args],{encoding:'utf8',env:{...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'},stdio:['ignore','pipe','pipe']});}
 function manifest(kind:'project'|'skill'|'connector'='project',name='fixture'){return {schemaVersion:1 as const,id:randomUUID(),kind,name,version:'0.1.0',description:'Fixture package',...(kind==='connector'?{mcp:{transport:'stdio' as const,command:'node',args:['server.mjs']}}:{})};}
-function fixture(){const root=mkdtempSync(join(tmpdir(),'operator-packages-')),stateDir=join(root,'state'),projectsDir=join(root,'projects');mkdirSync(stateDir);mkdirSync(projectsDir);const store=new Store(stateDir),config={stateDir,projectsDir,controllerUid:process.getuid!(),adminPassword:'private-admin-fixture-password',ipcToken:'a'.repeat(64)} as Config;const service=new PackageService(config,store.db);return {root,stateDir,projectsDir,store,service,config,close(){store.close();rmSync(root,{recursive:true,force:true});}};}
+function fixture(){const root=mkdtempSync(join(tmpdir(),'operator-packages-')),stateDir=join(root,'state'),projectsDir=join(root,'projects');mkdirSync(stateDir);mkdirSync(projectsDir);const store=new Store(stateDir),config={stateDir,projectsDir,controllerUid:process.getuid!(),adminPassword:'private-admin-fixture-password',ipcToken:'a'.repeat(64)} as Config;const service=new PackageService(config,store.db);return {root,stateDir,projectsDir,store,service,config,legacyRepository(remoteUrl:string,sourceBranch:string){const id=randomUUID(),directory=join(projectsDir,'repositories',id),now=new Date().toISOString();mkdirSync(join(projectsDir,'repositories'),{recursive:true});git(root,'clone','--quiet','--branch',sourceBranch,remoteUrl,directory);git(directory,'checkout','-qb','operator/work');service.store.saveRepository({id,name:'Legacy repository',remoteUrl,directory,branch:'operator/work',sourceBranch,syncMode:'legacy',status:'ready',error:null,createdAt:now,updatedAt:now});return service.repository(id);},close(){store.close();rmSync(root,{recursive:true,force:true});}};}
 
 test('package v1 schema requires canonical IDs, release versions and kind-specific portable fields',()=>{
   const value=manifest();assert(packageManifestSchema.safeParse(value).success);
@@ -20,10 +20,11 @@ test('package v1 schema requires canonical IDs, release versions and kind-specif
   for(const value of ['../escape','/tmp/package','a/../package','.git/module','a\\b'])assert.throws(()=>packagePath(value));assert.equal(packagePath('.'),'.');
   for(const value of ['https://token@example.test/repo','https://example.test/repo?token=secret','-upload-pack=evil','ssh://git:token@example.test/repo'])assert.equal(remoteUrlSchema.safeParse(value).success,false);
   assert(remoteUrlSchema.safeParse('git@example.test:owner/repo.git').success);
+  assert.equal(repositoryInput.safeParse({name:'Other branch',remoteUrl:'https://example.test/repo.git',branch:'release/stable'}).success,false);
   assert.equal(packageManifestSchema.safeParse({...value,run:{command:'node',args:Array.from({length:5},()=> 'x'.repeat(16_000))}}).success,false);
 });
 
-test('local repositories require remote URLs, support several package kinds, and never push',async()=>{
+test('local repositories require remote URLs, use main, and queue automatic publication without contacting the remote',async()=>{
   const f=fixture();try{
     await assert.rejects(f.service.register({name:'Missing remote',mode:'create'}));
     const repository=await f.service.register({name:'Monorepo',remoteUrl:'https://example.invalid/packages.git',mode:'create'});assert.equal(repository.directory,join(f.projectsDir,'repositories',repository.id));assert.equal(git(repository.directory,'remote','get-url','origin').trim(),repository.remoteUrl);assert.equal(repository.localOnly,true);assert.equal(repository.hasRemoteBranch,false);assert.equal(repository.dirty,false);assert.match(repository.head!,/^[0-9a-f]{40}$/);
@@ -35,12 +36,12 @@ test('local repositories require remote URLs, support several package kinds, and
 
 test('cloned discovery is metadata only and imports are idempotent with exact version history',async()=>{
   const f=fixture();try{
-    const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','master');const packageManifest=manifest();mkdirSync(join(origin,'app'));writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify({...packageManifest,build:{command:'touch',args:[join(f.root,'must-not-execute')]}}));writeFileSync(join(origin,'app/logo.png'),Buffer.from([0,255,1,254]));git(origin,'add','.');git(origin,'commit','-qm','Initial packages');
+    const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','main');const packageManifest=manifest();mkdirSync(join(origin,'app'));writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify({...packageManifest,build:{command:'touch',args:[join(f.root,'must-not-execute')]}}));writeFileSync(join(origin,'app/logo.png'),Buffer.from([0,255,1,254]));git(origin,'add','.');git(origin,'commit','-qm','Initial packages');
     let controllerResponded=false;
     setImmediate(()=>{controllerResponded=true;});
     const repository=await f.service.register({name:'Imported',remoteUrl:origin,mode:'clone'});
     assert.equal(controllerResponded,true,'Other controller events must run while Git clones the remote');
-    const preview=await f.service.discover(repository.id);assert.equal(repository.sourceBranch,'master');assert.equal(repository.hasRemoteBranch,true);assert.equal(repository.localOnly,false);assert.equal(preview.packages[0].manifest!.id,packageManifest.id);assert.equal(f.service.listPackages().length,0);
+    const preview=await f.service.discover(repository.id);assert.equal(repository.sourceBranch,'main');assert.equal(repository.hasRemoteBranch,true);assert.equal(repository.localOnly,false);assert.equal(preview.packages[0].manifest!.id,packageManifest.id);assert.equal(f.service.listPackages().length,0);
     const first=await f.service.importPackages(repository.id,{paths:['app'],expectedCommit:preview.commit});assert.equal(first.packages.length,1);assert.equal(first.imports[0].status,'imported');assert.equal(first.imports[0].packageVersion,'0.1.0');assert.equal(existsSync(join(f.root,'must-not-execute')),false);assert.equal(f.service.readTextFiles(packageManifest.id)['logo.png'],undefined);
     const count=f.service.imports(packageManifest.id).length,second=await f.service.importPackages(repository.id,{paths:['app']});assert.equal(second.packages[0].lastImportedCommit,first.packages[0].lastImportedCommit);assert.equal(f.service.imports(packageManifest.id).length,count);
     writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify({...packageManifest,version:'0.2.0'}));git(origin,'add','.');git(origin,'commit','-qm','New version');const updated=await f.service.discover(repository.id,{refresh:true});assert.equal(f.service.package(packageManifest.id).version,'0.1.0');
@@ -48,12 +49,12 @@ test('cloned discovery is metadata only and imports are idempotent with exact ve
   }finally{f.close();}
 });
 
-test('repositories without main clone a selected branch and preview another remote branch before importing it',async()=>{
+test('legacy repositories retain selected source branches and preview other remote branches',async()=>{
   const f=fixture();try{
     const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','release/stable');const packageManifest=manifest();mkdirSync(join(origin,'app'));writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify(packageManifest));git(origin,'add','.');git(origin,'commit','-qm','Stable package');const stable=git(origin,'rev-parse','HEAD').trim();
     git(origin,'tag','preview/packages');git(origin,'checkout','-qb','preview/packages');writeFileSync(join(origin,'app/operator-package.json'),JSON.stringify({...packageManifest,version:'0.2.0'}));git(origin,'add','.');git(origin,'commit','-qm','Preview package');const previewCommit=git(origin,'rev-parse','HEAD').trim();
     assert.equal(git(origin,'branch','--list','main').trim(),'');
-    const repository=await f.service.register({name:'Release packages',remoteUrl:origin,mode:'clone',branch:'release/stable'});assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,stable);
+    const repository=f.legacyRepository(origin,'release/stable');assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,stable);
     const initial=await f.service.discover(repository.id,{refresh:true});assert.equal(initial.commit,stable);assert.equal(initial.remoteBranch,'release/stable');
     const preview=await f.service.discover(repository.id,{refresh:true,branch:'preview/packages'});assert.equal(preview.commit,previewCommit);assert.equal(preview.remoteBranch,'preview/packages');assert.equal(preview.packages[0].manifest!.version,'0.2.0');
     assert.equal(git(repository.directory,'rev-parse','HEAD').trim(),stable);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD').trim(),repository.branch);assert.equal(f.service.repository(repository.id).sourceBranch,'release/stable');assert.equal(git(repository.directory,'status','--porcelain').trim(),'');
@@ -61,10 +62,10 @@ test('repositories without main clone a selected branch and preview another remo
   }finally{f.close();}
 });
 
-test('missing, invalid and tag-only preview branches preserve local source and the registered branch',async()=>{
+test('legacy missing, invalid and tag-only preview branches preserve local source and the registered branch',async()=>{
   const f=fixture();try{
     const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','release/stable');writeFileSync(join(origin,'README.md'),'Stable repository\n');git(origin,'add','.');git(origin,'commit','-qm','Stable source');git(origin,'tag','tag-only');
-    const repository=await f.service.register({name:'Safe branch previews',remoteUrl:origin,mode:'clone'}),head=git(repository.directory,'rev-parse','HEAD').trim();writeFileSync(join(repository.directory,'owner-note.txt'),'Keep unfinished owner work\n');
+    const repository=f.legacyRepository(origin,'release/stable'),head=git(repository.directory,'rev-parse','HEAD').trim();writeFileSync(join(repository.directory,'owner-note.txt'),'Keep unfinished owner work\n');
     for(const branch of ['missing','tag-only','release/../escape','release//empty','release/.hidden','release/topic.lock/next','-upload-pack=evil'])await assert.rejects(f.service.discover(repository.id,{refresh:true,branch}));
     await assert.rejects(f.service.discover(repository.id,{branch:'release/stable'}),/when fetching/);
     assert.equal(readFileSync(join(repository.directory,'owner-note.txt'),'utf8'),'Keep unfinished owner work\n');assert.equal(git(repository.directory,'rev-parse','HEAD').trim(),head);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD').trim(),repository.branch);assert.equal(f.service.repository(repository.id).sourceBranch,'release/stable');assert.equal(git(repository.directory,'diff','--cached').trim(),'');
@@ -291,5 +292,15 @@ test('bounded editor reads reject known credentials in imported text without ech
     assert.equal(result.imports[0].status,'imported');
     assert.throws(()=>f.service.readTextFiles(app.id),(error:Error)=>/credentials/.test(error.message)&&!error.message.includes(f.config.adminPassword));
     assert.equal(f.service.manifest(app.id).id,app.id);
+  }finally{f.close();}
+});
+
+test('new clones use main even when the remote default points to another branch',async()=>{
+  const f=fixture();try{
+    const origin=join(f.root,'origin');mkdirSync(origin);git(origin,'init','-q','-b','main');writeFileSync(join(origin,'README.md'),'Main source\n');git(origin,'add','.');git(origin,'commit','-qm','Main revision');const main=git(origin,'rev-parse','HEAD').trim();
+    git(origin,'checkout','-qb','release/stable');writeFileSync(join(origin,'README.md'),'Release source\n');git(origin,'add','.');git(origin,'commit','-qm','Release revision');
+    const repository=await f.service.register({name:'Main clone',remoteUrl:origin,mode:'clone'});
+    assert.equal(repository.branch,'main');assert.equal(repository.sourceBranch,'main');assert.equal(repository.syncMode,'main');assert.equal(repository.head,main);assert.equal(readFileSync(join(repository.directory,'README.md'),'utf8'),'Main source\n');
+    await assert.rejects(f.service.register({name:'Other branch',remoteUrl:origin,mode:'clone',branch:'release/stable'}));
   }finally{f.close();}
 });

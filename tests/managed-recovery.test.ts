@@ -47,7 +47,7 @@ test('terminal source finalization survives controller restart and commits befor
   try{
     const project=await f.ctl.managed.createProject({name:'Recover generated edits',managed:true,repositoryId:f.repository.id,packagePath:'apps/recovery'}),conversation=f.ctl.projects.newConversation(project.id);
     const run=f.ctl.store.enqueue(conversation.id,'Write a source module','recovery-first');f.ctl.store.transition(run.id,'running');
-    const original=await f.ctl.managed.readSource(project.id),count=git(original.source.workspacePath,'rev-list','--count','operator/work');
+    const original=await f.ctl.managed.readSource(project.id),count=git(original.source.workspacePath,'rev-list','--count',f.repository.branch);
     writeFileSync(join(original.source.workspacePath,'recovered.mjs'),'export const recovered = true;\n');
     const terminal={cursor:1,runId:run.id,type:'completed',data:{status:'completed'},createdAt:new Date().toISOString()};
     // Simulate durable completion/ACK followed by a crash before Queue.receive can finalize Git.
@@ -60,10 +60,10 @@ test('terminal source finalization survives controller restart and commits befor
     f.worker.beforeSubmit=()=>assert.equal((f.ctl.store.db.prepare('SELECT state FROM source_finalizations WHERE runId=?').get(run.id) as {state:string}).state,'committed');
     await f.ctl.queue.tick();await f.ctl.queue.drainSource();await f.ctl.queue.tick();assert.equal(f.worker.submissions.length,1);assert.equal(f.worker.submissions[0].runId,next.id);
     const saved=await f.ctl.managed.readSource(project.id);assert.equal(saved.files['recovered.mjs'],'export const recovered = true;\n');assert.equal(saved.source.dirty,false);assert.notEqual(saved.source.commit,original.source.commit);
-    assert.equal(Number(git(saved.source.workspacePath,'rev-list','--count','operator/work')),Number(count)+1);assert.match(git(saved.source.workspacePath,'log','-1','--format=%B'),new RegExp(run.id));
+    assert.equal(Number(git(saved.source.workspacePath,'rev-list','--count',f.repository.branch)),Number(count)+1);assert.match(git(saved.source.workspacePath,'log','-1','--format=%B'),new RegExp(run.id));
     const checkpoints=()=>f.ctl.store.events(0,conversation.id).filter(event=>event.runId===run.id&&event.type==='checkpoint'&&event.data&&typeof event.data==='object'&&'source' in event.data).length;
     assert.equal(checkpoints(),1);await f.ctl.managed.recoverSource();await f.ctl.managed.recoverSource();await f.ctl.managed.finishRun(f.ctl.store.run(run.id)!);
-    assert.equal(checkpoints(),1);assert.equal(git(saved.source.workspacePath,'rev-list','--count','operator/work'),String(Number(count)+1));f.verifyOwner();
+    assert.equal(checkpoints(),1);assert.equal(git(saved.source.workspacePath,'rev-list','--count',f.repository.branch),String(Number(count)+1));f.verifyOwner();
   }finally{await f.close();}
 });
 
@@ -75,10 +75,10 @@ test('source association recovers a committed package without a database row or 
     await f.ctl.managed.packages.createPackage(f.repository.id,{path:'connectors/recovered',manifest:{...initial.manifest,version:'0.1.0'},files:initial.files});
     const created=await f.ctl.managed.packageExport(project.id);
     assert.equal(f.ctl.store.db.prepare('SELECT 1 FROM project_sources WHERE projectId=?').get(project.id),undefined);
-    const count=git(created.source.workspacePath,'rev-list','--count','operator/work');await f.reopen();
+    const count=git(created.source.workspacePath,'rev-list','--count',f.repository.branch);await f.reopen();
     const attached=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector',repositoryId:f.repository.id,packagePath:'connectors/recovered'});
     assert.equal(attached.source.commit,created.source.commit);assert.equal(attached.manifest.kind,'connector');assert.deepEqual(attached.files,created.files);assert.equal(f.ctl.projects.get(project.id).source?.commit,created.source.commit);
-    const again=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector',repositoryId:f.repository.id,packagePath:'connectors/recovered'});assert.equal(again.source.commit,created.source.commit);assert.equal(git(created.source.workspacePath,'rev-list','--count','operator/work'),count);f.verifyOwner();
+    const again=await f.ctl.managed.createSource(project.id,{kind:'connector',template:'connector',repositoryId:f.repository.id,packagePath:'connectors/recovered'});assert.equal(again.source.commit,created.source.commit);assert.equal(git(created.source.workspacePath,'rev-list','--count',f.repository.branch),count);f.verifyOwner();
   }finally{await f.close();}
 });
 

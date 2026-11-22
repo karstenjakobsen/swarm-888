@@ -1,6 +1,20 @@
 # Operator implementation slices
 
-Projects, connectors, and skills belong to registered Git repositories under `APP_PROJECTS_DIR/repositories/`, with required remote URLs and automatic local commits. Deployments, credentials, databases, dependencies, and logs remain outside source Git. Operator workers author assigned package folders; the operator core remains owner-maintained by prompt. Remote pushes are disabled.
+Projects, connectors, and skills belong to registered Git repositories under `APP_PROJECTS_DIR/repositories/`, with required remote URLs and automatic local commits. Deployments, credentials, databases, dependencies, and logs remain outside source Git. Operator workers author assigned package folders; the operator core remains owner-maintained by prompt. New repositories use main with automatic remote publishing; existing registrations retain their settings until explicitly switched.
+
+## Local usability: main and autonomous workflows
+
+- [x] New repositories use one origin URL and main for checkout, fetch and automatic publication.
+- [x] Repository UI removes separate branch/destination inputs; one persistent publishing toggle and visible publishing failures remain.
+- [x] Explicit Use main conversion preserves existing checkouts, local commits and remote history; incompatible history and active work block conversion.
+- [ ] Automatically discover/test connections after registration, source updates and successful credential setup, then resume waiting work.
+- [ ] Distinguish optional unavailable connections from required task dependencies so setup/repair tasks can run.
+- [ ] Persist project autonomy defaults and reuse/start the local user worker without repeated setup.
+- [ ] Verify a complete local workflow: one request creates a project, connection and recurring report; one credential form resumes execution; subsequent runs and restart require no manual enable/test/assign steps.
+
+Verified on 2026-11-22: production build/typecheck passed; full backend regression run passed 394 tests with one optional authentication test skipped; the final added package, publication and conversion API cases passed separately; all 66 browser tests passed. Git publication tests used disposable local remotes. Live provider authentication and an autonomous model-driven workflow remain acceptance work for the next slice.
+
+The following sections describe earlier delivery stages; their local-only Git restrictions predate the main publishing workflow above.
 
 ## Repository-backed packages v1
 

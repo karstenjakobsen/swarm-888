@@ -36,6 +36,14 @@ async function fixture(){
   return {root,config,worker,ctl,headers,request,api,repository,ownerHead,async close(){await ctl.close();await worker.runtime.close();assert.equal(git(repositoryPath,'rev-parse','HEAD'),ownerHead);assert.equal(git(repositoryPath,'status','--porcelain'),'');rmSync(root,{recursive:true,force:true});}};
 }
 
+/** Persist an installation's pre-existing branch choices without reopening that setup in the new API. */
+function legacyRepository(f:Awaited<ReturnType<typeof fixture>>,remoteUrl:string,sourceBranch:string){
+  const id=randomUUID(),directory=join(f.config.projectsDir!,'repositories',id),now=new Date().toISOString();
+  mkdirSync(dirname(directory),{recursive:true});git(f.root,'clone','--quiet','--no-local','--single-branch','--branch',sourceBranch,remoteUrl,directory);git(directory,'checkout','-qb','operator/work');
+  f.ctl.managed.packages.store.saveRepository({id,name:'Existing branch repository',remoteUrl,directory,branch:'operator/work',sourceBranch,syncMode:'legacy',status:'ready',error:null,createdAt:now,updatedAt:now});
+  return f.ctl.managed.packages.repository(id);
+}
+
 function externalPackages(root:string){
   const directory=join(root,'remote'),sentinel=join(root,'must-not-execute');mkdirSync(directory);git(directory,'init','-q','-b','main');
   const command={command:process.execPath,args:['-e',`require('node:fs').writeFileSync(${JSON.stringify(sentinel)},'executed')`]},ids={project:randomUUID(),connector:randomUUID(),skill:randomUUID()};
@@ -56,7 +64,7 @@ test('repository APIs require a remote and every new project or package gets a c
     assert.equal((await f.request('POST','/api/repositories',{name:'Embedded credential',remoteUrl:'https://secret@example.test/repo.git'})).statusCode,400);
     assert.equal((await f.request('POST','/api/projects',{name:'Missing source repository'})).statusCode,400);
     assert.equal(f.ctl.projects.list().length,0);
-    const repository=await f.repository();assert(repository.directory.startsWith(`${f.config.projectsDir}/repositories/`));assert.equal(git(repository.directory,'remote','get-url','origin'),repository.remoteUrl);assert.equal(repository.branch,'operator/work');
+    const repository=await f.repository();assert(repository.directory.startsWith(`${f.config.projectsDir}/repositories/`));assert.equal(git(repository.directory,'remote','get-url','origin'),repository.remoteUrl);assert.equal(repository.branch,'main');assert.equal(repository.sourceBranch,'main');assert.equal(repository.syncMode,'main');assert.equal(repository.push.enabled,true);assert.equal(repository.push.autoPush,true);assert.equal(repository.push.branch,'main');assert.equal(repository.push.pushUrl,repository.remoteUrl);
     const project=await f.api('POST','/api/projects',{name:'Registered website',repositoryId:repository.id,packagePath:'apps/website',template:'service'});assert.equal(project.source.repositoryId,repository.id);assert.equal(project.source.path,'apps/website');
     const connector=await f.api('POST',`/api/repositories/${repository.id}/packages`,{kind:'connector',name:'Registered connector',path:'connectors/echo',version:'0.2.0',template:'connector'});
     const skill=await f.api('POST',`/api/repositories/${repository.id}/packages`,{kind:'skill',name:'registered-report',path:'skills/report',version:'0.3.0'});
@@ -124,31 +132,35 @@ test('adopting a legacy connection retains identity, credentials and assignments
   }finally{await f.close();}
 });
 
-test('owner-authenticated push settings enable publication while model tools cannot enable or retarget it',async()=>{
+test('main publication starts automatically and owner-authenticated settings pause it without letting model tools retarget it',async()=>{
   const f=await fixture();try{
     const remote=join(f.root,'publish-api.git');mkdirSync(remote);git(remote,'init','--quiet','--bare');
-    const repository=await f.api('POST','/api/repositories',{name:'Publish API',remoteUrl:remote,mode:'create'}),url=`/api/repositories/${repository.id}/push-settings`,settings={enabled:true,autoPush:true,branch:'release/api'};
+    const repository=await f.api('POST','/api/repositories',{name:'Publish API',remoteUrl:remote,mode:'create'}),url=`/api/repositories/${repository.id}/push-settings`,settings={enabled:true,autoPush:true};
+    assert.equal(repository.push.enabled,true);assert.equal(repository.push.autoPush,true);assert.equal(repository.push.branch,'main');assert.equal(repository.push.pushUrl,remote);
+    await f.api('PATCH',url,{enabled:false,autoPush:false});
     await assert.rejects(f.ctl.brain.callTool('repository_push',{id:repository.id}),/disabled/);
     assert.equal((await f.ctl.app.inject({method:'PATCH',url,headers:{origin:f.config.origins[0]},payload:settings})).statusCode,401);
     assert.equal((await f.ctl.app.inject({method:'PATCH',url,headers:{...f.headers,'x-csrf-token':'invalid'},payload:settings})).statusCode,403);
-    const enabled=await f.api('PATCH',url,settings);assert.equal(enabled.push.enabled,true);assert.equal(enabled.push.pushUrl,remote);assert.equal(enabled.push.branch,'release/api');
+    const enabled=await f.api('PATCH',url,settings);assert.equal(enabled.push.enabled,true);assert.equal(enabled.push.pushUrl,remote);assert.equal(enabled.push.branch,'main');
+    assert.equal((await f.request('PATCH',url,{...settings,branch:'release/api'})).statusCode,409);
+    assert.equal((await f.request('PATCH',url,{...settings,pushUrl:'https://other.invalid/repo.git'})).statusCode,409);
     await assert.rejects(f.ctl.brain.callTool('repository_push',{id:repository.id,pushUrl:'https://other.invalid/repo.git'}));
     assert.equal((await f.request('POST',`/api/repositories/${repository.id}/push`,{branch:'another-branch'})).statusCode,400);
     const record=await f.api('POST',`/api/repositories/${repository.id}/packages`,{kind:'project',name:'Published package',path:'apps/published',version:'1.0.0',template:'empty'});
     const queued=await f.ctl.brain.callTool('repository_push',{id:repository.id});assert.equal(queued.push.state,'pending');
     await f.ctl.managed.packages.flushPushes();await f.ctl.managed.packages.flushPushes();
-    const observed=await f.api('GET',`/api/repositories/${repository.id}`);assert.equal(observed.push.state,'pushed');assert.equal(observed.push.pushedCommit,record.lastImportedCommit);assert.equal(git(remote,'rev-parse','refs/heads/release/api'),record.lastImportedCommit);
+    const observed=await f.api('GET',`/api/repositories/${repository.id}`);assert.equal(observed.push.state,'pushed');assert.equal(observed.push.pushedCommit,record.lastImportedCommit);assert.equal(git(remote,'rev-parse','refs/heads/main'),record.lastImportedCommit);
     assert.equal(git(repository.directory,'remote','get-url','origin'),remote);
   }finally{await f.close();}
 });
 
-test('repository fetch API previews a selected non-main branch and imports its exact commit',async()=>{
+test('legacy repository fetch API retains selected non-main previews and exact imports',async()=>{
   const f=await fixture();
   try{
     const remote=join(f.root,'branch-remote');mkdirSync(remote);git(remote,'init','-q','-b','release/stable');const manifest={schemaVersion:1,id:randomUUID(),kind:'project',name:'Branch package',version:'1.0.0',description:'Package without a main branch'};
     write(remote,'app/operator-package.json',JSON.stringify(manifest));git(remote,'add','.');git(remote,'commit','-qm','Stable package');const initial=git(remote,'rev-parse','HEAD');
     git(remote,'checkout','-qb','feature/new-package');write(remote,'app/operator-package.json',JSON.stringify({...manifest,version:'1.1.0'}));git(remote,'add','.');git(remote,'commit','-qm','Feature package');const feature=git(remote,'rev-parse','HEAD');
-    const repository=await f.api('POST','/api/repositories',{name:'Branch packages',remoteUrl:remote,branch:'release/stable',mode:'clone'});assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,initial);
+    const repository=legacyRepository(f,remote,'release/stable');assert.equal(repository.sourceBranch,'release/stable');assert.equal(repository.head,initial);
     const preview=await f.api('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'feature/new-package'});assert.equal(preview.commit,feature);assert.equal(preview.remoteBranch,'feature/new-package');assert.equal(preview.packages[0].manifest.version,'1.1.0');assert.equal(preview.repository.sourceBranch,'release/stable');assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);
     assert.equal((await f.request('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'release/../escape'})).statusCode,400);assert.equal((await f.request('POST',`/api/repositories/${repository.id}/discover`,{refresh:true,branch:'missing'})).statusCode,409);assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);assert.equal(git(repository.directory,'status','--porcelain'),'');
     const imported=await f.api('POST',`/api/repositories/${repository.id}/import`,{paths:['app'],expectedCommit:preview.commit});assert.equal(imported.packages[0].lastImportedCommit,feature);assert.equal(imported.packages[0].version,'1.1.0');assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);
@@ -156,24 +168,44 @@ test('repository fetch API previews a selected non-main branch and imports its e
   }finally{await f.close();}
 });
 
-test('operator tools fetch a selected non-main branch and import its exact revision without switching the working branch',async()=>{
+test('switching an existing repository to main requires an owner request and preserves its accepted package source',async()=>{
   const f=await fixture();try{
-    const remote=join(f.root,'operator-branch-remote');mkdirSync(remote);git(remote,'init','-q','-b','release/stable');
+    const remote=join(f.root,'legacy-api.git'),seed=join(f.root,'legacy-seed');mkdirSync(remote);git(remote,'init','-q','--bare');mkdirSync(seed);git(seed,'init','-q','-b','main');
+    write(seed,'README.md','Existing repository\n');git(seed,'add','.');git(seed,'commit','-qm','Existing history');git(seed,'push','--quiet',remote,'main');
+    const repository=legacyRepository(f,remote,'main'),record=await f.api('POST',`/api/repositories/${repository.id}/packages`,{kind:'project',name:'Existing package',path:'apps/existing',version:'1.0.0',template:'empty'});
+    const url=`/api/repositories/${repository.id}/use-main`,head=git(repository.directory,'rev-parse','HEAD');
+    assert.equal(f.ctl.managed.packages.repository(repository.id).push?.enabled,false);
+    assert.equal((await f.ctl.app.inject({method:'POST',url,headers:{origin:f.config.origins[0]},payload:{}})).statusCode,401);
+    assert.equal((await f.ctl.app.inject({method:'POST',url,headers:{...f.headers,'x-csrf-token':'invalid'},payload:{}})).statusCode,403);
+    assert.equal((await f.request('POST',url,{branch:'other'})).statusCode,400);
+    assert.equal(f.ctl.managed.packages.repository(repository.id).syncMode,'legacy');
+    const converted=await f.api('POST',url,{});
+    assert.equal(converted.syncMode,'main');assert.equal(converted.sourceBranch,'main');assert.equal(converted.branch,'operator/work');assert.equal(converted.push.branch,'main');assert.equal(converted.push.pushUrl,remote);assert.equal(converted.push.autoPush,true);
+    assert.equal(git(repository.directory,'rev-parse','HEAD'),head);assert.equal(f.ctl.managed.packages.package(record.id).lastImportedCommit,record.lastImportedCommit);
+    await f.ctl.managed.packages.flushPushes();assert.equal(git(remote,'rev-parse','refs/heads/main'),head);
+    assert.equal(f.ctl.projects.get(record.id).source?.commit,record.lastImportedCommit);assert.equal(f.worker.requests.length,0);
+  }finally{await f.close();}
+});
+
+test('operator tools register main and fetch its exact new revision without changing the working checkout',async()=>{
+  const f=await fixture();try{
+    const remote=join(f.root,'operator-branch-remote');mkdirSync(remote);git(remote,'init','-q','-b','main');
     const manifest={schemaVersion:1,id:randomUUID(),kind:'project',name:'Operator branch package',version:'1.0.0',description:'Imported through operator tools'};
     write(remote,'apps/report/operator-package.json',JSON.stringify(manifest));git(remote,'add','.');git(remote,'commit','-qm','Stable source');
-    const initial=git(remote,'rev-parse','HEAD'),repository=await f.ctl.brain.callTool('repository_register',{name:'Operator source',remoteUrl:remote,branch:'release/stable',mode:'clone'});
-    git(remote,'checkout','-qb','feature/operator-import');write(remote,'apps/report/operator-package.json',JSON.stringify({...manifest,version:'1.1.0'}));git(remote,'add','.');git(remote,'commit','-qm','New remote package revision');
+    const initial=git(remote,'rev-parse','HEAD'),repository=await f.ctl.brain.callTool('repository_register',{name:'Operator source',remoteUrl:remote,mode:'clone'});
+    assert.equal(repository.syncMode,'main');assert.equal(repository.push.autoPush,true);assert.equal(repository.branch,'main');
+    write(remote,'apps/report/operator-package.json',JSON.stringify({...manifest,version:'1.1.0'}));git(remote,'add','.');git(remote,'commit','-qm','New remote package revision');
     const latest=git(remote,'rev-parse','HEAD');
     const local=await f.ctl.brain.callTool('repository_discover',{id:repository.id});assert.equal(local.commit,initial);assert.equal(local.remoteBranch,undefined);
     await assert.rejects(f.ctl.brain.callTool('repository_discover',{id:repository.id,branch:'feature/operator-import'}),/refresh|branch/i);
     await assert.rejects(f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true,branch:'release/../escape'}));
-    const stable=await f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true});assert.equal(stable.commit,initial);assert.equal(stable.remoteBranch,'release/stable');
-    const preview=await f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true,branch:'feature/operator-import'});
-    assert.equal(preview.commit,latest);assert.equal(preview.remoteBranch,'feature/operator-import');assert.equal(preview.packages[0].manifest.version,'1.1.0');
+    await assert.rejects(f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true,branch:'feature/operator-import'}),/main/);
+    const preview=await f.ctl.brain.callTool('repository_discover',{id:repository.id,refresh:true});
+    assert.equal(preview.commit,latest);assert.equal(preview.remoteBranch,'main');assert.equal(preview.packages[0].manifest.version,'1.1.0');
     assert.equal(git(repository.directory,'rev-parse','HEAD'),initial);assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);
     const imported=await f.ctl.brain.callTool('repository_import',{id:repository.id,paths:['apps/report'],expectedCommit:preview.commit});
     assert.equal(imported.packages[0].lastImportedCommit,latest);assert.equal(imported.packages[0].version,'1.1.0');
-    assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);assert.equal(f.ctl.managed.packages.repository(repository.id).sourceBranch,'release/stable');
+    assert.equal(git(repository.directory,'symbolic-ref','--short','HEAD'),repository.branch);assert.equal(f.ctl.managed.packages.repository(repository.id).sourceBranch,'main');
     assert.equal(f.ctl.projects.get(manifest.id).source?.commit,latest);assert.equal(f.worker.requests.length,0);assert.equal(git(repository.directory,'status','--porcelain'),'');
   }finally{await f.close();}
 });

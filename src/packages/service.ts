@@ -11,6 +11,7 @@ import { managedFilePath } from '../managed/repository.ts';
 import type { ManagedSource } from '../managed/schemas.ts';
 import { PackageStore } from './store.ts';
 import { RepositoryPublisher } from './publishing.ts';
+import { transaction } from '../persistence/transaction.ts';
 import { packageImportInput, packageManifestMaxBytes, packageManifestSchema, packagePath, repositoryBranchSchema, repositoryInput, type PackageDiscovery, type PackageManifest, type PackageRecord, type RepositoryRecord } from './schemas.ts';
 
 const manifestFile='operator-package.json',failure=(message:string,statusCode=409)=>Object.assign(new Error(message),{statusCode});
@@ -51,7 +52,7 @@ export class PackageService {
   private importGuard?:(manifest:PackageManifest)=>void;
   private writeScope?:(repositoryId:string,runId:string)=>string[];
   private secretGuard?:(value:unknown)=>void;
-  constructor(private config:Config,db:DatabaseSync){
+  constructor(private config:Config,private db:DatabaseSync){
     this.store=new PackageStore(db);this.store.recoverImports();
     this.publisher=new RepositoryPublisher(db,{repository:id=>this.checkedRepository(id),exclusive:(id,operation)=>this.exclusive(id,operation),git:(directory,args,allowFailure)=>this.git(directory,args,allowFailure),remoteGit:(directory,args)=>this.remoteGit(directory,args,20_000),assertSafe:value=>this.assertNoSecrets(value),error:error=>this.safeDetail(error,'Remote publication failed')});
   }
@@ -60,6 +61,27 @@ export class PackageService {
   flushPushes():Promise<void>{return this.publisher.flush();}
   async setPushSettings(id:string,input:unknown):Promise<RepositoryRecord>{this.assertNoSecrets(input);await this.publisher.configure(id,input);return this.repository(id);}
   async requestPush(id:string):Promise<RepositoryRecord>{await this.publisher.request(id);return this.repository(id);}
+  async useMain(id:string):Promise<RepositoryRecord>{
+    await this.exclusive(id,async()=>{
+      this.assertWritable(id);
+      if(this.db.prepare('SELECT 1 FROM repository_leases WHERE repositoryId=?').get(id))throw failure('Finish or reconcile this repository’s active work before using main.');
+      const repository=this.checkedRepository(id);
+      if(repository.syncMode==='main')return;
+      if(this.git(repository.directory,['status','--porcelain=v1','--untracked-files=all']))throw failure('Commit local repository changes before using main.');
+      const ref='refs/heads/main',remote=await this.remoteGit(repository.directory,['ls-remote','--heads','--','origin',ref]);
+      const remoteTip=remote.trim().split(/\s+/)[0];
+      if(remoteTip){
+        await this.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','--no-write-fetch-head','origin',`${ref}:refs/remotes/origin/main`]);
+        const tip=this.git(repository.directory,['rev-parse','refs/remotes/origin/main']).trim();
+        if(this.git(repository.directory,['merge-base',tip,'HEAD'],true).trim()!==tip)throw failure('Remote main has changes outside this checkout. Fetch and import main, or reconcile divergent history, before using main.');
+      }
+      transaction(this.db,()=>{
+        this.db.prepare("UPDATE repositories SET sourceBranch='main',syncMode='main',updatedAt=? WHERE id=?").run(new Date().toISOString(),id);
+        this.publisher.configureLocked({...repository,sourceBranch:'main',syncMode:'main'},{enabled:true,autoPush:true});
+      });
+    });
+    return this.repository(id);
+  }
   setImportGuard(guard:(manifest:PackageManifest)=>void):void{this.importGuard=guard;}
   setWriteGuard(guard:(repositoryId:string,runId?:string)=>void):void{this.guard=guard;}
   setWriteScope(scope:(repositoryId:string,runId:string)=>string[]):void{this.writeScope=scope;}
@@ -135,7 +157,7 @@ export class PackageService {
   }
   async register(input:unknown):Promise<RepositoryRecord>{
     const value=repositoryInput.parse(input),id=randomUUID();return this.exclusive(id,async()=>{
-      const directory=join(this.root(),id),now=new Date().toISOString();let initialized=false,sourceBranch=value.branch??'main';
+      const directory=join(this.root(),id),now=new Date().toISOString(),sourceBranch='main';let initialized=false;
       try{
         if(value.mode==='create'){
           mkdirSync(directory,{mode:0o700});this.git(directory,['init','-q','-b',sourceBranch]);this.git(directory,['remote','add','origin',value.remoteUrl]);
@@ -143,13 +165,13 @@ export class PackageService {
           writeFileSync(join(directory,'README.md'),`# ${value.name}\n\nPackages managed by the operator. Remote publishing is configured in Repositories.\n`,{mode:0o600});
           this.git(directory,['add','--','.gitignore','README.md']);this.git(directory,['-c','user.name=AI Operator','-c','user.email=operator@localhost','commit','-qm','Initialize package repository']);
         }else{
-          await this.remoteGit(dirname(directory),['clone','--quiet','--no-local','--no-hardlinks','--no-checkout','--single-branch',...(value.branch?['--branch',value.branch]:[]),'--',value.remoteUrl,directory]);
-          sourceBranch=this.git(directory,['symbolic-ref','--short','HEAD']).trim();
+          await this.remoteGit(dirname(directory),['clone','--quiet','--no-local','--no-hardlinks','--no-checkout','--single-branch','--branch','main','--',value.remoteUrl,directory]);
+          this.git(directory,['checkout','-q','main']);
         }
-        const branch=sourceBranch==='operator/work'?'operator/packages':'operator/work';this.git(directory,['checkout','-q','-b',branch]);
+        const branch='main';
         const exclude=join(directory,'.git','info','exclude');writeFileSync(exclude,`${existsSync(exclude)?readFileSync(exclude,'utf8'):''}\n**/.agents/\n`,{mode:0o600});
-        const repository:RepositoryRecord={id,name:value.name,remoteUrl:value.remoteUrl,directory,branch,sourceBranch,status:'ready',error:null,createdAt:now,updatedAt:now};
-        this.store.saveRepository(repository);initialized=true;return this.observeRepository(repository);
+        const repository:RepositoryRecord={id,name:value.name,remoteUrl:value.remoteUrl,directory,branch,sourceBranch,syncMode:'main',status:'ready',error:null,createdAt:now,updatedAt:now};
+        transaction(this.db,()=>{this.store.saveRepository(repository);this.publisher.configureLocked(repository,{enabled:true,autoPush:true});});initialized=true;return this.observeRepository(repository);
       }finally{if(!initialized)rmSync(directory,{recursive:true,force:true});}
     });
   }
@@ -205,6 +227,7 @@ export class PackageService {
   async discover(id:string,options:{refresh?:boolean;branch?:string}={}):Promise<PackageDiscovery>{return this.exclusive(id,async()=>{
     if(options.branch!==undefined&&!options.refresh)throw failure('Choose a remote branch when fetching a preview.',400);
     const repository=this.checkedRepository(id);let commit=this.head(repository);
+    if(repository.syncMode==='main'&&options.branch!==undefined&&options.branch!=='main')throw failure('This repository fetches the main branch from origin.',400);
     const branch=options.refresh?(options.branch===undefined?repository.sourceBranch:repositoryBranchSchema.parse(options.branch)):undefined;
     if(options.refresh){this.assertWritable(id);await this.remoteGit(repository.directory,['fetch','--no-tags','--no-recurse-submodules','origin',`refs/heads/${branch}`]);commit=this.git(repository.directory,['rev-parse','FETCH_HEAD']).trim();}
     return {...this.discoverAt(repository,commit),...(branch?{remoteBranch:branch}:{})};

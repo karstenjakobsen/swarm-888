@@ -23,6 +23,11 @@ export function registerPackageRoutes(app: FastifyInstance, { packages, registra
     return packages.register(req.body);
   });
   app.get('/api/repositories/:id', async req => packages.repository(routeId(req)));
+  app.post('/api/repositories/:id/use-main', async req => {
+    writable();
+    z.object({}).strict().parse(req.body ?? {});
+    return packages.useMain(routeId(req));
+  });
   app.patch('/api/repositories/:id/push-settings', async req => {
     writable();
     return packages.setPushSettings(routeId(req), req.body);
