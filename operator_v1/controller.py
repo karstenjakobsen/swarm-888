@@ -2,6 +2,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Annotated
 
@@ -23,11 +24,13 @@ from .contracts import (
     Receipt,
     Snapshot,
     SupplyCredential,
+    WorkerStatus,
 )
 from .credentials import CredentialError, Credentials
 from .ipc import wake_worker
 from .operations import Operations, OperationUnavailable
 from .state import RequestConflict, State
+from .worker_status import HEARTBEAT_MAX_AGE, read_worker_report
 
 COOKIE = "operator_session"
 SESSION_SECONDS = 12 * 60 * 60
@@ -142,6 +145,19 @@ def create_app(
                 remote=display_remote(config.remote), branch=config.branch
             )
         return snapshot
+
+    @app.get("/api/worker", dependencies=[Depends(owner)], responses={401: unauthorized})
+    def worker_status() -> WorkerStatus:
+        report = read_worker_report(runtime)
+        count = store.queued_tasks()
+        if report is None:
+            return WorkerStatus(health="unreported", queued_tasks=count, report=None)
+        age = (datetime.now(UTC) - report.last_heartbeat).total_seconds()
+        return WorkerStatus(
+            health="online" if 0 <= age <= HEARTBEAT_MAX_AGE else "stale",
+            queued_tasks=count,
+            report=report,
+        )
 
     @app.post(
         "/api/commands",

@@ -7,6 +7,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -15,6 +16,7 @@ import pytest
 from operator_v1.config import Settings
 from operator_v1.state import State
 from operator_v1.worker import MessageWorker
+from operator_v1.worker_status import HEARTBEAT_MAX_AGE, WorkerHeartbeat
 
 
 def message():
@@ -267,6 +269,44 @@ def test_concurrent_message_retry(tmp_path):
         with ThreadPoolExecutor(max_workers=4) as pool:
             assert len(set(pool.map(submit, range(4)))) == 1
         assert client.get("/api/snapshot").json()["cursor"] == 2
+
+
+def test_private_worker_status_and_heartbeat_expiry(tmp_path):
+    settings = Settings(tmp_path)
+    settings.create_owner_key()
+    with controller(settings) as client:
+        assert client.get("/api/worker").status_code == 401
+        login(client, settings)
+        response = client.get("/api/worker")
+        assert response.headers["Cache-Control"] == "no-store"
+        assert response.json() == {"health": "unreported", "queued_tasks": 0, "report": None}
+
+        state = State(settings)
+        active = state.submit(uuid4(), "Active task")
+        state.submit(uuid4(), "Queued task")
+        assert state.claim() == active
+        heartbeat = WorkerHeartbeat(settings, "acknowledge")
+        heartbeat.publish(active)
+
+        online = client.get("/api/worker").json()
+        assert online["health"] == "online"
+        assert online["queued_tasks"] == 1
+        assert online["report"]["active_task"] == active
+        assert online["report"]["uid"] == os.geteuid()
+        assert online["report"]["pid"] == os.getpid()
+
+        heartbeat.publish()
+        idle = client.get("/api/worker").json()
+        assert idle["report"]["active_task"] is None
+        assert idle["report"]["started_at"] == online["report"]["started_at"]
+        assert idle["report"]["last_heartbeat"] >= online["report"]["last_heartbeat"]
+
+        old = datetime.now(UTC) - timedelta(seconds=HEARTBEAT_MAX_AGE + 1)
+        path = settings.directory / "worker-status.json"
+        path.write_text(
+            heartbeat.report.model_copy(update={"last_heartbeat": old}).model_dump_json()
+        )
+        assert client.get("/api/worker").json()["health"] == "stale"
 
 
 def test_private_state_files(tmp_path):

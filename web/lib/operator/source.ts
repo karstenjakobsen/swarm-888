@@ -199,6 +199,12 @@ export async function signIn(key: string) {
   await post('/api/session', { key } satisfies API['OwnerLogin'])
 }
 
+export async function readWorkerStatus(signal: AbortSignal): Promise<API['WorkerStatus']> {
+  const response = await fetch('/api/worker', { cache: 'no-store', signal })
+  if (!response.ok) throw new AccessError(response.status)
+  return response.json()
+}
+
 // Keep the retry ID through an outage or a reload in this tab. Store only a
 // digest of the message. Acknowledgment releases the ID for a new submission.
 async function messageKey(text: string) {

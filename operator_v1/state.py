@@ -194,6 +194,10 @@ class State:
         self.append(db, task, "owner_message", text)
         return task
 
+    def queued_tasks(self) -> int:
+        with self.transaction() as db:
+            return db.execute("SELECT count(*) FROM tasks WHERE checkpoint='queued'").fetchone()[0]
+
     def claim(self) -> str | None:
         with self.transaction(write=True) as db:
             row = db.execute(

@@ -56,6 +56,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/worker": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Worker Status */
+        get: operations["worker_status_api_worker_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/commands": {
         parameters: {
             query?: never;
@@ -290,6 +307,47 @@ export interface components {
             checkpoint: "queued" | "running" | "completed";
             outcome: components["schemas"]["Outcome"];
         };
+        /** WorkerReport */
+        WorkerReport: {
+            /** Host */
+            host: string;
+            /** Pid */
+            pid: number;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "acknowledge" | "codex" | "simulated";
+            /** Uid */
+            uid: number;
+            /** Gid */
+            gid: number;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /**
+             * Last Heartbeat
+             * Format: date-time
+             */
+            last_heartbeat: string;
+            /** Revision */
+            revision: string | null;
+            /** Active Task */
+            active_task: string | null;
+        };
+        /** WorkerStatus */
+        WorkerStatus: {
+            /**
+             * Health
+             * @enum {string}
+             */
+            health: "online" | "stale" | "unreported";
+            /** Queued Tasks */
+            queued_tasks: number;
+            report: components["schemas"]["WorkerReport"] | null;
+        };
     };
     responses: never;
     parameters: never;
@@ -458,6 +516,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Snapshot"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    worker_status_api_worker_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerStatus"];
                 };
             };
             /** @description Owner authentication required */

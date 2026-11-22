@@ -3,6 +3,7 @@ import logging
 import os
 import socket
 import stat
+import time
 from contextlib import closing
 
 from .config import Settings
@@ -11,6 +12,7 @@ from .model import ModelError, ModelSession, codex_session, connect_skills
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
+from .worker_status import HEARTBEAT_INTERVAL, WorkerHeartbeat
 
 
 class MessageWorker:
@@ -24,6 +26,7 @@ class MessageWorker:
         self.mode = os.environ.get("OPERATOR_MODEL", default)
         if self.mode not in ("acknowledge", "codex", "simulated"):
             raise ValueError("OPERATOR_MODEL must be acknowledge, codex, or simulated")
+        self.heartbeat = WorkerHeartbeat(settings, self.mode)
 
     async def run_turn(self, session: ModelSession, task: str) -> str | None:
         text = self.state.text(task)
@@ -63,25 +66,46 @@ class MessageWorker:
 
     def drain(self):
         while task := self.state.claim():
-            if self.operations.run(task, self.fixture_engine):
-                continue
-            if self.mode == "acknowledge":
-                self.state.finish(
-                    task, "I received your message.", "The worker acknowledged the owner’s message."
-                )
-                continue
+            self.heartbeat.publish(task)
             try:
-                answer = asyncio.run(self.answer(task))
-            except ModelError as error:
-                self.state.fail(task, str(error))
-            except (OSError, TimeoutError, ExceptionGroup) as error:
-                logging.getLogger(__name__).warning(
-                    "Model execution failed: %s", type(error).__name__
-                )
-                self.state.fail(task, "The configured model or tool connection did not complete")
-            else:
-                if answer is not None:
-                    self.state.finish(task, answer, "The operator completed the turn", modeled=True)
+                self.run_task(task)
+            finally:
+                self.heartbeat.publish()
+
+    def run_task(self, task: str):
+        def pause(delay: float):
+            self.heartbeat.publish(task)
+            time.sleep(delay)
+
+        if self.operations.run(task, self.fixture_engine, pause=pause):
+            return
+        if self.mode == "acknowledge":
+            self.state.finish(
+                task, "I received your message.", "The worker acknowledged the owner’s message."
+            )
+            return
+        try:
+            answer = asyncio.run(self.answer_with_heartbeat(task))
+        except ModelError as error:
+            self.state.fail(task, str(error))
+        except (OSError, TimeoutError, ExceptionGroup) as error:
+            logging.getLogger(__name__).warning("Model execution failed: %s", type(error).__name__)
+            self.state.fail(task, "The configured model or tool connection did not complete")
+        else:
+            if answer is not None:
+                self.state.finish(task, answer, "The operator completed the turn", modeled=True)
+
+    async def answer_with_heartbeat(self, task: str) -> str | None:
+        turn = asyncio.create_task(self.answer(task))
+        try:
+            while not turn.done():
+                await asyncio.wait((turn,), timeout=HEARTBEAT_INTERVAL)
+                self.heartbeat.publish(task)
+            return turn.result()
+        finally:
+            if not turn.done():
+                turn.cancel()
+                await asyncio.gather(turn, return_exceptions=True)
 
     def serve(self):
         path = self.settings.socket
@@ -107,6 +131,7 @@ class MessageWorker:
                 server.listen()
                 server.settimeout(2)
                 while True:
+                    self.heartbeat.publish()
                     self.drain()
                     self.goals.run_due()
                     try:

@@ -2,6 +2,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -137,3 +138,21 @@ class Snapshot(BaseModel):
     tasks: list[TaskState]
     events: list[Event]
     catalog: CatalogInfo | None = None
+
+
+class WorkerReport(BaseModel):
+    host: str
+    pid: int = Field(gt=0)
+    mode: Literal["acknowledge", "codex", "simulated"]
+    uid: int = Field(ge=0)
+    gid: int = Field(ge=0)
+    started_at: AwareDatetime
+    last_heartbeat: AwareDatetime
+    revision: str | None
+    active_task: str | None
+
+
+class WorkerStatus(BaseModel):
+    health: Literal["online", "stale", "unreported"]
+    queued_tasks: int = Field(ge=0)
+    report: WorkerReport | None

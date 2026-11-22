@@ -5,18 +5,20 @@ import { useDeferredValue, useState } from 'react'
 import { KeyRound, Search } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
+import { WorkerTab } from './worker-tab'
 import { current, lastUse, memoryKind, Rev, sourceOf } from './inspect-parts'
 import type { Projection } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
-export type InspectTab = 'memory' | 'skills' | 'connectors' | 'projects'
+export type InspectTab = 'memory' | 'skills' | 'connectors' | 'projects' | 'worker'
 
-const tabs: { id: InspectTab; label: string; count: (s: Projection) => number }[] = [
+const tabs: { id: InspectTab; label: string; count?: (s: Projection) => number }[] = [
   { id: 'memory', label: 'Memory', count: (s) => s.memoryOrder.length },
   { id: 'skills', label: 'Skills', count: (s) => s.skillOrder.length },
   { id: 'connectors', label: 'Connectors', count: (s) => s.connectorOrder.length },
   { id: 'projects', label: 'Projects', count: (s) => s.projectOrder.length },
+  { id: 'worker', label: 'Worker' },
 ]
 
 export function InspectView({ tab }: { tab: InspectTab }) {
@@ -28,8 +30,7 @@ export function InspectView({ tab }: { tab: InspectTab }) {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold">Inspect</h1>
           <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
-            Read-only. What the operator remembers, the skills it runs, the services it can reach, and the projects it
-            hosts.
+            Read-only details about the operator and its worker.
           </p>
         </div>
         {catalog ? (
@@ -39,7 +40,7 @@ export function InspectView({ tab }: { tab: InspectTab }) {
             <p className="font-mono text-xs text-muted-foreground">{catalog.branch}</p>
           </section>
         ) : null}
-        <nav aria-label="Inspect sections" className="grid grid-cols-4 gap-1 rounded-xl bg-card p-1">
+        <nav aria-label="Inspect sections" className="flex gap-1 overflow-x-auto rounded-xl bg-card p-1">
           {tabs.map((t) => (
             <Link
               key={t.id}
@@ -48,12 +49,12 @@ export function InspectView({ tab }: { tab: InspectTab }) {
               replace
               scroll={false}
               className={cn(
-                'flex min-h-12 flex-col items-center justify-center rounded-lg px-1 text-[13px] leading-tight',
+                'flex min-h-12 min-w-fit flex-1 flex-col items-center justify-center rounded-lg px-1 text-[13px] leading-tight',
                 tab === t.id ? 'bg-secondary font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
               )}
             >
               {t.label}
-              {loaded ? <span className="font-mono text-[11px] text-muted-foreground">{t.count(state)}</span> : null}
+              {loaded && t.count ? <span className="font-mono text-[11px] text-muted-foreground">{t.count(state)}</span> : null}
             </Link>
           ))}
         </nav>
@@ -65,6 +66,8 @@ export function InspectView({ tab }: { tab: InspectTab }) {
           <SkillsTab state={state} />
         ) : tab === 'connectors' ? (
           <ConnectorsTab state={state} />
+        ) : tab === 'worker' ? (
+          <WorkerTab />
         ) : (
           <ProjectsTab state={state} />
         )}

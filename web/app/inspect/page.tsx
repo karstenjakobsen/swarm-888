@@ -5,6 +5,6 @@ export const metadata: Metadata = { title: 'Inspect · Operator' }
 
 export default async function Page({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
   const { tab } = await searchParams
-  const t: InspectTab = tab === 'skills' || tab === 'connectors' || tab === 'projects' ? tab : 'memory'
+  const t: InspectTab = tab === 'skills' || tab === 'connectors' || tab === 'projects' || tab === 'worker' ? tab : 'memory'
   return <InspectView tab={t} />
 }
