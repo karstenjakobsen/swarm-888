@@ -1,3 +1,5 @@
+import type { components } from './api'
+
 export type Ref = {
   task?: string
   incident?: string
@@ -160,7 +162,7 @@ export type EventType = keyof DataMap
 export type EventData<K extends EventType> = DataMap[K]
 
 export type OperatorEvent<K extends EventType = EventType> = {
-  [T in K]: { seq: number; at: string; type: T; ref: Ref; data: DataMap[T] }
+  [T in K]: { seq: number; at: string; type: T; ref: Ref; data: DataMap[T]; outcome?: components['schemas']['Outcome'] }
 }[K]
 
 export type EventDraft<K extends EventType = EventType> = {

@@ -16,7 +16,7 @@ import { clock, dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function WorkView({ id }: { id: string }) {
-  const { state, loaded } = useOperator()
+  const { state, loaded, mode } = useOperator()
   const task = state.tasks[id]
   const incident = state.incidents[id]
   return (
@@ -33,7 +33,7 @@ export function WorkView({ id }: { id: string }) {
           <p className="text-muted-foreground">Nothing with this id in the operator&apos;s history.</p>
         )}
       </main>
-      {task && !isTaskFinished(task) ? (
+      {mode === 'demo' && task && !isTaskFinished(task) ? (
         <Composer taskId={task.id} placeholder={task.waiting?.on === 'reply' ? 'Reply, e.g. "apply"' : 'Steer this task'} />
       ) : (
         <Composer />
@@ -188,7 +188,7 @@ function Head({ kicker, title, outcome }: { kicker: string; title: string; outco
 }
 
 function TaskDetail({ task, state }: { task: Task; state: Projection }) {
-  const { send } = useOperator()
+  const { send, mode } = useOperator()
   const [stopping, setStopping] = useState(false)
   const outcome = taskOutcome(task)
   const cred = task.credentialRequest ? state.credentials[task.credentialRequest] : undefined
@@ -302,7 +302,7 @@ function TaskDetail({ task, state }: { task: Task; state: Projection }) {
         <EvidenceTrail items={task.trail} outcomeSeq={outcome.seq} />
       </Section>
 
-      {!isTaskFinished(task) ? (
+      {mode === 'demo' && !isTaskFinished(task) ? (
         <button
           type="button"
           disabled={stopping}
@@ -494,6 +494,7 @@ function DecisionPanel({ incident }: { incident: Incident }) {
         type="button"
         disabled={!choice || busy}
         onClick={async () => {
+          if (!choice) return
           setBusy(true)
           setError(null)
           const res = await send({ kind: 'decide', requestId: d.requestId, optionId: choice })

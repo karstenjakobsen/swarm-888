@@ -128,7 +128,7 @@ function Brief({ state, s }: { state: Projection; s: ReturnType<typeof summary> 
           </span>
         </BriefRow>
         <BriefRow q="Is the VPS as you asked?">
-          {s.off.length === 0 ? (
+          {s.goals.length === 0 ? <span>No standing goals configured.</span> : s.off.length === 0 ? (
             <span>All {s.goals.length} standing goals hold.</span>
           ) : (
             <span className="flex flex-col gap-2">

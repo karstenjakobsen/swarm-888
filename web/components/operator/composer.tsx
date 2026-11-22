@@ -1,12 +1,13 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ArrowUp } from 'lucide-react'
 import { useOperator } from './store'
 
 export function Composer({ taskId, placeholder }: { taskId?: string; placeholder?: string }) {
-  const { send, state } = useOperator()
+  const pending = useRef<{ text: string; id: string } | null>(null)
+  const { send, state, mode } = useOperator()
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -23,9 +24,13 @@ export function Composer({ taskId, placeholder }: { taskId?: string; placeholder
     setBusy(true)
     setError(null)
     const seq = state.lastSeq
-    const res = await send({ kind: 'message', text: value, taskId })
+    if (mode === 'live' && pending.current?.text !== value) {
+      pending.current = { text: value, id: crypto.randomUUID() }
+    }
+    const res = await send({ kind: 'message', text: value, taskId, requestId: pending.current?.id })
     setBusy(false)
     if (res.ok) {
+      pending.current = null
       setText('')
       setSentAtSeq(seq)
     } else setError(res.error ?? 'Could not send.')

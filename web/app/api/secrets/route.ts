@@ -1,9 +1,11 @@
+import { operatorMode } from '@/lib/operator/mode'
 import { getLog } from '@/lib/operator/server-log'
 
 export const dynamic = 'force-dynamic'
 
 // Public demo: this endpoint never accepts credential values. The server substitutes placeholders.
 export async function POST(req: Request) {
+  if (operatorMode() !== 'demo') return new Response(null, { status: 503 })
   let body: unknown
   try {
     body = await req.json()

@@ -1,8 +1,10 @@
+import { operatorMode } from '@/lib/operator/mode'
 import { getLog } from '@/lib/operator/server-log'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
+  if (operatorMode() !== 'demo') return new Response(null, { status: 503 })
   const url = new URL(req.url)
   const raw = req.headers.get('last-event-id') ?? url.searchParams.get('after') ?? '0'
   const requestedEpoch = url.searchParams.get('epoch')

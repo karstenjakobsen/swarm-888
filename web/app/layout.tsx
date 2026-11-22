@@ -1,34 +1,32 @@
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
-import { IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google'
+import '@fontsource/ibm-plex-sans/latin-400.css'
+import '@fontsource/ibm-plex-sans/latin-500.css'
+import '@fontsource/ibm-plex-sans/latin-600.css'
+import '@fontsource/ibm-plex-mono/latin-400.css'
+import '@fontsource/ibm-plex-mono/latin-500.css'
+import { operatorMode } from '@/lib/operator/mode'
 import { OperatorProvider } from '@/components/operator/store'
 import './globals.css'
 
-const plexSans = IBM_Plex_Sans({
-  subsets: ['latin'],
-  weight: ['400', '500', '600'],
-  variable: '--font-plex-sans',
-})
-const plexMono = IBM_Plex_Mono({
-  subsets: ['latin'],
-  weight: ['400', '500'],
-  variable: '--font-plex-mono',
-})
+export const dynamic = 'force-dynamic'
 
-export const metadata: Metadata = {
-  title: 'Operator · vps-fra-1',
-  description: 'What your VPS operator did, whether the server is as you asked, and what needs you.',
-  generator: 'v0.app',
-  manifest: '/manifest.json',
-  appleWebApp: { capable: true, title: 'Operator', statusBarStyle: 'black-translucent' },
-  icons: {
-    icon: [
-      { url: '/icon-light-32x32.png', media: '(prefers-color-scheme: light)' },
-      { url: '/icon-dark-32x32.png', media: '(prefers-color-scheme: dark)' },
-      { url: '/icon.svg', type: 'image/svg+xml' },
-    ],
-    apple: '/apple-icon.png',
-  },
+export function generateMetadata(): Metadata {
+  return {
+    title: operatorMode() === 'live' ? 'Private operator' : 'Operator · vps-fra-1',
+    description: 'What your VPS operator did, whether the server is as you asked, and what needs you.',
+    generator: 'v0.app',
+    manifest: operatorMode() === 'demo' ? '/manifest.json' : undefined,
+    appleWebApp: { capable: true, title: 'Operator', statusBarStyle: 'black-translucent' },
+    icons: {
+      icon: [
+        { url: '/icon-light-32x32.png', media: '(prefers-color-scheme: light)' },
+        { url: '/icon-dark-32x32.png', media: '(prefers-color-scheme: dark)' },
+        { url: '/icon.svg', type: 'image/svg+xml' },
+      ],
+      apple: '/apple-icon.png',
+    },
+  }
 }
 
 export const viewport: Viewport = {
@@ -44,11 +42,12 @@ export const viewport: Viewport = {
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  const mode = operatorMode()
   return (
-    <html lang="en" className={`${plexSans.variable} ${plexMono.variable} bg-background`}>
+    <html lang="en" className="bg-background">
       <body className="min-h-dvh antialiased">
-        <OperatorProvider>{children}</OperatorProvider>
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        <OperatorProvider mode={mode}>{children}</OperatorProvider>
+        {mode === 'demo' && process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>
   )

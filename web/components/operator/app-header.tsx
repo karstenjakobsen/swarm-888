@@ -17,7 +17,7 @@ const connLabel: Record<Connection, string> = {
 }
 
 export function AppHeader({ back }: { back?: { href: string; label: string } }) {
-  const { connection, state, consistent, simulateDisconnect, resetScenario } = useOperator()
+  const { mode, name, connection, state, consistent, simulateDisconnect, resetScenario } = useOperator()
   const [open, setOpen] = useState(false)
   const inspecting = usePathname().startsWith('/inspect')
   const menuRef = useRef<HTMLDivElement>(null)
@@ -50,7 +50,7 @@ export function AppHeader({ back }: { back?: { href: string; label: string } }) 
         ) : null}
         <Link href="/" className="flex min-w-0 flex-col leading-tight">
           <span className="text-sm font-semibold">Operator</span>
-          <span className="truncate font-mono text-xs text-muted-foreground">vps-fra-1 · kj.dev</span>
+          <span className="truncate font-mono text-xs text-muted-foreground">{name || (mode === 'demo' ? 'vps-fra-1 · kj.dev' : 'Private operator')}</span>
         </Link>
         <div className="ml-auto flex items-center gap-1">
           <Link
@@ -64,12 +64,12 @@ export function AppHeader({ back }: { back?: { href: string; label: string } }) 
             <ScanSearch className="size-4" aria-hidden="true" />
             Inspect
           </Link>
-          <span
+          {mode === 'demo' && <span
             className="flex h-8 items-center rounded-full border border-attention/60 px-2.5 font-mono text-xs font-medium text-attention"
             title="Public demo with a simulated operator. No real VPS or credentials."
           >
             Demo
-          </span>
+          </span>}
           <span
             className={cn(
               'flex h-8 items-center gap-2 rounded-full px-3 font-mono text-xs',
@@ -89,7 +89,7 @@ export function AppHeader({ back }: { back?: { href: string; label: string } }) 
             <span className={cn(connection === 'live' && 'sr-only sm:not-sr-only')}>{connLabel[connection]}</span>
             <span className="text-muted-foreground">#{state.lastSeq}</span>
           </span>
-          <div className="relative" ref={menuRef}>
+          {mode === 'demo' && <div className="relative" ref={menuRef}>
             <button
               type="button"
               onClick={() => setOpen((o) => !o)}
@@ -143,7 +143,7 @@ export function AppHeader({ back }: { back?: { href: string; label: string } }) 
                 </p>
               </div>
             ) : null}
-          </div>
+          </div>}
         </div>
       </div>
       <ConnectionBanner />

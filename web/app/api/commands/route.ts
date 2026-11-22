@@ -1,3 +1,4 @@
+import { operatorMode } from '@/lib/operator/mode'
 import { getLog, resetLog } from '@/lib/operator/server-log'
 
 export const dynamic = 'force-dynamic'
@@ -11,6 +12,7 @@ type Body =
 const isStr = (v: unknown, max = 200): v is string => typeof v === 'string' && v.length > 0 && v.length <= max
 
 export async function POST(req: Request) {
+  if (operatorMode() !== 'demo') return new Response(null, { status: 503 })
   let body: Body
   try {
     body = (await req.json()) as Body

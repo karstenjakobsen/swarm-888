@@ -70,6 +70,7 @@ export type Project = {
 }
 
 export type Task = {
+  recordedOutcome?: Outcome
   id: string
   title: string
   source: 'owner' | 'schedule' | 'incident'
@@ -346,7 +347,7 @@ function trail<T extends { trail: TrailItem[]; lastAt: string }>(item: TrailItem
 export function apply(p: Projection, e: OperatorEvent): Projection {
   if (e.seq <= p.lastSeq) return p
   const next = reduce({ ...p, lastSeq: e.seq }, e)
-  return next
+  return e.outcome ? withTask(next, e.ref.task, (t) => ({ ...t, recordedOutcome: e.outcome })) : next
 }
 
 export function replay(events: OperatorEvent[]): Projection {
@@ -950,6 +951,7 @@ export type Outcome = { key: OutcomeKey; label: string; seq: number; why: string
  * downgrade a verified task.
  */
 export function taskOutcome(t: Task): Outcome {
+  if (t.recordedOutcome) return t.recordedOutcome
   if (t.stopped) return { key: 'stopped', label: 'Stopped', seq: t.stopped.seq, why: 'You stopped this task.' }
   if (t.verification?.result === 'failed')
     return { key: 'failed', label: 'Verification failed', seq: t.verification.seq, why: t.verification.check }
