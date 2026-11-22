@@ -1,0 +1,259 @@
+---
+- name: Deploy one pinned Swarm operator release
+  hosts: all
+  remote_user: root
+  gather_facts: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    framework_revision: "13f38198f37d320d397e4bec260400bf51924f6a"
+    repository: "{{ playbook_dir }}/../.."
+    release: "/opt/swarm-operator-releases/{{ framework_revision }}"
+    toolchain: /opt/swarm-operator-tools
+    node_version: "24.18.0"
+    uv_version: "0.12.5"
+    operator_home: /var/lib/swarm-operator
+    operator_state: "{{ operator_home }}/state"
+    node_home: "{{ toolchain }}/node-v{{ node_version }}-linux-x64"
+    node_archive: "node-v{{ node_version }}-linux-x64.tar.xz"
+    unit_names:
+      - swarm-operator-controller.service
+      - swarm-operator-worker.service
+      - swarm-operator-web.service
+      - swarm-operator-gateway.service
+      - swarm-operator.target
+  tasks:
+    - name: Validate single-host deployment and release pin
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - ansible_service_mgr == "systemd"
+          - ansible_architecture == "x86_64"
+          - framework_revision is match('^[a-f0-9]{40}$')
+        quiet: true
+
+    - name: Check existing system dependencies
+      ansible.builtin.command:
+        argv: [/usr/bin/test, -x, "{{ item }}"]
+      changed_when: false
+      loop: [/usr/bin/python3, /usr/bin/git, /usr/bin/caddy, /usr/sbin/runuser]
+
+    - name: Create dedicated service accounts
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        system: true
+        home: "{{ item.home }}"
+        create_home: false
+        shell: /usr/sbin/nologin
+        state: present
+      loop:
+        - {name: swarm-operator, home: "{{ operator_home }}"}
+        - {name: swarm-operator-web, home: /var/lib/swarm-operator-web}
+        - {name: swarm-operator-gateway, home: /var/lib/swarm-operator-caddy}
+
+    - name: Create private state and root-owned releases
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: "{{ operator_home }}", owner: swarm-operator, mode: '0700'}
+        - {path: "{{ operator_state }}", owner: swarm-operator, mode: '0700'}
+        - {path: /etc/swarm-operator, owner: root, mode: '0750'}
+        - {path: /opt/swarm-operator-releases, owner: root, mode: '0755'}
+        - {path: "{{ release }}", owner: root, mode: '0755'}
+        - {path: "{{ toolchain }}", owner: root, mode: '0755'}
+
+    - name: Inspect release completion marker
+      ansible.builtin.stat:
+        path: "{{ release }}/.framework-revision"
+      register: built_release
+
+    - name: Stage and build pinned framework
+      when: not built_release.stat.exists
+      block:
+        - name: Allocate a temporary local archive path
+          ansible.builtin.tempfile:
+            suffix: .tar.gz
+          delegate_to: localhost
+          register: framework_archive
+
+        - name: Archive exactly the requested local Git commit
+          ansible.builtin.command:
+            argv: [git, -C, "{{ repository }}", archive, --format=tar.gz, -o, "{{ framework_archive.path }}", "{{ framework_revision }}"]
+          delegate_to: localhost
+          changed_when: false
+
+        - name: Extract the framework archive into its release directory
+          ansible.builtin.unarchive:
+            src: "{{ framework_archive.path }}"
+            dest: "{{ release }}"
+            owner: root
+            group: root
+
+        - name: Download the pinned Node runtime with its official checksum
+          ansible.builtin.get_url:
+            url: "https://nodejs.org/dist/v{{ node_version }}/{{ node_archive }}"
+            checksum: "sha256:https://nodejs.org/dist/v{{ node_version }}/SHASUMS256.txt"
+            dest: "{{ toolchain }}/{{ node_archive }}"
+            mode: '0644'
+
+        - name: Unpack Node in the operator toolchain
+          ansible.builtin.unarchive:
+            src: "{{ toolchain }}/{{ node_archive }}"
+            dest: "{{ toolchain }}"
+            remote_src: true
+            creates: "{{ node_home }}/bin/node"
+            owner: root
+            group: root
+
+        - name: Prepare the isolated uv environment
+          ansible.builtin.command:
+            argv: [/usr/bin/python3, -m, venv, "{{ toolchain }}/uv"]
+            creates: "{{ toolchain }}/uv/bin/pip"
+
+        - name: Install the pinned uv wheel in its isolated environment
+          ansible.builtin.command:
+            argv: ["{{ toolchain }}/uv/bin/pip", install, "--only-binary=:all:", "uv=={{ uv_version }}"]
+            creates: "{{ toolchain }}/uv/bin/uv"
+
+        - name: Install locked production Python dependencies
+          ansible.builtin.command:
+            argv: ["{{ toolchain }}/uv/bin/uv", sync, --locked, --no-dev, --python, /usr/bin/python3]
+            chdir: "{{ release }}"
+          environment:
+            UV_NO_BUILD: "1"
+
+        - name: Install locked frontend dependencies and build
+          ansible.builtin.command:
+            argv: "{{ item }}"
+            chdir: "{{ release }}/web"
+          environment:
+            PATH: "{{ node_home }}/bin:/usr/bin:/bin"
+            COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+            COREPACK_HOME: "{{ toolchain }}/corepack"
+            NEXT_TELEMETRY_DISABLED: "1"
+            OPERATOR_MODE: live
+          loop:
+            - ["{{ node_home }}/bin/corepack", pnpm, install, --frozen-lockfile]
+            - ["{{ node_home }}/bin/corepack", pnpm, run, build]
+
+        - name: Seal the completed release pin
+          ansible.builtin.copy:
+            content: "{{ framework_revision }}\n"
+            dest: "{{ release }}/.framework-revision"
+            owner: root
+            group: root
+            mode: '0644'
+      always:
+        - name: Remove the temporary local archive
+          ansible.builtin.file:
+            path: "{{ framework_archive.path }}"
+            state: absent
+          delegate_to: localhost
+          when: framework_archive is defined and framework_archive.path is defined
+
+    - name: Select the pinned release
+      ansible.builtin.file:
+        src: "{{ release }}"
+        dest: /opt/swarm-operator
+        state: link
+        owner: root
+        group: root
+      notify: Restart the operator target
+
+    - name: Create the private acceptance catalog remote
+      ansible.builtin.command:
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /usr/bin/git, init, --bare, --initial-branch=main, "{{ operator_home }}/catalog.git"]
+        creates: "{{ operator_home }}/catalog.git/HEAD"
+
+    - name: Initialize the owner key and catalog as the unprivileged operator account
+      ansible.builtin.command:
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /opt/swarm-operator/.venv/bin/python, -m, "{{ item.module }}"]
+        chdir: /opt/swarm-operator
+        creates: "{{ operator_state }}/{{ item.marker }}"
+      environment:
+        OPERATOR_STATE_DIR: "{{ operator_state }}"
+        OPERATOR_CATALOG_REMOTE: "{{ operator_home }}/catalog.git"
+        OPERATOR_CATALOG_CHECKOUT: "{{ operator_home }}/catalog"
+      loop:
+        - {module: operator_v1.config, marker: owner.key}
+        - {module: operator_v1.catalog_cli, marker: catalog.json}
+
+    - name: Install the private loopback settings
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../operator.env.example"
+        dest: /etc/swarm-operator/operator.env
+        owner: root
+        group: root
+        mode: '0600'
+      notify: Restart the operator target
+
+    - name: Install the operator systemd units
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../systemd/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ unit_names }}"
+      notify: Restart the operator target
+
+    - name: Prepare operator-specific unit overrides
+      ansible.builtin.file:
+        path: "/etc/systemd/system/swarm-operator-{{ item }}.service.d"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop: [worker, web, gateway]
+
+    - name: Set the explicit worker identity and isolated service runtimes
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/swarm-operator-{{ item.name }}.service.d/10-acceptance.conf"
+        content: "{{ item.settings }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - name: worker
+          settings: |
+            [Service]
+            User=root
+            Group=root
+            Environment=OPERATOR_ALLOW_ROOT_WORKER=1 OPERATOR_MODEL=acknowledge
+        - name: web
+          settings: |
+            [Service]
+            Environment="PATH={{ node_home }}/bin:/usr/bin:/bin"
+        - name: gateway
+          settings: |
+            [Service]
+            User=swarm-operator-gateway
+            Group=swarm-operator-gateway
+      notify: Restart the operator target
+
+    - name: Apply an updated operator configuration
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable and start only the operator target
+      ansible.builtin.systemd_service:
+        name: swarm-operator.target
+        enabled: true
+        state: started
+
+    - name: Wait for an authenticated API to challenge the anonymous request
+      ansible.builtin.uri:
+        url: http://127.0.0.1:18080/api/snapshot
+        status_code: 401
+      register: private_api
+      until: private_api.status == 401
+      retries: 15
+      delay: 2
+
+  handlers:
+    - name: Restart the operator target
+      ansible.builtin.systemd_service:
+        name: swarm-operator.target
+        daemon_reload: true
+        state: restarted

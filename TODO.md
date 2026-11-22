@@ -84,4 +84,4 @@ See [the WSL2 startup and test commands](README.md). The worker's acknowledgment
 - [x] Run Ruff lint and formatting checks, pytest, frontend typecheck and production build. Run phone-width Playwright against live records from the walkthrough, following task → revision → later reuse and submitting a conversational memory correction.
 - [x] Include the frontend source and import SHAs, included local changes, destination path, commands, and an acceptance table marking each path real, simulated or unrun with its evidence. End the walkthrough with the two Docker task IDs and their shared full skill revision.
 
-See the [acceptance evidence and deployment handoff](docs/HANDOFF.md). The WSL2 Docker checkpoint passed with both simulated authoring and real Codex. The Linux VPS reboot and VPS root worker execution are recorded as unrun.
+The WSL2 Docker checkpoint passed with both simulated authoring and real Codex. The root worker, VPS reboot, and persistence checks passed on server-212. [V1 handoff](docs/HANDOFF.md), [server-212 deployment evidence](deploy/README.md#server-212-acceptance-on-2026-11-22).

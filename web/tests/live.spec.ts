@@ -93,6 +93,18 @@ test('private owner message survives a controller outage and replays through Cad
     expect(streams.some(url => new URL(url).searchParams.get('after') === '2')).toBeTruthy()
     const timeline = page.getByRole('heading', {name:'Evidence trail'}).locator('..')
     await expect(timeline).toContainText('The worker acknowledged')
+    const evidence = 'Read memory after completion.'
+    expect((await once(run(python, ['-c', [
+      'import sys',
+      'from operator_v1.config import Settings',
+      'from operator_v1.state import State',
+      'state = State(Settings.load())',
+      'with state.transaction(write=True) as db:',
+      '    state.append(db, sys.argv[1], "evidence", sys.argv[2])',
+    ].join('\n'), taskId!, evidence]), 'exit'))[0]).toBe(0)
+    await expect(timeline).toContainText(evidence)
+    await expect(page.getByText('Acknowledged', {exact:true})).toBeVisible()
+    await expect(reopened.getByText('Acknowledged', {exact:true})).toBeVisible()
     const text = await timeline.innerText()
     await expect(reopened.getByRole('heading', {name:'Evidence trail'}).locator('..')).toHaveText(await timeline.textContent() ?? '')
     await reopened.close()

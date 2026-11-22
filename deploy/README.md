@@ -1,8 +1,40 @@
 # Install the operator on server-212
 
-The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Use that alias for installation administration. Use an ordinary SSH account for the day-to-day tunnel when one is available. Service registration and reboot acceptance on the VPS are unrun.
+The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Use that alias for installation administration. Use an ordinary SSH account for the day-to-day tunnel when one is available.
 
-## Prepare the release
+## Deploy the pinned VPS release with Ansible
+
+From the repository root, run the single-host playbook with Ansible Core 2.19 and the framework commit `13f3819` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and private Git catalog live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+
+```sh
+ansible-playbook -i server-212, deploy/ansible/deploy.yml
+```
+
+Open the private tunnel from your workstation and visit [the operator UI](http://127.0.0.1:18080). Sign in with the owner key at `/var/lib/swarm-operator/state/owner.key`. Keep the local port at `18080` to match the configured browser origin.
+
+```sh
+ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-212
+```
+
+The acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. For persistence acceptance, run the reboot playbook during an authorized maintenance window. It reboots the entire VPS. Rerun deployment after SSH returns and then verify the persisted baseline.
+
+```sh
+ansible-playbook -i server-212, deploy/ansible/acceptance.yml
+ansible-playbook -i server-212, deploy/ansible/reboot.yml -e '{"operator_reboot_authorized":true}'
+ansible-playbook -i server-212, deploy/ansible/deploy.yml
+ansible-playbook -i server-212, deploy/ansible/acceptance.yml -e acceptance_phase=after
+```
+
+### Server-212 acceptance on 2026-11-22
+
+- Framework revision `13f38198f37d320d397e4bec260400bf51924f6a`. Ansible reported zero changes on the first post-reboot deployment. Chromium completed owner sign-in through the tunnel before and after reboot.
+- Effective UIDs before and after reboot were `0` for the worker, `994` for the API, `993` for the web, and `992` for the gateway. All three TCP listeners were bound to IPv4 loopback.
+- The executable skill `9ff7cb6195702f672327a2016d14e3d17c0d6e8e` dispatched the approved probe argument once. The executor denied the other argument and the probe recorded zero additional dispatches. The acceptance driver supplied these skills through task-bound MCP.
+- Goal `baa05670ddad497e90fececf8d85bae4` repaired the induced change from mode `0600` to `0644` once, at journal event `18`. An independent file stat showed `0600` after reboot. The worker logged a fresh healthy check with zero further repairs.
+- Boot ID changed from `28042fb6-a062-4a83-8090-ad33a9d0ff4f` to `6b767fc4-2f24-4173-9244-cc1e00916300`. The post-reboot check recovered the same operator profile `c3b19cd5596f426fa594dbd32968b95f`, memory `06759c45ae7146f6bff7d37049a80ce2` at revision `1`, both active skills including the file mode skill `8d30307c79553c65c1035d77ecc5e1ffbc3f7f84`, and the active standing goal.
+- After the reboot, the existing Caddy, Docker, and `grime-steer` services were active and seven Grime containers were up. `grime-works-grime-crew-1` was still restarting with exit code `1` at the last check.
+
+## Prepare a manual installation
 
 Check the host before reserving ports or installing dependencies. Record the OS, architecture, free disk, running Docker context and the existing listeners. These commands only inspect the host.
 

@@ -1,0 +1,71 @@
+---
+- name: Verify the isolated operator on server-212
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    acceptance_phase: before
+  tasks:
+    - name: Verify single-host acceptance scope
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == "server-212"
+          - acceptance_phase in ["before", "after"]
+        quiet: true
+
+    - name: Install the harmless probe and acceptance driver outside the pinned release
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/{{ item.source }}"
+        dest: "/opt/swarm-operator-tools/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - {source: acceptance_probe.py, dest: acceptance-probe, mode: '0755'}
+        - {source: verify_vps.py, dest: verify_vps.py, mode: '0644'}
+
+    - name: Verify effective identities of the worker, API, web and gateway processes
+      ansible.builtin.shell: |
+        set -eu
+        for unit in worker controller web gateway; do
+          pid=$(systemctl show -p MainPID --value "swarm-operator-$unit.service")
+          test "$pid" -gt 0
+          eu=$(awk '$1 == "Uid:" {print $3}' "/proc/$pid/status")
+          case "$unit" in
+            worker) account=root ;;
+            controller) account=swarm-operator ;;
+            web) account=swarm-operator-web ;;
+            gateway) account=swarm-operator-gateway ;;
+          esac
+          test "$eu" = "$(id -u "$account")"
+          printf '%s pid=%s effective_uid=%s account=%s\n' "$unit" "$pid" "$eu" "$account"
+        done
+        for port in 18080 18000 13000; do
+          binding=$(ss -H -ltn "sport = :$port" | awk '{print $4}')
+          test "$binding" = "127.0.0.1:$port"
+          printf 'listener %s\n' "$binding"
+        done
+      args:
+        executable: /bin/sh
+      changed_when: false
+      register: identities
+
+    - name: Show observed service identities and loopback bindings
+      ansible.builtin.debug:
+        var: identities.stdout_lines
+
+    - name: Check the authorization boundary and persisted fixture state
+      ansible.builtin.command:
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /opt/swarm-operator/.venv/bin/python, /opt/swarm-operator-tools/verify_vps.py, "{{ acceptance_phase }}"]
+        chdir: /opt/swarm-operator
+      environment:
+        OPERATOR_STATE_DIR: /var/lib/swarm-operator/state
+        PYTHONPATH: /opt/swarm-operator
+      changed_when: acceptance_phase == "before"
+      register: verification
+
+    - name: Show the acceptance evidence
+      ansible.builtin.debug:
+        msg: "{{ verification.stdout | from_json }}"

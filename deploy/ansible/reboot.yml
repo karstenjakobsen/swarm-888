@@ -1,0 +1,19 @@
+---
+- name: Reboot the authorized single VPS
+  hosts: all
+  remote_user: root
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Confirm the explicitly selected host
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - inventory_hostname == "server-212"
+          - operator_reboot_authorized | default(false) | bool
+        quiet: true
+    - name: Reboot and wait for SSH to return
+      ansible.builtin.reboot:
+        msg: Authorized Swarm operator persistence acceptance on server-212
+        reboot_timeout: 300

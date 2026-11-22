@@ -237,6 +237,20 @@ def test_worker_restart_and_stream_resume(tmp_path):
             ]
             assert replay[-1]["outcome"]["label"] == "Acknowledged"
 
+            state = State(settings)
+            with state.transaction(write=True) as db:
+                state.append(db, task, "evidence", "Read memory after completion.")
+            snapshot = client.get("/api/snapshot").json()
+            assert snapshot["events"][-1]["kind"] == "evidence"
+            assert snapshot["tasks"][0]["outcome"] == replay[-1]["outcome"]
+
+            with state.transaction(write=True) as db:
+                state.append(db, task, "verified", "Verified independently after completion.")
+                state.append(db, task, "evidence", "Read memory after verification.")
+            snapshot = client.get("/api/snapshot").json()
+            assert snapshot["tasks"][0]["outcome"] == snapshot["events"][-2]["outcome"]
+            assert snapshot["tasks"][0]["outcome"]["key"] == "verified"
+
 
 def test_concurrent_message_retry(tmp_path):
     settings = Settings(tmp_path)
