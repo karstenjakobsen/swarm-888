@@ -101,6 +101,33 @@ def test_private_api_and_idempotent_submission(tmp_path):
         assert snapshot["tasks"][0]["checkpoint"] == "queued"
 
 
+def test_sessions_on_the_same_hostname_keep_separate_cookies(tmp_path):
+    first = Settings(tmp_path / "local", origin="http://127.0.0.1:8080")
+    second = Settings(tmp_path / "preview", origin="http://127.0.0.1:8083")
+    first.create_owner_key()
+    second.create_owner_key()
+
+    with (
+        controller(first) as local,
+        controller(second) as preview,
+        httpx.Client(trust_env=False) as browser,
+    ):
+        local_session = local.base_url.join("/api/session")
+        preview_session = preview.base_url.join("/api/session")
+        for settings, session_url in ((first, local_session), (second, preview_session)):
+            assert browser.get(session_url).status_code == 401
+            assert (
+                browser.post(
+                    session_url,
+                    headers=headers(settings),
+                    json={"key": settings.owner_key.read_text().strip()},
+                ).status_code
+                == 204
+            )
+        assert browser.get(local_session).status_code == 204
+        assert browser.get(preview_session).status_code == 204
+
+
 @contextmanager
 def process(args, env, **options):
     child = subprocess.Popen([sys.executable, "-m", *args], env={**os.environ, **env}, **options)

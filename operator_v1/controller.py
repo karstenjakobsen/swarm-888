@@ -2,6 +2,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
@@ -38,11 +39,14 @@ def create_app(
     runtime: Settings
     store: State
     owner_key: bytes
+    session_cookie: str
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        nonlocal store, owner_key, runtime
+        nonlocal store, owner_key, runtime, session_cookie
         runtime = settings or Settings.load()
+        # Browsers share cookies across ports on the same hostname.
+        session_cookie = f"{COOKIE}_{sha256(runtime.origin.encode()).hexdigest()[:16]}"
         with runtime.service_lock("controller"):
             owner_key = runtime.read_owner_key()
             store = State(runtime)
@@ -69,7 +73,7 @@ def create_app(
         return response
 
     def owner(request: Request) -> str:
-        token = request.cookies.get(COOKIE, "")
+        token = request.cookies.get(session_cookie, request.cookies.get(COOKIE, ""))
         if not token or not store.authenticated(token):
             raise HTTPException(401, "Sign in as the owner")
         return token
@@ -94,7 +98,7 @@ def create_app(
         if not secrets.compare_digest(body.key.get_secret_value().encode(), owner_key):
             raise HTTPException(401, "Invalid owner key")
         response.set_cookie(
-            COOKIE,
+            session_cookie,
             store.new_session(SESSION_SECONDS),
             max_age=SESSION_SECONDS,
             path="/api",
