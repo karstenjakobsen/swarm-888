@@ -1,7 +1,3 @@
-[Download the full V1 implementation prompt](https://chatgpt.com/library?file_id=libfile_fde3_f-8710b140b2088191a76107a3263df114_c7a3f1e972b481918992c0d1f4dbc06f&account_id=personal)
-
----
-
 # Implement V1 of the self-learning VPS operator
 
 You are the backend developer and platform engineer. Implement and test V1 in the existing project checkout. Your development environment is **WSL2 with Docker already running**. The deployment target is **one Debian or Ubuntu VPS controlled by one authenticated owner**.
