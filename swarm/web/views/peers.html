@@ -1,0 +1,42 @@
+<section x-show="selectedTab === 'peers'" x-data="peerForm">
+  <div class="section-head">
+    <h2>Connected peers</h2>
+    <span class="muted" x-text="peers.length"></span>
+  </div>
+  <p class="empty" x-show="!peers.length">No peers connected.</p>
+  <template x-for="p in peers" :key="p.id"
+    ><div class="asset">
+      <strong x-text="p.name"></strong><code x-text="p.url"></code></div
+  ></template>
+  <div class="peer-grid">
+    <form class="panel" @submit.prevent="connect">
+      <h2>Connect a peer</h2>
+      <label>Peer name<input required x-model="name" maxlength="80" /></label
+      ><label>Operator URL<input type="url" x-model="url" required /></label>
+      <label
+        >Invitation key<input
+          type="password"
+          x-model="token"
+          required
+          autocomplete="off" /></label
+      ><button class="primary" :disabled="busyPeer">Save peer</button>
+    </form>
+    <form class="panel" @submit.prevent="invite">
+      <h2>Invite an operator</h2>
+      <p class="muted">Incoming tasks will run in a dedicated workspace.</p>
+      <label
+        >Workspace name<input
+          x-model="inviteName"
+          maxlength="80"
+          required /></label
+      ><button class="secondary" :disabled="busyPeer">Create invitation</button>
+      <label x-show="inviteToken"
+        >Invitation key<input
+          readonly
+          :value="inviteToken"
+          aria-label="Generated invitation key"
+      /></label>
+    </form>
+  </div>
+  <p class="error" x-text="problem" x-show="problem"></p>
+</section>

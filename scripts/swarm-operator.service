@@ -1,0 +1,26 @@
+[Unit]
+Description=Swarm 888 operator
+After=network.target
+
+[Service]
+Type=simple
+User=swarm-operator
+Group=swarm-operator
+WorkingDirectory=/var/lib/swarm-888
+Environment=HOME=/var/lib/swarm-888
+Environment=SWARM_WORKERS=2
+EnvironmentFile=-/etc/swarm-888.env
+ExecStart=/usr/local/bin/swarm-operator serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=25
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=swarm-888
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

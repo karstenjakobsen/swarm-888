@@ -1,0 +1,26 @@
+<section x-show="selectedTab === 'workers'">
+  <div class="section-head">
+    <h2>Local workers</h2>
+    <span class="muted" x-text="slotLabel"></span>
+  </div>
+  <div class="worker-grid">
+    <template x-for="w in workers" :key="w.id"
+      ><article class="panel worker">
+        <div class="section-head">
+          <strong class="mono" x-text="w.id"></strong
+          ><span class="chip" x-text="workerStatus(w)"></span>
+        </div>
+        <p x-text="workerActivity(w)"></p>
+        <template x-if="w.run"
+          ><div>
+            <h3 x-text="w.run.name"></h3>
+            <p x-text="w.run.prompt"></p>
+            <button class="quiet" @click="selectProject(w.run.project)">
+              Open workspace
+            </button>
+          </div></template
+        >
+      </article></template
+    >
+  </div>
+</section>
