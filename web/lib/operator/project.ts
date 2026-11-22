@@ -349,7 +349,15 @@ function trail<T extends { trail: TrailItem[]; lastAt: string }>(item: TrailItem
 export function apply(p: Projection, e: OperatorEvent): Projection {
   if (e.seq <= p.lastSeq) return p
   const next = reduce({ ...p, lastSeq: e.seq }, e)
-  return e.outcome ? withTask(next, e.ref.task, (t) => ({ ...t, recordedOutcome: e.outcome })) : next
+  const { outcome } = e
+  if (!outcome) return next
+  return withTask(next, e.ref.task, (t) => {
+    const previous = t.recordedOutcome
+    if (outcome.key === 'working' && previous && previous.key !== 'working' && previous.key !== 'needs-you') {
+      return t
+    }
+    return { ...t, recordedOutcome: outcome }
+  })
 }
 
 export function replay(events: OperatorEvent[]): Projection {

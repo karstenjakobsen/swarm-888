@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from pydantic import JsonValue
 
 from .config import Settings
-from .contracts import Event, Kind, Profile, Snapshot, TaskState
+from .contracts import Event, Kind, Outcome, Profile, Snapshot, TaskState
 
 SCHEMA = (
     "CREATE TABLE profile(id TEXT PRIMARY KEY, name TEXT, purpose TEXT, instructions TEXT)",
@@ -323,7 +323,20 @@ class State:
         with self.transaction() as db:
             profile = Profile(**dict(db.execute("SELECT * FROM profile").fetchone()))
             events = [self.event(row) for row in db.execute("SELECT * FROM events ORDER BY seq")]
-            latest = {event.task: event.outcome for event in events if event.kind != "system"}
+            latest: dict[str, Outcome] = {}
+            for event in events:
+                if event.kind == "system":
+                    continue
+                outcome = event.outcome
+                previous = latest.get(event.task)
+                # Evidence can arrive after the task has ended, including after verification.
+                if (
+                    outcome.key == "working"
+                    and previous
+                    and previous.key not in ("working", "needs-you")
+                ):
+                    continue
+                latest[event.task] = outcome
             tasks = [
                 TaskState(**dict(row), outcome=latest[row["id"]])
                 for row in db.execute("SELECT id,checkpoint FROM tasks ORDER BY rowid")
