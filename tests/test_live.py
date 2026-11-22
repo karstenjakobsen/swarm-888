@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
+from test_connectors import configure_observation, monitoring_provider
 from test_dns import configured, lose_create_reply, provider_server
 from test_learning import checked_failure
 
@@ -34,7 +35,7 @@ def rpc(client, method, **params):
 
 
 @contextmanager
-def live_conversation(state, prompt, expected_status="answered"):
+def live_conversation(state, prompt, expected_status="answered", credential=None):
     if not Path(os.getenv("SWARM_CODEX_AUTH", "")).is_file():
         pytest.skip("Set SWARM_CODEX_AUTH to a Codex file-backed ChatGPT login")
     worker = subprocess.Popen(
@@ -63,6 +64,10 @@ def live_conversation(state, prompt, expected_status="answered"):
             task = rpc(client, "submit", text=prompt)
             while time.monotonic() < deadline:
                 row = state.one("SELECT * FROM tasks WHERE id=?", task)
+                if row["status"] == "credential" and credential is not None:
+                    rpc(client, "credential", task=task, token=credential)
+                    credential = None
+                    continue
                 if row["status"] not in ("running", "queued"):
                     break
                 time.sleep(0.5)
@@ -148,6 +153,37 @@ def test_codex_learns_from_failed_check(tmp_path):
             "cases",
             cases,
         )
+
+
+def test_codex_composes_remote_observation(tmp_path, monkeypatch):
+    state = State(tmp_path / "live")
+    catalog = Catalog(state)
+    with monitoring_provider() as (requests, endpoint):
+        configure_observation(catalog, tmp_path, monkeypatch, endpoint)
+        prompt = (
+            "/observe monitoring orders Build, test, activate and use a reusable skill named failed-units. "
+            "Read the monitoring provider's saved observation. Parse its text field as SERVICE STATUS lines. "
+            "Return a JSON object with a failed array containing exactly the failed service names in input order."
+        )
+        with live_conversation(state, prompt, credential="synthetic-access-token") as (
+            client,
+            task,
+            events,
+        ):
+            tools = [json.loads(e["data"])["tool"] for e in events if e["kind"] == "tool.completed"]
+            assert {"connector_result", "skill_stage", "skill_test", "skill_activate"} <= set(tools)
+            call = state.one("SELECT * FROM calls WHERE task=? ORDER BY rowid DESC LIMIT 1", task)
+            assert json.loads(call["result"]) == {"failed": ["orders.service"]}
+            checked = rpc(
+                client,
+                "attest",
+                call=call["id"],
+                expected={"failed": ["orders.service"]},
+                observation="Independent monitoring fixture grader",
+            )
+            assert checked["passed"] and requests == [("read", "orders")]
+            assert "synthetic-access-token" not in str(events)
+            print("task", task, "revision", call["rev"], "tools", tools, "result", call["result"])
 
 
 def test_digitalocean_designated_host(tmp_path):

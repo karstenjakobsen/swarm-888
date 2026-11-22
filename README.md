@@ -39,6 +39,8 @@ Expect `{"failed":["orders.service","mailer.service"]}`. The activity feed ident
 
 To create ordinary project sources, submit `Create a project named heartbeat containing data/status.json and a README explaining its fields`. The conversation records the commit. Clone the application repository with `git clone "${SWARM_STATE:-$HOME/.local/state/swarm-888}/workspaces/projects/heartbeat.git" heartbeat`.
 
+To use an owner-configured monitoring provider, submit `/observe monitoring orders Use the failed-services skill on the returned report`. The console asks for the provider credential when needed. The conversation keeps the redacted report for follow-ups and restarts. See [connector configuration](docs/operations.md#using-another-mcp-provider).
+
 ## Checks
 
 ```sh
@@ -49,6 +51,7 @@ uv run --locked pytest tests/test_skills.py::test_author_restart_reuse_and_sourc
 uv run --locked pytest tests/test_dns.py::test_dns_crash_recovery
 SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_author_and_reuse
 SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_dns_recovery
+SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_composes_remote_observation
 uv run --locked pytest -m live -s tests/test_live_ingress.py
 ```
 

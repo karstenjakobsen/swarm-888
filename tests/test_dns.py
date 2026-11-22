@@ -30,12 +30,15 @@ class Zone:
 
 
 @contextmanager
-def provider_server():
+def provider_server(allowed: Intent | None = None):
     zone = Zone()
     server = FastMCP("provider-fixture", stateless_http=True, json_response=True)
 
     @server.tool(name="domain-record-list")
     async def listing(Domain: str, Page: int, PerPage: int) -> dict:
+        if allowed and Domain != allowed.zone:
+            zone.calls.append(("denied", Domain))
+            raise ValueError("Provider credential has no access to this zone")
         zone.calls.append(("list", Domain))
         if zone.unreadable:
             raise ValueError("Unavailable")
@@ -43,6 +46,14 @@ def provider_server():
 
     @server.tool(name="domain-record-create")
     async def create(Domain: str, Type: str, Name: str, Data: str) -> dict:
+        if allowed and (Domain, Type, Name, Data) != (
+            allowed.zone,
+            "A",
+            allowed.label,
+            allowed.address,
+        ):
+            zone.calls.append(("denied", Domain))
+            raise ValueError("Provider denied changing this record")
         zone.calls.append(("create", Domain))
         zone.records.append({"type": Type, "name": Name, "data": Data})
         zone.created.set()
@@ -51,6 +62,15 @@ def provider_server():
                 await asyncio.sleep(0.03)
         return {"domain_record": zone.records[-1]}
 
+    with serve_provider(server) as endpoint:
+        try:
+            yield zone, endpoint
+        finally:
+            zone.stop.set()
+
+
+@contextmanager
+def serve_provider(server):
     asgi = server.streamable_http_app()
     from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -71,9 +91,8 @@ def provider_server():
             assert time.monotonic() < deadline
             time.sleep(0.02)
         try:
-            yield zone, "http://127.0.0.1:" + str(sock.getsockname()[1]) + "/mcp"
+            yield "http://127.0.0.1:" + str(sock.getsockname()[1]) + "/mcp"
         finally:
-            zone.stop.set()
             http.should_exit = True
             thread.join(5)
 

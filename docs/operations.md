@@ -45,7 +45,9 @@ The privileged parent opens the private state directory and handles fixture obse
 
 Submit `/dns ZONE RELATIVE_NAME IPV4` as a new owner conversation. This grants a create-if-absent operation for that exact A record. For a missing token the console displays a write-only field bound to the waiting task. Supply a dedicated bearer token there. The worker discovers the provider's tools and checks their input schemas. It paginates observations, preserves conflicts, journals dispatch before a create, and verifies by reading the provider. After the owner resolves a conflicting record, send `recheck` as a follow-up to that conversation.
 
-The example connector targets DigitalOcean's networking MCP service. An independent destination binding allows the credential only at its exact HTTPS endpoint. The HTTP client disables redirects. Set hard cloud limits using the provider account/token scopes or an independently administered gateway. A local target check cannot narrow a stolen provider token's authority. [DigitalOcean MCP documentation](https://docs.digitalocean.com/reference/mcp/)
+The default connector targets DigitalOcean's networking MCP service. For direct access, provision a dedicated token with the `domain:create` and required `domain:read` scopes in the designated team. DigitalOcean enforces those scopes at its API. They cover domains and records in that team. The worker discovers the networking tools and checks the provider's input and output schemas. [DigitalOcean scope documentation](https://docs.digitalocean.com/reference/api/scopes/domain/create/) · [DigitalOcean networking tools](https://docs.digitalocean.com/reference/mcp/networking-mcp-tools/)
+
+For an independently administered gateway that enforces individual record restrictions, configure its HTTPS endpoint and a dedicated gateway secret reference under `digitalocean` in both the Git connector and the owner's grants file described below. The gateway must expose `domain-record-list` and `domain-record-create` with the DigitalOcean networking schemas. Keep the upstream DigitalOcean token at the gateway and enter only the gateway token in the console. Restart the worker when changing the DNS provider. A pending DNS operation retains its original endpoint and secret reference across restart and waits if that binding changes.
 
 To publish an existing service, provide a running loopback HTTP upstream, a Caddy HTTPS listener and curl. Caddy must expose its admin API on a private Unix socket accessible by the worker. Set the admin options `"origins":["http://localhost"]` and `"enforce_origin":true`. Access to this socket grants configuration authority to local processes that can open it. Keep Caddy's autosave enabled, preserve its certificate storage, and configure its supervisor to load the saved configuration with `caddy run --resume` after restart. Caddy handles ACME issuance and renewal while the operator is offline. [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
 
@@ -71,6 +73,27 @@ Set `SWARM_INGRESS_CONFIG` in the worker environment to the absolute path of an 
 Submit `Publish the orders service at orders.example.com with TLS` or `/publish orders`. The operator acquires the publishing skill, checks the listener, probes the upstream, reconciles DNS and installs an exact-host reverse proxy. A wildcard or ambiguous existing route or record can require owner direction. Send `recheck` after resolving it. The task records the Caddy route ID, pinned revision, certificate fingerprint, expiry and application check. A lost configuration reply enters observation. A concurrent Caddy edit invalidates the conditional write. [Caddy API concurrency](https://caddyserver.com/docs/api#concurrent-config-changes)
 
 For a deliberate reversal, inspect the current full configuration and the recorded route ID. Confirm the route still points to the recorded host and upstream before using the Caddy admin API to delete that exact route with the observed ETag. Review DNS separately because another service may now depend on the record.
+
+## Using another MCP provider
+
+Define a catalog connector through the conversation. For example, ask the operator to create a connector named `monitoring` with endpoint `https://monitor.example.com/mcp`, bearer authentication and secret reference `monitoring-reader`. Configure its actual read-only credential at the provider. Set `SWARM_CONNECTOR_GRANTS` in the worker environment to an owner-maintained JSON file outside the catalog and the operator's writable projects. Replace the example endpoint, tool and arguments with values from the designated provider.
+
+```json
+{
+  "monitoring": {
+    "endpoint": "https://monitor.example.com/mcp",
+    "authentication": "bearer",
+    "secret": "monitoring-reader",
+    "observations": {
+      "orders": {"tool": "unit-report", "arguments": {"service": "orders"}}
+    }
+  }
+}
+```
+
+Submit `/observe monitoring orders` to read and journal the report. Add an instruction to have a skill process it, for example `/observe monitoring orders Use failed-services on the returned text`. On first use, the authenticated password field identifies the credential destination. The worker checks the owner binding and Git definition, discovers the tool, and invokes it with the granted arguments. The credential stays bound to that endpoint. Owner-defined observations must be read-only at the service. The worker makes at most four attempts in three minutes before recording an unknown outcome. Use `recheck` on that task to retry after resolving a problem.
+
+A successful observation stays available through `connector_result` with its source task ID. Follow-ups reuse the saved, redacted result after a restart. Submit a new observation task for fresh data.
 
 ## Export, recovery and boot
 

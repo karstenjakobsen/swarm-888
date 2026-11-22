@@ -35,6 +35,8 @@ SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s test
 SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live_ingress.py
 ```
 
+A live Codex conversation processed a report from a second, bearer-authenticated MCP provider running on loopback. Task `cc7994ea4b29472ab43d7044beac4459` resumed after credential entry, read the saved report, and authored, tested, activated and invoked `failed-units` at revision `31a0c752e97b54807fa81512245be54813a9604cf4c0a8ede724112be63760c4`. The independent grader found `{"failed":["orders.service"]}`. The provider recorded one query. Run this case with `SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_composes_remote_observation`.
+
 ## Default acceptance suite
 
 `make setup && make check` installs the locked environment and runs Ruff checks, format verification, and pytest. The automated tests use temporary state. Notification tests also simulate an HTTPS receiver that accepts delivery and loses its reply. The receiver sees one incident ID across both attempts.
@@ -49,6 +51,7 @@ SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s test
 | Host operation recovery | The runner injects a crash after an actual fixture chmod. Fresh observation closes the journal with one mutation. |
 | Standing goals and persistent failure | Real files, temporary SQLite and a controllable clock. A simulated persistent repair fault consumes one incident budget across a restart, diagnosis and a skill revision attempt. One notification is delivered. |
 | DNS lost replies | The runner kills the dispatching process. A fresh runtime exercises the checkpoint-bound provider observation. Both outcomes produce one create and one record. The unreadable case ends unknown and alerts once. |
+| Connector grants | A second MCP server checks bearer authentication. The controller shows the credential destination and resumes the same task. A fresh application reads the saved observation without another provider query. Direct calls outside the fixture providers' grants fail. Changing DNS gateways while a create awaits verification preserves the original binding. |
 | Ingress publication and identity | Fixture Caddy transport and real local HTTP MCP exercise conflicting ingress, unavailable upstream, conflicting DNS, a lost configuration reply and restart. An independent local HTTPS test rejects a default-backend response with the wrong marker. |
 
 ## Remaining live prerequisites

@@ -5,9 +5,11 @@ import json
 import os
 import re
 import shlex
+from dataclasses import asdict
 from typing import Protocol
 
 from .catalog import Catalog
+from .connectors import ConnectorObservations, RemoteMCP
 from .dns import (
     DO_ENDPOINT,
     CredentialNeeded,
@@ -15,7 +17,6 @@ from .dns import (
     DNSReconciler,
     Intent,
     Provider,
-    RemoteMCP,
 )
 from .goals import Maintenance
 from .learning import Learning
@@ -35,16 +36,22 @@ class Application:
         self, state: State, catalog: Catalog, runtime: Runtime, provider: Provider | None = None
     ):
         self.state, self.catalog, self.runtime = state, catalog, runtime
-        self.remote = RemoteMCP(
-            state, catalog.path / "connectors/digitalocean.json", {"digitalocean": DO_ENDPOINT}
+        self.observations = ConnectorObservations(state, catalog)
+        self.dns = DNSReconciler(
+            state, provider or DNSProvider(lambda: self.observations.dns_remote(DO_ENDPOINT))
         )
-        self.dns = DNSReconciler(state, provider or DNSProvider(self.remote))
         self.maintenance = Maintenance(state, catalog)
         self.learning = Learning(state, catalog)
         self.publisher = Publisher(state, catalog, self.dns)
         self.model_task: str | None = None
         self.lock = asyncio.Lock()
         self.current: str | None = None
+
+    @property
+    def remote(self) -> RemoteMCP:
+        if isinstance(self.dns.provider, DNSProvider):
+            return self.dns.provider.remote
+        return self.observations.dns_remote(DO_ENDPOINT)
 
     def recover(self) -> None:
         with self.state.tx() as conn:
@@ -102,9 +109,18 @@ class Application:
                 "skill": "publish-service",
             }
         elif text.startswith("/"):
-            parts = shlex.split(text)
+            # These commands end in the owner's free-form request, including apostrophes.
+            command = text.split(None, 1)[0]
+            prose_after = {"/observe": 3, "/project": 2}.get(command)
+            parts = text.split(None, prose_after) if prose_after else shlex.split(text)
             kind = parts[0][1:]
             match [kind, *parts[1:]]:
+                case ["observe", connector, query, *request_words]:
+                    request = {
+                        "connector": name(connector),
+                        "query": name(query),
+                        "request": " ".join(request_words),
+                    }
                 case ["learn", call]:
                     request = self.learning.request(call)
                 case ["project", project_name, *instructions] if instructions:
@@ -192,6 +208,21 @@ class Application:
     async def follow(self, task: str, text: str) -> None:
         row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
         if (
+            row["kind"] == "observe"
+            and row["status"] in ("waiting", "unknown")
+            and text.strip().lower() == "recheck"
+        ):
+            with self.state.tx() as conn:
+                conn.execute(
+                    "UPDATE connector_observations SET attempts=0,deadline=NULL WHERE task=? AND result IS NULL",
+                    (task,),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", (identity(), task)
+                )
+                self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
+            return
+        if (
             row["kind"] in ("dns", "publish")
             and row["status"] in ("waiting", "unknown")
             and text.strip().lower() == "recheck"
@@ -218,7 +249,17 @@ class Application:
                     )
                 self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
             return
-        if row["kind"] not in ("chat", "project", "maintain", "diagnose", "improve", "publish"):
+        if row["status"] == "credential":
+            raise ValueError("Supply the pending credential to resume this task")
+        if row["kind"] not in (
+            "chat",
+            "project",
+            "maintain",
+            "diagnose",
+            "improve",
+            "publish",
+            "observe",
+        ):
             raise ValueError("Use an explicit owner command to change this operation")
         text = self.state.redact(text.strip())
         if not 1 <= len(text) <= 24000:
@@ -249,12 +290,40 @@ class Application:
         )
 
     def credential(self, task: str, token: str) -> None:
-        row = self.state.one("SELECT kind,status FROM tasks WHERE id=?", task)
-        if row["kind"] not in ("dns", "publish") or row["status"] != "credential":
+        row = self.state.one("SELECT kind,status,input,checkpoint FROM tasks WHERE id=?", task)
+        if row["kind"] not in ("dns", "publish", "observe") or row["status"] != "credential":
             raise ValueError("This task has no outstanding credential request")
-        self.state.secret("digitalocean", token)
-        self.state.change("UPDATE tasks SET status='queued',wake=0 WHERE id=?", task)
-        self.state.event(task, "credential.supplied", {"destination": DO_ENDPOINT})
+        if row["kind"] == "observe":
+            remote, _ = self.observations.binding(task, json.loads(row["input"]))
+        else:
+            remote = self.remote
+        dest = remote.destination()
+        with self.state.tx() as conn:
+            current = conn.execute(
+                "SELECT status,checkpoint FROM tasks WHERE id=?", (task,)
+            ).fetchone()
+            checkpoint = json.loads(current["checkpoint"])
+            challenge = checkpoint.pop("credential_request", None)
+            legacy = (
+                row["kind"] in ("dns", "publish")
+                and dest.endpoint == DO_ENDPOINT
+                and dest.secret == "digitalocean"
+            )
+            if current["status"] != "credential" or (
+                challenge != asdict(dest) and not (challenge is None and legacy)
+            ):
+                raise ValueError("The pending credential destination has changed")
+            self.state.secret(dest.slot, token)
+            conn.execute(
+                "UPDATE tasks SET status='queued',wake=0,checkpoint=? WHERE id=?",
+                (encode(checkpoint), task),
+            )
+            self.state.event(
+                task,
+                "credential.supplied",
+                {"destination": dest.endpoint, "secret": dest.secret},
+                conn,
+            )
 
     async def step(self) -> bool:
         async with self.lock:
@@ -277,10 +346,26 @@ class Application:
                     key,
                 )
             except CredentialNeeded as exc:
-                self.state.change("UPDATE tasks SET status='credential' WHERE id=?", key)
-                self.state.event(
-                    key, "credential.required", {"secret": str(exc), "destination": DO_ENDPOINT}
-                )
+                with self.state.tx() as conn:
+                    current = conn.execute(
+                        "SELECT status,checkpoint FROM tasks WHERE id=?", (key,)
+                    ).fetchone()
+                    if current["status"] == "running":
+                        checkpoint = json.loads(current["checkpoint"])
+                        checkpoint["credential_request"] = asdict(exc.destination)
+                        conn.execute(
+                            "UPDATE tasks SET status='credential',checkpoint=? WHERE id=?",
+                            (encode(checkpoint), key),
+                        )
+                        self.state.event(
+                            key,
+                            "credential.required",
+                            {
+                                "secret": exc.destination.secret,
+                                "destination": exc.destination.endpoint,
+                            },
+                            conn,
+                        )
             except Exception as exc:
                 self.state.change("UPDATE tasks SET status='failed' WHERE id=?", key)
                 self.state.event(
@@ -331,6 +416,21 @@ class Application:
     async def execute(self, row: dict) -> str:
         key, kind = row["id"], row["kind"]
         req = json.loads(row["input"])
+        if kind == "observe":
+            status = await self.observations.step(key, req)
+            if status != "verified":
+                return status
+            current = self.state.one("SELECT status,checkpoint FROM tasks WHERE id=?", key)
+            if current["status"] != "running":
+                return current["status"]
+            if not req["request"] and not self.state.rows(
+                "SELECT 1 FROM events WHERE task=? AND kind='owner.followup' AND json_extract(data,'$.text')<>'recheck' LIMIT 1",
+                key,
+            ):
+                return "verified"
+            row = {**row, "checkpoint": current["checkpoint"]}
+            outcome = await self.run_model(row)
+            return "answered" if outcome == "completed" else outcome
         if kind == "learn":
             if self.learning.finish(key, req):
                 return "verified"
@@ -356,8 +456,8 @@ class Application:
                     key,
                 )
                 req = json.loads(journal["intent"])
-            if isinstance(self.dns.provider, DNSProvider):
-                self.dns.provider.remote.settings()
+            if not self.dns.prepare_provider(key):
+                return "waiting"
             if operations and checkpoint.get("dns_recovery", {}).get("run") == row["run"]:
                 outcome = await self.recover_dns(row, Intent(**req), journal)
             else:
@@ -411,8 +511,8 @@ class Application:
             if current != "running":
                 return current
         if kind == "publish":
-            if isinstance(self.dns.provider, DNSProvider):
-                self.dns.provider.remote.settings()
+            if not self.dns.prepare_provider(key):
+                return "waiting"
             rev = json.loads(row["checkpoint"]).get("publish_revision") or self.catalog.active(
                 req["skill"]
             )
@@ -453,7 +553,12 @@ class Application:
         return self.catalog.revision(key)
 
     def task_summary(self, task: str) -> dict:
-        return self.state.one("SELECT id,goal,status,created FROM tasks WHERE id=?", task)
+        return self.state.one(
+            """SELECT id,goal,status,created,
+            json_extract(checkpoint,'$.credential_request.endpoint') AS credential_destination
+            FROM tasks WHERE id=?""",
+            task,
+        )
 
     def skill_view(self, key: str) -> dict:
         return {

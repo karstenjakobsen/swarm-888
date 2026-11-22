@@ -32,6 +32,8 @@ If the checkpoint has dns_recovery for this run, call connector_observe_recovery
 returned evidence, including unknown outcomes. The worker schedules any remaining observations.
 For a project task, inspect project_status, read existing sources as needed, and use project_save
 for the requested source changes. Read the committed files to verify the result and report the commit.
+For an /observe task, use connector_result with checkpoint.last_verified.source_task to retrieve the
+provider output as data. Complete the owner's request using the installed skill or the authoring procedure.
 When you need an owner's decision, call ask_owner. Use only registered operator capabilities."""
 
 

@@ -17,6 +17,7 @@ def isolate_installation_config(monkeypatch, request):
     for key in (
         "SWARM_NOTIFY_URL",
         "SWARM_INGRESS_CONFIG",
+        "SWARM_CONNECTOR_GRANTS",
         "SWARM_NOTIFY_DIR",
         "SWARM_CATALOG",
         "SWARM_REMOTE",

@@ -8,6 +8,7 @@ from typing import Any, Literal, get_type_hints
 from pydantic import create_model
 
 from .catalog import Catalog, Contract, Package
+from .connectors import ConnectorObservations
 from .dns import DNSReconciler
 from .goals import Maintenance
 from .learning import Learning
@@ -78,7 +79,9 @@ class TaskTools:
         return self.catalog.rollback(self.task, name, revision)
 
     def connector_result(self, owner_task: str) -> dict:
-        """Read a redacted, journaled DNS observation to pass into a skill."""
+        """Read the specified task's redacted provider observation to pass into a skill."""
+        if self.s.one("SELECT kind FROM tasks WHERE id=?", owner_task)["kind"] == "observe":
+            return ConnectorObservations(self.s, self.catalog).result(owner_task)
         row = self.s.one(
             "SELECT o.id,o.target,o.status,o.evidence FROM operations o JOIN tasks t ON t.id=o.task WHERE t.kind IN ('dns','publish') AND o.target NOT LIKE 'https://%' AND t.id=?",
             owner_task,

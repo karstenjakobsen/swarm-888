@@ -1,25 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import json
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Literal, Protocol
+from functools import cached_property
+from typing import Literal, Protocol
 
-import httpx
-import jsonschema
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-
+from .connectors import CredentialNeeded, RemoteMCP
 from .state import State, digest, encode
 
 DO_ENDPOINT = "https://networking.mcp.digitalocean.com/mcp"
-
-
-class CredentialNeeded(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -52,63 +44,13 @@ class Provider(Protocol):
     async def create(self, intent: Intent, operation: str) -> None: ...
 
 
-class RemoteMCP:
-    def __init__(self, state: State, definition: Path, bindings: dict[str, str]):
-        self.state = state
-        self.definition = definition
-        self.bindings = bindings
-
-    def settings(self) -> tuple[str, str]:
-        doc = json.loads(self.definition.read_text())
-        key = doc["secret"]
-        if (
-            key not in self.bindings
-            or doc["endpoint"] != self.bindings[key]
-            or doc["authentication"] != "bearer"
-        ):
-            raise ValueError("Connector destination has no matching owner grant")
-        path = self.state.path / "secrets" / (key + ".key")
-        if not path.is_file():
-            raise CredentialNeeded(key)
-        return doc["endpoint"], path.read_text()
-
-    async def call(self, name: str | None = None, arguments: dict | None = None) -> Any:
-        endpoint, secret = self.settings()
-        async with (
-            asyncio.timeout(25),
-            httpx.AsyncClient(
-                headers={"Authorization": "Bearer " + secret},
-                follow_redirects=False,
-                trust_env=False,
-                timeout=10,
-            ) as http,
-        ):
-            async with streamable_http_client(endpoint, http_client=http) as (reader, writer, _):
-                async with ClientSession(reader, writer) as client:
-                    await client.initialize()
-                    cursor = None
-                    tools = {}
-                    for _ in range(32):
-                        page = await client.list_tools(cursor=cursor)
-                        tools.update({t.name: t for t in page.tools})
-                        cursor = page.nextCursor
-                        if not cursor:
-                            break
-                    if name is None:
-                        return sorted(tools)
-                    schema = tools[name].inputSchema
-                    jsonschema.validate(arguments, schema)
-                    response = await client.call_tool(name, arguments)
-                    if response.isError:
-                        raise ValueError("Provider reported a tool error")
-                    if response.structuredContent is not None:
-                        return self.state.redact(response.structuredContent)
-                    return self.state.redact(json.loads(response.content[0].text))
-
-
 class DNSProvider:
-    def __init__(self, remote: RemoteMCP):
-        self.remote = remote
+    def __init__(self, remote: RemoteMCP | Callable[[], RemoteMCP]):
+        self._remote = remote
+
+    @cached_property
+    def remote(self) -> RemoteMCP:
+        return self._remote() if callable(self._remote) else self._remote
 
     async def observe(self, intent: Intent) -> Observation:
         matches = []
@@ -166,6 +108,48 @@ class DNSProvider:
 class DNSReconciler:
     def __init__(self, state: State, provider: Provider, limit: int = 4, seconds: int = 180):
         self.state, self.provider, self.limit, self.seconds = state, provider, limit, seconds
+
+    def prepare_provider(self, task: str) -> bool:
+        if not isinstance(self.provider, DNSProvider):
+            return True
+        try:
+            destination = asdict(self.provider.remote.destination())
+        except (OSError, ValueError) as exc:
+            self.state.event(
+                task,
+                "question",
+                {"text": str(exc) + ". Restore the connector binding and send recheck."},
+            )
+            return False
+        with self.state.tx() as conn:
+            checkpoint = json.loads(
+                conn.execute("SELECT checkpoint FROM tasks WHERE id=?", (task,)).fetchone()[0]
+            )
+            previous = checkpoint.get("dns_destination")
+            legacy = (
+                previous is None
+                and conn.execute(
+                    "SELECT 1 FROM operations WHERE task=? AND target NOT LIKE 'https://%' LIMIT 1",
+                    (task,),
+                ).fetchone()
+            )
+            if (previous is not None and previous != destination) or (
+                legacy and destination["endpoint"] != DO_ENDPOINT
+            ):
+                self.state.event(
+                    task,
+                    "question",
+                    {
+                        "text": "The DNS provider changed. Restore the original binding for this pending task."
+                    },
+                    conn,
+                )
+                return False
+            if previous is None:
+                checkpoint["dns_destination"] = destination
+                conn.execute("UPDATE tasks SET checkpoint=? WHERE id=?", (encode(checkpoint), task))
+        self.provider.remote.settings()
+        return True
 
     async def observe_recovery(self, task: str) -> dict:
         with self.state.tx() as conn:

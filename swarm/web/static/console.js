@@ -33,6 +33,9 @@ document.addEventListener("DOMContentLoaded", () => {
       document.querySelector("#messages").append(text)
     }
     if (row.kind === "run.started") document.querySelector("#status").textContent = "running"
+    if (row.kind === "credential.required") {
+      document.querySelector("#credential-destination").textContent = row.data.destination
+    }
     if (row.kind === "run.status") {
       document.querySelector("#status").textContent = row.data.status
       document.querySelector("#credential").hidden = row.data.status !== "credential"
