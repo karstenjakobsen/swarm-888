@@ -1,9 +1,0 @@
-{% extends "base.html" %}{% block body %}<main class="detail"><a href="/">← Console</a><h1>{{name}}</h1><pre>{{view.active.instructions or view.active.spec.instructions}}</pre><h2>Revision evidence</h2>{% for r in view.revisions %}<details class="card"><summary>{{"Passed" if r.passed else "Candidate"}} · {{r.rev[:12]}}</summary><p>Catalog commit <code>{{r.origin}}</code></p><pre>{{r.tests}}</pre><a href="/artifacts/{{r.rev}}">Revision artifact</a></details>{% else %}<p>Bundled authoring instructions.</p>{% endfor %}{% for c in view.calls %}<details class="card"><summary>{{"Failed invocation" if c.error else "Independently verified reuse" if c.verified_reuse else "Invocation"}} · {{c.rev[:12]}}</summary><a href="/?task={{c.task}}">Source task</a><pre>{{c|tojson(indent=2)}}</pre></details>{% endfor %}
-{% for o in view.operations %}
-<details class="card"><summary>{{o.target}} · {{o.status}} · {{o.rev[:12]}}</summary>
-<a href="/?task={{o.authority}}">Authorizing conversation</a><pre>{{o.evidence}}</pre></details>
-{% endfor %}
-{% for f in view.failures %}
-<details class="card"><summary>Failed invocation</summary><a href="/?task={{f.task}}">Source task</a><pre>{{f.data}}</pre></details>
-{% endfor %}
-</main>{% endblock %}
