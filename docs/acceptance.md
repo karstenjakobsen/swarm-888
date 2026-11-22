@@ -15,6 +15,21 @@ In a third live task, Codex authored and activated `fixture-permissions` at cata
 
 A local Chromium session signed into the running controller, opened the Alpine memory disclosure, inspected independent skill evidence and replayed persisted activity over SSE.
 
+In live task `544b35e3e9714054b2da28655789d6ca`, Codex created the `heartbeat` project, saved its two source files, and read back both. The independent grader cloned commit `03bce10f9b8bbbb3ca60dc187af801689bc2a5b0`, parsed the requested JSON, and checked that the README identified the file.
+
+Two live Codex recovery threads used a bearer-authenticated loopback MCP provider after the test runner killed the process that dispatched a DNS create. Each fresh thread called `connector_observe_recovery` with the intent saved in SQLite. Thread `01a202f7-f720-7aa1-a8d0-51b266441dda` verified the requested record on its first read. Thread `01a202f8-2942-7d53-91ff-2ddc64e7782d` encountered an unreadable provider. The worker stopped after three post-crash reads and delivered one notification. The provider logged exactly one create and retained exactly one record in each test.
+
+A separate loopback integration used Caddy 2.6.2, Pebble 2.4.0, a private ACME test CA, an HTTP orders service, a fixture DNS connector and a deterministic skill-authoring runtime. Pebble validated the TLS-ALPN-01 challenge. An independent TLS client verified the hostname and read `orders-v1`. With no further operator calls, it observed Caddy replace leaf SHA-256 `e93dd39ab24e31b7dc3cd83ef33ae0136527924f96b390515a38ffd5238a9c0f` with `191d67e595539a295bd449998291be289afaadd263294577ce60016f60a55ec0` and verified the same service again. The test accelerates renewal only in its disposable Caddy configuration.
+
+The same integration also passed with real Codex. In task `66f105f9273b4241b68c8190eebc9851` it read the foundation, searched the catalog, staged, tested and activated publishing revision `ae4cd4700970043ff4ff31675c4951eff854a872702e8f31f6d67458f77a9c96`. The runner verified the orders response before and after the leaf changed from `5fafbf68e48341922a9756af2386039a5ce8a4610c5c1c0257d3fb752360ef8f` to `416a55740a833ab32c33b386015a4a9c8343d6b9270ca27b832c6f8a69ddaaa4`.
+
+```sh
+SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_dns_recovery
+SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_creates_project
+# Put caddy, pebble and pebble-challtestsrv on PATH, then run
+SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live_ingress.py
+```
+
 ## Default acceptance suite
 
 `make setup && make check` installs the locked environment and runs Ruff checks, format verification, and pytest. The automated tests use temporary state. Notification tests also simulate an HTTPS receiver that accepts delivery and loses its reply. The receiver sees one incident ID across both attempts.
@@ -24,11 +39,12 @@ A local Chromium session signed into the running controller, opened the Alpine m
 | Skill authoring, restart, held-out reuse, defect correction | Deterministic runtime drives real application tools, SQLite, Git and isolated helper processes. Regression evidence includes the failed uppercase case and the old and new passing tests. |
 | MCP hot-plug, failed update and rollback | A real SDK stdio client observes tool-list changes and invokes named tools through the live Unix socket. An in-flight call finishes on revision A after B activates. |
 | Persistence and replay | Temporary bare Git remote, divergent histories, cold export/restore, authenticated routes, event cursors and an actual local worker RPC boundary. |
+| Application projects | A conversation creates a cloneable source repository and a catalog reference. The runner checks stale-edit rejection, export/restore, and recovery after the Git branch advanced but before the catalog reference was recorded. |
 | Codex steering and interruption | A protocol-compatible stdio transcript covers follow-up, interrupt and thread resume. |
 | Host operation recovery | The runner injects a crash after an actual fixture chmod. Fresh observation closes the journal with one mutation. |
 | Standing goals and persistent failure | Real files, temporary SQLite and a controllable clock. A simulated persistent repair fault consumes one incident budget across a restart, diagnosis and a skill revision attempt. One notification is delivered. |
-| DNS lost replies | A bearer-authenticated HTTP MCP fixture applies the create, then blocks its reply. The runner kills the worker process. Recovery reads the journal with no model thread. Both readable and unreadable variants produce one create and one record. The unreadable case ends unknown and alerts once. |
-| Ingress identity | A local HTTPS server with a test CA exercises hostname verification and a service-specific marker. A successful HTTP response with the wrong marker fails. |
+| DNS lost replies | The runner kills the dispatching process. A fresh runtime exercises the checkpoint-bound provider observation. Both outcomes produce one create and one record. The unreadable case ends unknown and alerts once. |
+| Ingress publication and identity | Fixture Caddy transport and real local HTTP MCP exercise conflicting ingress, unavailable upstream, conflicting DNS, a lost configuration reply and restart. An independent local HTTPS test rejects a default-backend response with the wrong marker. |
 
 ## Remaining live prerequisites
 

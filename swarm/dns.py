@@ -112,6 +112,7 @@ class DNSProvider:
 
     async def observe(self, intent: Intent) -> Observation:
         matches = []
+        wildcard = False
         try:
             for page in range(1, 33):
                 raw = await self.remote.call(
@@ -123,8 +124,16 @@ class DNSProvider:
                 for record in records:
                     if not isinstance(record["name"], str) or not isinstance(record["type"], str):
                         raise ValueError("Invalid record")
-                    if record["name"].rstrip(".").lower() in (intent.label, intent.hostname):
+                    record_name = record["name"].rstrip(".").lower()
+                    if record_name in (intent.label, intent.hostname):
                         matches.append((record["type"], record["data"]))
+                    fqdn = (
+                        record_name
+                        if record_name.endswith("." + intent.zone)
+                        else record_name + "." + intent.zone
+                    )
+                    if fqdn.startswith("*.") and intent.hostname.endswith(fqdn[1:]):
+                        wildcard = True
                 if len(records) < 100:
                     break
             else:
@@ -139,6 +148,11 @@ class DNSProvider:
             )
         if matches:
             return Observation("conflict", "Existing records require owner direction")
+        if wildcard:
+            return Observation(
+                "conflict",
+                "A wildcard may already serve this name. Review it before creating an exact record.",
+            )
         return Observation("absent", "Complete zone listing contains no matching name")
 
     async def create(self, intent: Intent, operation: str) -> None:
@@ -153,33 +167,70 @@ class DNSReconciler:
     def __init__(self, state: State, provider: Provider, limit: int = 4, seconds: int = 180):
         self.state, self.provider, self.limit, self.seconds = state, provider, limit, seconds
 
-    async def step(self, task: str, intent: Intent) -> str:
+    async def observe_recovery(self, task: str) -> dict:
+        with self.state.tx() as conn:
+            entry = conn.execute(
+                "SELECT run,checkpoint,status,kind FROM tasks WHERE id=?", (task,)
+            ).fetchone()
+            checkpoint = json.loads(entry["checkpoint"])
+            recovery = checkpoint.get("dns_recovery", {})
+            if (
+                entry["kind"] != "dns"
+                or entry["status"] != "running"
+                or recovery.get("run") != entry["run"]
+            ):
+                raise ValueError("No pending DNS recovery for this run")
+            row = conn.execute(
+                "SELECT * FROM operations WHERE id=? AND task=? AND authority=? AND status='dispatched'",
+                (recovery["operation"], task, task),
+            ).fetchone()
+            if not row or recovery["operation"] not in checkpoint.get("outstanding", []):
+                raise ValueError("No outstanding dispatched DNS change")
+            if conn.execute(
+                "SELECT 1 FROM events WHERE task=? AND run=? AND kind='dns.recovery.request'",
+                (task, entry["run"]),
+            ).fetchone():
+                raise ValueError("This recovery conversation already requested an observation")
+            self.state.event(task, "dns.recovery.request", {"operation": row["id"]}, conn)
+        outcome = await self.step(task, Intent(**json.loads(row["intent"])), observe_only=True)
+        saved = self.state.one("SELECT evidence FROM operations WHERE id=?", row["id"])["evidence"]
+        result = {
+            "operation": row["id"],
+            "outcome": outcome,
+            "observation": json.loads(saved) if saved else None,
+        }
+        self.state.event(task, "dns.recovery.result", result)
+        return result
+
+    async def step(
+        self, task: str, intent: Intent, revision: str | None = None, *, observe_only: bool = False
+    ) -> str:
         op = digest([task, "dns", asdict(intent)])
         now = self.state.clock()
         with self.state.tx() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO operations(id,task,authority,target,intent,status,evidence,deadline) VALUES (?,?,?,?,?,'prepared','',?)",
-                (op, task, task, intent.hostname, encode(asdict(intent)), now + self.seconds),
-            )
-            conn.execute(
-                "UPDATE tasks SET checkpoint=? WHERE id=?",
+                "INSERT OR IGNORE INTO operations(id,task,authority,target,intent,rev,status,evidence,deadline) VALUES (?,?,?,?,?,?,'prepared','',?)",
                 (
-                    encode(
-                        {
-                            "goal": conn.execute(
-                                "SELECT goal FROM tasks WHERE id=?", (task,)
-                            ).fetchone()[0],
-                            "criteria": f"one A record at {intent.hostname} equals {intent.address}",
-                            "operations": [op],
-                            "outstanding": [op],
-                            "revisions": [],
-                            "last_verified": "see operation evidence",
-                            "next": "Read complete provider zone before any write",
-                        }
-                    ),
+                    op,
                     task,
+                    task,
+                    intent.hostname,
+                    encode(asdict(intent)),
+                    revision,
+                    now + self.seconds,
                 ),
             )
+            entry = conn.execute("SELECT kind,checkpoint FROM tasks WHERE id=?", (task,)).fetchone()
+            checkpoint = json.loads(entry["checkpoint"])
+            if op not in checkpoint["operations"]:
+                checkpoint["operations"].append(op)
+                checkpoint.setdefault("outstanding", []).append(op)
+                if entry["kind"] == "dns":
+                    checkpoint["criteria"] = (
+                        f"one A record at {intent.hostname} equals {intent.address}"
+                    )
+                checkpoint["next"] = "Read complete provider zone before any write"
+                conn.execute("UPDATE tasks SET checkpoint=? WHERE id=?", (encode(checkpoint), task))
         row = self.state.one("SELECT * FROM operations WHERE id=?", op)
         if row["status"] in ("verified", "conflict", "unknown"):
             if row["status"] == "unknown":
@@ -199,8 +250,14 @@ class DNSReconciler:
             )
             checkpoint["last_verified"] = evidence
             if observed.status == "healthy":
-                checkpoint["outstanding"] = []
-                checkpoint["next"] = "Complete the task with the observed provider record"
+                checkpoint["outstanding"] = [
+                    k for k in checkpoint.get("outstanding", []) if k != op
+                ]
+                checkpoint["next"] = (
+                    "Inspect the remaining authorized operations"
+                    if checkpoint["outstanding"]
+                    else "Complete the task with the observed provider record"
+                )
             conn.execute("UPDATE tasks SET checkpoint=? WHERE id=?", (encode(checkpoint), task))
 
         self.state.event(task, "dns.observation", {"operation": op, **asdict(observed)})
@@ -209,7 +266,8 @@ class DNSReconciler:
             self.state.change("UPDATE operations SET status=? WHERE id=?", status, op)
             return status
         if (
-            observed.status == "absent"
+            not observe_only
+            and observed.status == "absent"
             and row["status"] == "prepared"
             and self.state.clock() < row["deadline"]
         ):

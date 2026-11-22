@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 from typing import Protocol
 
@@ -17,6 +18,7 @@ from .dns import (
     RemoteMCP,
 )
 from .goals import Maintenance
+from .publishing import Publisher, Site
 from .state import State, encode, identity, name
 from .tools import TaskTools
 
@@ -37,6 +39,8 @@ class Application:
         )
         self.dns = DNSReconciler(state, provider or DNSProvider(self.remote))
         self.maintenance = Maintenance(state, catalog)
+        self.publisher = Publisher(state, catalog, self.dns)
+        self.model_task: str | None = None
         self.lock = asyncio.Lock()
         self.current: str | None = None
 
@@ -46,15 +50,26 @@ class Application:
                 "SELECT * FROM tasks WHERE status IN ('running','stopping')"
             ).fetchall():
                 status = "interrupted" if row["status"] == "stopping" else "queued"
+                run = identity()
+                checkpoint = json.loads(row["checkpoint"])
+                if row["kind"] == "dns" and status == "queued":
+                    dispatched = conn.execute(
+                        "SELECT id FROM operations WHERE task=? AND authority=? AND status='dispatched'",
+                        (row["id"], row["id"]),
+                    ).fetchone()
+                    if dispatched and dispatched["id"] in checkpoint.get("outstanding", []):
+                        checkpoint["dns_recovery"] = {"operation": dispatched["id"], "run": run}
+                        checkpoint["next"] = (
+                            "Call connector_observe_recovery once to query the provider for this dispatched operation."
+                        )
                 conn.execute(
-                    "UPDATE tasks SET status=?,thread=NULL,turn=NULL WHERE id=?",
-                    (status, row["id"]),
+                    "UPDATE tasks SET status=?,thread=NULL,turn=NULL,run=?,checkpoint=? WHERE id=?",
+                    (status, run, encode(checkpoint), row["id"]),
                 )
-                conn.execute("UPDATE tasks SET run=? WHERE id=?", (identity(), row["id"]))
                 self.state.event(
                     row["id"],
                     "recovery",
-                    {"previous_run": row["run"], "checkpoint": json.loads(row["checkpoint"])},
+                    {"previous_run": row["run"], "checkpoint": checkpoint},
                     conn,
                 )
 
@@ -64,10 +79,38 @@ class Application:
             raise ValueError("Supply a task of 1–24000 characters")
         kind = "chat"
         request = {"text": text}
-        if text.startswith("/"):
+        publish = re.fullmatch(
+            r"publish (?:the )?([a-z][a-z0-9-]*) (?:service )?at ([a-z0-9.-]+) with TLS[.!]?",
+            text,
+            re.I,
+        )
+        project = re.match(
+            r"(?:build|create|update|develop|edit) (?:a |an |the )?project (?:named |called )?([a-z][a-z0-9-]{0,47})\b",
+            text,
+            re.I,
+        )
+        if project:
+            kind = "project"
+            request = {"project": name(project[1].lower()), "text": text}
+        elif publish:
+            kind = "publish"
+            request = {
+                "service": name(publish[1].lower()),
+                "hostname": publish[2].lower(),
+                "skill": "publish-service",
+            }
+        elif text.startswith("/"):
             parts = shlex.split(text)
             kind = parts[0][1:]
             match [kind, *parts[1:]]:
+                case ["project", project_name, *instructions] if instructions:
+                    request = {"project": name(project_name), "text": " ".join(instructions)}
+                case ["publish", service] | ["publish", service, _]:
+                    request = {
+                        "service": name(service),
+                        "hostname": parts[2] if len(parts) == 3 else None,
+                        "skill": "publish-service",
+                    }
                 case ["dns", zone, label, address]:
                     Intent(zone, label, address)
                     request = {"zone": zone, "label": label, "address": address}
@@ -90,6 +133,7 @@ class Application:
         task = identity()
         checkpoint = {
             "goal": text,
+            "kind": kind,
             "criteria": "Check the requested outcome against observed results",
             "last_verified": None,
             "operations": [],
@@ -113,7 +157,7 @@ class Application:
         return task
 
     def tools(self, task: str) -> TaskTools:
-        return TaskTools(self.state, self.catalog, task, self.maintenance)
+        return TaskTools(self.state, self.catalog, task, self.maintenance, self.dns)
 
     def context(self, task: dict) -> str:
         earlier = self.state.rows(
@@ -136,7 +180,7 @@ class Application:
     async def follow(self, task: str, text: str) -> None:
         row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
         if (
-            row["kind"] == "dns"
+            row["kind"] in ("dns", "publish")
             and row["status"] in ("waiting", "unknown")
             and text.strip().lower() == "recheck"
         ):
@@ -145,7 +189,7 @@ class Application:
                     "SELECT 1 FROM events WHERE task=? AND kind='dns.dispatch'", (task,)
                 ).fetchone()
                 conn.execute(
-                    "UPDATE operations SET status=?,attempts=0,deadline=? WHERE task=? AND status IN ('unknown','conflict')",
+                    "UPDATE operations SET status=?,attempts=0,deadline=? WHERE task=? AND target NOT LIKE 'https://%' AND status IN ('unknown','conflict')",
                     (
                         "dispatched" if previous else "prepared",
                         self.state.clock() + self.dns.seconds,
@@ -155,15 +199,20 @@ class Application:
                 conn.execute(
                     "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", (identity(), task)
                 )
+                if row["kind"] == "publish":
+                    conn.execute(
+                        "UPDATE operations SET attempts=0,deadline=? WHERE task=? AND target LIKE 'https://%'",
+                        (self.state.clock() + 600, task),
+                    )
                 self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
             return
-        if row["kind"] not in ("chat", "maintain", "diagnose", "improve"):
+        if row["kind"] not in ("chat", "project", "maintain", "diagnose", "improve", "publish"):
             raise ValueError("Use an explicit owner command to change this operation")
         text = self.state.redact(text.strip())
         if not 1 <= len(text) <= 24000:
             raise ValueError("Invalid follow-up")
         self.state.event(task, "owner.followup", {"text": text})
-        if self.current == task and row["status"] == "running":
+        if self.model_task == task and row["status"] == "running":
             await self.runtime.steer(text)
             return
         if self.current == task and row["status"] != "waiting":
@@ -176,7 +225,7 @@ class Application:
         row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
         if row["status"] not in ("queued", "running", "waiting", "credential", "observing"):
             raise ValueError("This task has already stopped")
-        if self.current == task and row["kind"] in ("chat", "maintain", "diagnose", "improve"):
+        if self.model_task == task:
             self.state.change("UPDATE tasks SET status='stopping' WHERE id=?", task)
             await self.runtime.interrupt()
         else:
@@ -189,7 +238,7 @@ class Application:
 
     def credential(self, task: str, token: str) -> None:
         row = self.state.one("SELECT kind,status FROM tasks WHERE id=?", task)
-        if row != {"kind": "dns", "status": "credential"}:
+        if row["kind"] not in ("dns", "publish") or row["status"] != "credential":
             raise ValueError("This task has no outstanding credential request")
         self.state.secret("digitalocean", token)
         self.state.change("UPDATE tasks SET status='queued',wake=0 WHERE id=?", task)
@@ -232,14 +281,50 @@ class Application:
             )
             return True
 
+    async def run_model(self, row: dict) -> str:
+        self.model_task = row["id"]
+        try:
+            return await self.runtime.run(self, row)
+        finally:
+            self.model_task = None
+
+    async def recover_dns(self, row: dict, intent: Intent, operation: dict) -> str:
+        key = row["id"]
+        started = self.state.rows(
+            "SELECT 1 FROM events WHERE task=? AND run=? AND kind='dns.recovery.thread'",
+            key,
+            row["run"],
+        )
+        remaining = operation["deadline"] - self.state.clock()
+        if not started and operation["attempts"] < self.dns.limit and remaining > 0:
+            self.state.event(key, "dns.recovery.thread", {"operation": operation["id"]})
+            try:
+                async with asyncio.timeout(min(remaining, 90)):
+                    await self.run_model(row)
+            except Exception as exc:
+                self.state.event(
+                    key, "dns.recovery.runtime", {"error": str(exc)[:500] or type(exc).__name__}
+                )
+            if self.state.one("SELECT status FROM tasks WHERE id=?", key)["status"] != "running":
+                return "interrupted"
+            results = self.state.rows(
+                "SELECT data FROM events WHERE task=? AND run=? AND kind='dns.recovery.result'",
+                key,
+                row["run"],
+            )
+            if results:
+                return json.loads(results[0]["data"])["outcome"]
+        return await self.dns.step(key, intent, observe_only=True)
+
     async def execute(self, row: dict) -> str:
         key, kind = row["id"], row["kind"]
         req = json.loads(row["input"])
         if kind == "dns":
-            operations = json.loads(row["checkpoint"])["operations"]
+            checkpoint = json.loads(row["checkpoint"])
+            operations = checkpoint["operations"]
             if operations:
                 journal = self.state.one(
-                    "SELECT intent FROM operations WHERE id=? AND task=? AND authority=?",
+                    "SELECT * FROM operations WHERE id=? AND task=? AND authority=?",
                     operations[0],
                     key,
                     key,
@@ -247,7 +332,10 @@ class Application:
                 req = json.loads(journal["intent"])
             if isinstance(self.dns.provider, DNSProvider):
                 self.dns.provider.remote.settings()
-            outcome = await self.dns.step(key, Intent(**req))
+            if operations and checkpoint.get("dns_recovery", {}).get("run") == row["run"]:
+                outcome = await self.recover_dns(row, Intent(**req), journal)
+            else:
+                outcome = await self.dns.step(key, Intent(**req))
             if outcome == "observe":
                 self.state.change("UPDATE tasks SET wake=? WHERE id=?", self.state.clock() + 2, key)
                 return "observing"
@@ -268,15 +356,44 @@ class Application:
             row = {**row, "checkpoint": encode(checkpoint)}
             self.state.change("UPDATE tasks SET checkpoint=? WHERE id=?", row["checkpoint"], key)
             async with asyncio.timeout(max(0, result["deadline"] - self.state.clock())):
-                outcome = await self.runtime.run(self, row)
+                outcome = await self.run_model(row)
             return "answered" if outcome == "completed" else outcome
-        if kind == "chat" or not self.state.rows("SELECT * FROM active WHERE name=?", req["skill"]):
-            outcome = await self.runtime.run(self, row)
+        if kind == "publish":
+            try:
+                site = Site.configured(req["service"], req["hostname"])
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                self.state.event(
+                    key,
+                    "question",
+                    {
+                        "text": f"Ingress binding unavailable: {exc}. Supply the binding and send recheck."
+                    },
+                )
+                return "waiting"
+        if kind == "project":
+            self.tools(key).projects.recover(key)
+            row["checkpoint"] = self.state.one("SELECT checkpoint FROM tasks WHERE id=?", key)[
+                "checkpoint"
+            ]
+        if kind in ("chat", "project") or not self.state.rows(
+            "SELECT * FROM active WHERE name=?", req["skill"]
+        ):
+            outcome = await self.run_model(row)
             if outcome != "completed":
                 return outcome
             current = self.state.one("SELECT status FROM tasks WHERE id=?", key)["status"]
             if current != "running":
                 return current
+        if kind == "publish":
+            if isinstance(self.dns.provider, DNSProvider):
+                self.dns.provider.remote.settings()
+            rev = json.loads(row["checkpoint"]).get("publish_revision") or self.catalog.active(
+                req["skill"]
+            )
+            status = await self.publisher.step(key, site, rev)
+            if status == "observing":
+                self.state.change("UPDATE tasks SET wake=? WHERE id=?", self.state.clock() + 5, key)
+            return status
         if kind == "maintain":
             existing = self.state.rows("SELECT id FROM goals WHERE authority=?", key)
             if not existing:
@@ -309,6 +426,9 @@ class Application:
     def artifact(self, key: str) -> dict:
         return self.catalog.revision(key)
 
+    def task_summary(self, task: str) -> dict:
+        return self.state.one("SELECT id,goal,status,created FROM tasks WHERE id=?", task)
+
     def skill_view(self, key: str) -> dict:
         return {
             "active": self.catalog.read(key),
@@ -317,6 +437,17 @@ class Application:
             ),
             "calls": self.state.rows(
                 "SELECT c.* FROM calls c JOIN revisions r ON c.rev=r.rev WHERE r.name=? ORDER BY c.rowid DESC LIMIT 100",
+                key,
+            ),
+            "operations": self.state.rows(
+                """SELECT o.id,o.authority,o.target,o.rev,o.status,o.evidence FROM operations o
+                JOIN revisions r ON r.rev=o.rev WHERE r.name=? ORDER BY o.rowid DESC LIMIT 100""",
+                key,
+            ),
+            "failures": self.state.rows(
+                """SELECT e.task,e.data,e.at FROM events e JOIN revisions r
+                ON r.rev=json_extract(e.data,'$.revision') WHERE r.name=? AND e.kind='skill.failed'
+                ORDER BY e.id DESC LIMIT 100""",
                 key,
             ),
         }

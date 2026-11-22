@@ -96,37 +96,64 @@ def dispatch(path, endpoint):
     asyncio.run(app.step())
 
 
+def lose_create_reply(tmp_path, zone, endpoint):
+    app, remote = configured(tmp_path / "state", endpoint)
+    key = app.submit("/dns example.test orders 192.0.2.8")
+    asyncio.run(app.step())
+    assert app.state.one("SELECT status FROM tasks WHERE id=?", key)["status"] == "credential"
+    app.credential(key, "synthetic-access-token")
+    app.state.change("UPDATE tasks SET thread='discarded-thread' WHERE id=?", key)
+    assert asyncio.run(remote.call()) == ["domain-record-create", "domain-record-list"]
+    zone.lose = True
+    process = multiprocessing.get_context("spawn").Process(
+        target=dispatch, args=(app.state.path, endpoint)
+    )
+    process.start()
+    try:
+        assert zone.created.wait(12)
+        assert app.state.one("SELECT * FROM operations WHERE task=?", key)["status"] == "dispatched"
+    finally:
+        process.kill()
+        process.join(5)
+        zone.stop.set()
+    return app, key
+
+
 @pytest.mark.parametrize("unreadable", [False, True], ids=["observed", "unknown"])
 def test_dns_crash_recovery(tmp_path, unreadable):
     with provider_server() as (zone, endpoint):
-        app, remote = configured(tmp_path / "state", endpoint)
-        key = app.submit("/dns example.test orders 192.0.2.8")
-        asyncio.run(app.step())
-        assert app.state.one("SELECT status FROM tasks WHERE id=?", key)["status"] == "credential"
-        app.credential(key, "synthetic-access-token")
-        assert asyncio.run(remote.call()) == ["domain-record-create", "domain-record-list"]
-        zone.lose = True
-        process = multiprocessing.get_context("spawn").Process(
-            target=dispatch, args=(app.state.path, endpoint)
-        )
-        process.start()
-        try:
-            assert zone.created.wait(12)
-            assert (
-                app.state.one("SELECT * FROM operations WHERE task=?", key)["status"]
-                == "dispatched"
-            )
-        finally:
-            process.kill()
-            process.join(5)
-            zone.stop.set()
+        app, key = lose_create_reply(tmp_path, zone, endpoint)
         zone.unreadable = unreadable
         fresh, _ = configured(app.state.path, endpoint)
+
+        class RecoveryRuntime(NoRuntime):
+            async def run(self, application, row):
+                self.calls += 1
+                assert row["thread"] is None
+                checkpoint = json.loads(application.context(row))["checkpoint"]
+                assert checkpoint["goal"] == "/dns example.test orders 192.0.2.8"
+                assert checkpoint["dns_recovery"]["operation"] in checkpoint["outstanding"]
+                application.state.change(
+                    "UPDATE tasks SET thread='fresh-thread' WHERE id=?", row["id"]
+                )
+                tools = application.tools(row["id"])
+                assert [t["name"] for t in tools.definitions()] == ["connector_observe_recovery"]
+                result = await asyncio.to_thread(tools.call, "connector_observe_recovery", {})
+                assert result["observation"]["status"] == ("unknown" if unreadable else "healthy")
+                return "completed"
+
+        fresh.runtime = RecoveryRuntime()
         fresh.recover()
         for _ in range(10):
             asyncio.run(fresh.step())
             fresh.state.clock.advance()
         task = fresh.state.one("SELECT * FROM tasks WHERE id=?", key)
+        assert fresh.runtime.calls == 1 and task["thread"] == "fresh-thread"
+        assert fresh.state.rows(
+            "SELECT 1 FROM events WHERE task=? AND run=? AND kind='dns.recovery.result'",
+            key,
+            task["run"],
+        )
         operation = fresh.state.one("SELECT * FROM operations WHERE task=?", key)
         assert operation["id"] in json.loads(task["checkpoint"])["operations"]
         assert task["status"] == ("unknown" if unreadable else "verified")
@@ -153,6 +180,8 @@ def test_dns_crash_recovery(tmp_path, unreadable):
         ([{"type": "A", "name": "orders", "data": "192.0.2.8"}], "healthy"),
         ([{"type": "A", "name": "orders", "data": "192.0.2.9"}], "conflict"),
         ([{"type": "CNAME", "name": "orders", "data": "other.test"}], "conflict"),
+        ([{"type": "A", "name": "*", "data": "192.0.2.9"}], "conflict"),
+        ([{"type": "A", "name": "*.other", "data": "192.0.2.9"}], "absent"),
         ([{"broken": True}], "unknown"),
     ],
 )

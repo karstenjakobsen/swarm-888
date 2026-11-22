@@ -1,0 +1,61 @@
+{
+  "name": "publish-service",
+  "instructions": "Publish the declared service at its authorized hostname. Inspect the existing listener and upstream, reconcile DNS, add an exact-host reverse proxy under automatic HTTPS, then verify the certificate and service marker. Preserve conflicting routes and records for owner review. After an interrupted dispatch, inspect the live route. Removing the exact added route by its recorded ID reverses the ingress change. DNS and certificates have separate lifecycles.",
+  "sql": "SELECT json_object('action',CASE\nWHEN json_extract(:input,'$.ingress')='conflict' THEN 'ask_owner'\nWHEN json_extract(:input,'$.ingress') NOT IN ('absent','configured') THEN 'observe'\nWHEN json_extract(:input,'$.dns')!='verified' THEN 'reconcile_dns'\nWHEN json_extract(:input,'$.ingress')='absent' THEN 'configure_https'\nELSE 'verify_service' END)",
+  "connectors": [
+    "digitalocean"
+  ],
+  "permissions": [
+    "observe ingress",
+    "create authorized A record",
+    "add exact host route",
+    "verify HTTPS"
+  ],
+  "tests": [
+    {
+      "input": {
+        "ingress": "unknown",
+        "dns": "verified"
+      },
+      "expected": {
+        "action": "observe"
+      }
+    },
+    {
+      "input": {
+        "ingress": "conflict",
+        "dns": "unobserved"
+      },
+      "expected": {
+        "action": "ask_owner"
+      }
+    },
+    {
+      "input": {
+        "ingress": "configured",
+        "dns": "unobserved"
+      },
+      "expected": {
+        "action": "reconcile_dns"
+      }
+    },
+    {
+      "input": {
+        "ingress": "absent",
+        "dns": "verified"
+      },
+      "expected": {
+        "action": "configure_https"
+      }
+    },
+    {
+      "input": {
+        "ingress": "configured",
+        "dns": "verified"
+      },
+      "expected": {
+        "action": "verify_service"
+      }
+    }
+  ]
+}

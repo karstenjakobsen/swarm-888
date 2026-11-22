@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from typing import Any, Literal, get_type_hints
@@ -7,15 +8,26 @@ from typing import Any, Literal, get_type_hints
 from pydantic import create_model
 
 from .catalog import Catalog, Contract, Package
+from .dns import DNSReconciler
 from .goals import Maintenance
+from .projects import Projects
 from .state import ROOT, State, identity
 
 
 class TaskTools:
     """The same typed methods back MCP, the worker RPC boundary and runtime tests."""
 
-    def __init__(self, state: State, catalog: Catalog, task: str, maintenance: Maintenance):
+    def __init__(
+        self,
+        state: State,
+        catalog: Catalog,
+        task: str,
+        maintenance: Maintenance,
+        dns: DNSReconciler | None = None,
+    ):
         self.maintenance = maintenance
+        self.projects = Projects(state, catalog)
+        self.dns = dns
         self.s, self.catalog, self.task = state, catalog, task
 
     def skill_search(self, query: str = "") -> dict:
@@ -27,7 +39,7 @@ class TaskTools:
         return self.catalog.read(name)
 
     def skill_template(
-        self, kind: Literal["transform", "permissions", "procedure"] = "transform"
+        self, kind: Literal["transform", "permissions", "procedure", "publishing"] = "transform"
     ) -> dict:
         """Get a working skill package example for the isolated SQL interpreter."""
         return json.loads((ROOT / f"foundation/skill-author/templates/{kind}.json").read_text())
@@ -59,14 +71,32 @@ class TaskTools:
     def connector_result(self, owner_task: str) -> dict:
         """Read a redacted, journaled DNS observation to pass into a skill."""
         row = self.s.one(
-            "SELECT o.id,o.target,o.status,o.evidence FROM operations o JOIN tasks t ON t.id=o.task WHERE t.kind='dns' AND t.id=?",
+            "SELECT o.id,o.target,o.status,o.evidence FROM operations o JOIN tasks t ON t.id=o.task WHERE t.kind IN ('dns','publish') AND o.target NOT LIKE 'https://%' AND t.id=?",
             owner_task,
         )
         return {**row, "evidence": json.loads(row["evidence"]) if row["evidence"] else None}
 
+    def connector_observe_recovery(self) -> dict:
+        """Read the DNS provider for this recovery checkpoint and return journaled evidence."""
+        if not self.dns:
+            raise ValueError("DNS recovery is unavailable")
+        return asyncio.run(self.dns.observe_recovery(self.task))
+
     def catalog_sync(self) -> dict:
         """Fast-forward and push the configured external Git catalog."""
         return self.catalog.sync()
+
+    def project_status(self) -> dict:
+        """List the owner-requested project's current source files and exact base commit."""
+        return self.projects.status(self.task)
+
+    def project_read(self, path: str) -> dict:
+        """Read a current source file in the project named by the owner."""
+        return self.projects.read(self.task, path)
+
+    def project_save(self, base: str, files: dict[str, str], message: str) -> dict:
+        """Commit new or changed UTF-8 source files on the observed base. Use an empty base for a new project."""
+        return self.projects.save(self.task, base, files, message)
 
     def catalog_define(
         self, kind: Literal["projects", "connectors"], name: str, definition: dict
@@ -122,7 +152,7 @@ class TaskTools:
         return {"status": "waiting"}
 
     def methods(self) -> dict:
-        prefixes = ("skill_", "catalog_", "memory_", "connector_")
+        prefixes = ("skill_", "catalog_", "memory_", "connector_", "project_")
         return {
             key: getattr(self, key)
             for key in dir(type(self))
@@ -139,6 +169,7 @@ class TaskTools:
         return create_model(method.__name__ + "Input", __base__=Contract, **fields)
 
     def definitions(self) -> list[dict]:
+        task = self.s.one("SELECT kind FROM tasks WHERE id=?", self.task)
         definitions = [
             {
                 "name": key,
@@ -146,7 +177,11 @@ class TaskTools:
                 "inputSchema": self.contract(method).model_json_schema(),
             }
             for key, method in self.methods().items()
+            if task["kind"] != "dns" or key == "connector_observe_recovery"
+            if task["kind"] == "project" or not key.startswith("project_")
         ]
+        if task["kind"] == "dns":
+            return definitions
         for row in self.s.rows(
             "SELECT r.name,r.spec FROM active a JOIN revisions r ON a.rev=r.rev"
         ):
@@ -175,6 +210,10 @@ class TaskTools:
         arguments = self.s.redact(arguments)
         self.s.event(self.task, "tool.started", {"tool": key, "arguments": arguments})
         try:
+            if task["kind"] == "dns" and key != "connector_observe_recovery":
+                raise ValueError(
+                    "Only the checkpoint's DNS observation is available during recovery"
+                )
             if task["kind"] in ("diagnose", "improve"):
                 inc = json.loads(task["input"])["incident"]
                 if not self.maintenance.consume(inc, "tool"):

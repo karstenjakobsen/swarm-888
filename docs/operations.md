@@ -8,6 +8,8 @@ The controller binds to loopback on `SWARM_PORT` (default 8880). An owner key cr
 
 Set `SWARM_CATALOG`, `SWARM_REMOTE` and `SWARM_BRANCH` before starting the worker to use a separate checkout, existing remote, and branch. Defaults are `$SWARM_STATE/catalog`, local Git only, and `main`. Give the development user normal Git authentication for the designated repository. Ask the operator to sync its catalog after adding a skill, project reference, or connector definition. Sync checks the configured origin, fetches and fast-forwards before pushing. Divergence requires the owner to reconcile the catalog in Git. Active local revisions can still run during a remote outage.
 
+Ask `Create a project named heartbeat containing …` in a new conversation, or submit `/project heartbeat REQUEST`. A follow-up can revise the same project's sources. Each edit starts from the observed Git commit and changes only the supplied files. The catalog records a state-relative repository reference in `projects/heartbeat.json`. Source commits live in the private bare repository at `$SWARM_STATE/workspaces/projects/heartbeat.git` and travel with an installation backup. A normal Git clone produces an editable working tree. After an interrupted save, the worker checks the recorded commit against the branch before finishing the catalog update.
+
 Skills can declare descriptive permissions, connector dependencies, and inline input/output JSON schemas. A generated SQL program runs in a resource-limited process with an in-memory database, a read-only statement authorizer, and an empty environment. A call pins its revision when it starts. Rollback changes future calls. Earlier activations, tests and independent observations remain available. Framework code, privilege policy, connector destination grants and recovery access are controlled by the checkout owner. To upgrade, stop the worker, export state, review the source change, and run the locked checks before restarting.
 
 ## Standing goals and notifications
@@ -43,7 +45,30 @@ Submit `/dns ZONE RELATIVE_NAME IPV4` as a new owner conversation. This grants a
 
 The example connector targets DigitalOcean's networking MCP service. An independent destination binding allows the credential only at its exact HTTPS endpoint. The HTTP client disables redirects. Set hard cloud limits using the provider account/token scopes or an independently administered gateway. A local target check cannot narrow a stolen provider token's authority. [DigitalOcean MCP documentation](https://docs.digitalocean.com/reference/mcp/)
 
-The publishing procedure template covers existing ingress, DNS conflicts, an existing automatic ACME renewal mechanism, and service-specific verification. The independent HTTPS probe validates the certificate chain and hostname, then checks an expected application marker. An actual ingress deployment needs separately implemented host capabilities.
+To publish an existing service, provide a running loopback HTTP upstream, a Caddy HTTPS listener and curl. Caddy must expose its admin API on a private Unix socket accessible by the worker. Set the admin options `"origins":["http://localhost"]` and `"enforce_origin":true`. Access to this socket grants configuration authority to local processes that can open it. Keep Caddy's autosave enabled, preserve its certificate storage, and configure its supervisor to load the saved configuration with `caddy run --resume` after restart. Caddy handles ACME issuance and renewal while the operator is offline. [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https)
+
+Set `SWARM_INGRESS_CONFIG` in the worker environment to the absolute path of an owner-maintained JSON file outside the catalog. Replace the example addresses, marker and socket with values for the designated service. For a private CA, set `ca_file` to an absolute PEM trust bundle. The default probe uses system roots.
+
+```json
+{
+  "admin_socket": "/run/caddy/admin.sock",
+  "server": "edge",
+  "https_port": 443,
+  "services": {
+    "orders": {
+      "zone": "example.com",
+      "label": "orders",
+      "address": "192.0.2.8",
+      "upstream_port": 9001,
+      "marker": "orders-service-v1"
+    }
+  }
+}
+```
+
+Submit `Publish the orders service at orders.example.com with TLS` or `/publish orders`. The operator acquires the publishing skill, checks the listener, probes the upstream, reconciles DNS and installs an exact-host reverse proxy. A wildcard or ambiguous existing route or record can require owner direction. Send `recheck` after resolving it. The task records the Caddy route ID, pinned revision, certificate fingerprint, expiry and application check. A lost configuration reply enters observation. A concurrent Caddy edit invalidates the conditional write. [Caddy API concurrency](https://caddyserver.com/docs/api#concurrent-config-changes)
+
+For a deliberate reversal, inspect the current full configuration and the recorded route ID. Confirm the route still points to the recorded host and upstream before using the Caddy admin API to delete that exact route with the observed ETag. Review DNS separately because another service may now depend on the record.
 
 ## Export, recovery and boot
 
@@ -54,7 +79,7 @@ uv run --locked python -m swarm backup "$HOME/swarm-state.zip"
 SWARM_STATE="$HOME/.local/state/swarm-restored" uv run --locked python -m swarm restore "$HOME/swarm-state.zip"
 ```
 
-Restore requires a new destination. Unset `SWARM_CATALOG` to use the bundled restored checkout. Start both processes with the restored `SWARM_STATE`. Interrupted model work starts from the checkpoint. A dispatched DNS operation resumes observation and stays unknown if the provider cannot establish its outcome.
+Restore requires a new destination. Unset `SWARM_CATALOG` to use the bundled restored checkout. Start both processes with the restored `SWARM_STATE`. Interrupted model work starts from the checkpoint. After a crash during a DNS create, a fresh Codex thread can query the provider through one observation tool bound to the recorded operation. The worker retains the attempt budget across recovery and alerts once if the outcome stays unknown.
 
 For opt-in reboot startup on a systemd VPS, the two user units in `deploy/` use this checkout's path under the owner's home. Adjust the paths for a different checkout. With the foreground processes stopped, run:
 

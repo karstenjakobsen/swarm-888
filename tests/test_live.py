@@ -4,17 +4,23 @@ import asyncio
 import ipaddress
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
+from test_dns import configured, lose_create_reply, provider_server
 
 from swarm.dns import DO_ENDPOINT, DNSProvider, Intent, RemoteMCP
-from swarm.runtime import verify_schema
+from swarm.runtime import CodexRuntime, verify_schema
 from swarm.state import ROOT, State
+from swarm.worker import service
 
 pytestmark = pytest.mark.live
 
@@ -25,69 +31,74 @@ def rpc(client, method, **params):
     return result.json()
 
 
+@contextmanager
+def live_conversation(state, prompt):
+    if not Path(os.getenv("SWARM_CODEX_AUTH", "")).is_file():
+        pytest.skip("Set SWARM_CODEX_AUTH to a Codex file-backed ChatGPT login")
+    worker = subprocess.Popen(
+        [sys.executable, "-m", "swarm", "worker"],
+        env={
+            **os.environ,
+            "SWARM_STATE": str(state.path),
+            "SWARM_REMOTE": "",
+            "SWARM_CATALOG": str(state.path / "catalog"),
+        },
+    )
+    try:
+        with httpx.Client(
+            transport=httpx.HTTPTransport(uds=str(state.path / "worker.sock")),
+            base_url="http://worker",
+        ) as client:
+            deadline = time.monotonic() + 600
+            while True:
+                try:
+                    rpc(client, "summary")
+                    break
+                except httpx.ConnectError:
+                    pass
+                assert worker.poll() is None and time.monotonic() < deadline
+                time.sleep(0.1)
+            task = rpc(client, "submit", text=prompt)
+            while time.monotonic() < deadline:
+                row = state.one("SELECT * FROM tasks WHERE id=?", task)
+                if row["status"] not in ("running", "queued"):
+                    break
+                time.sleep(0.5)
+            events = state.rows("SELECT kind,data FROM events WHERE task=? ORDER BY id", task)
+            assert row["status"] == "answered", events[-8:]
+            yield client, task, events
+    finally:
+        worker.terminate()
+        worker.wait(timeout=20)
+
+
 def test_codex_author_and_reuse(tmp_path):
     verify_schema()
-    auth = os.getenv("SWARM_CODEX_AUTH")
-    if not auth or not Path(auth).is_file():
-        pytest.skip("Set SWARM_CODEX_AUTH to a Codex file-backed ChatGPT login")
     state = State(tmp_path / "live")
 
     def conversation(prompt, expected):
-        worker = subprocess.Popen(
-            [sys.executable, "-m", "swarm", "worker"],
-            env={
-                **os.environ,
-                "SWARM_STATE": str(state.path),
-                "SWARM_REMOTE": "",
-                "SWARM_CATALOG": str(state.path / "catalog"),
-            },
-        )
-        try:
-            with httpx.Client(
-                transport=httpx.HTTPTransport(uds=str(state.path / "worker.sock")),
-                base_url="http://worker",
-            ) as client:
-                deadline = time.monotonic() + 600
-                while True:
-                    try:
-                        rpc(client, "summary")
-                        break
-                    except httpx.ConnectError:
-                        pass
-                    assert worker.poll() is None and time.monotonic() < deadline
-                    time.sleep(0.1)
-                task = rpc(client, "submit", text=prompt)
-                while time.monotonic() < deadline:
-                    row = state.one("SELECT * FROM tasks WHERE id=?", task)
-                    if row["status"] not in ("running", "queued"):
-                        break
-                    time.sleep(0.5)
-                events = state.rows("SELECT kind,data FROM events WHERE task=? ORDER BY id", task)
-                assert row["status"] == "answered", events[-8:]
-                calls = state.rows("SELECT * FROM calls WHERE task=? ORDER BY rowid DESC", task)
-                assert calls and json.loads(calls[0]["result"]) == expected, events[-8:]
-                checked = rpc(
-                    client,
-                    "attest",
-                    call=calls[0]["id"],
-                    expected=expected,
-                    observation="External live-test oracle",
-                )
-                rev = calls[0]["rev"]
-                print(
-                    "task",
-                    task,
-                    "revision",
-                    rev,
-                    "git",
-                    state.one("SELECT origin FROM revisions WHERE rev=?", rev)["origin"],
-                    "tools",
-                    [json.loads(e["data"])["tool"] for e in events if e["kind"] == "tool.started"],
-                )
-                return rev, checked
-        finally:
-            worker.terminate()
-            worker.wait(timeout=20)
+        with live_conversation(state, prompt) as (client, task, events):
+            calls = state.rows("SELECT * FROM calls WHERE task=? ORDER BY rowid DESC", task)
+            assert calls and json.loads(calls[0]["result"]) == expected, events[-8:]
+            checked = rpc(
+                client,
+                "attest",
+                call=calls[0]["id"],
+                expected=expected,
+                observation="External live-test oracle",
+            )
+            rev = calls[0]["rev"]
+            print(
+                "task",
+                task,
+                "revision",
+                rev,
+                "git",
+                state.one("SELECT origin FROM revisions WHERE rev=?", rev)["origin"],
+                "tools",
+                [json.loads(e["data"])["tool"] for e in events if e["kind"] == "tool.started"],
+            )
+            return rev, checked
 
     a, _ = conversation(
         "Build, test, activate and use a reusable skill named failed-services to summarize failed service names in supplied lines. Return a JSON object with a failed array in input order. Each line is SERVICE STATUS. Use it on this input:\norders.service failed\nbilling.service active\nmail.service failed",
@@ -133,6 +144,86 @@ def test_digitalocean_designated_host(tmp_path):
         assert (await provider.observe(intent)).status == "healthy"
 
     asyncio.run(check())
+
+
+def test_codex_creates_project(tmp_path):
+    state = State(tmp_path / "live")
+    prompt = 'Create a project named heartbeat containing data/status.json with {"status":"ok"} and a README.md explaining that file. Commit the sources and check them.'
+    with live_conversation(state, prompt) as (_, task, events):
+        definition = json.loads((state.path / "catalog/projects/heartbeat.json").read_text())
+        clone = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "clone", "-q", str(state.path / definition["repository"]), str(clone)],
+            check=True,
+        )
+        assert json.loads((clone / "data/status.json").read_text()) == {"status": "ok"}
+        assert "status.json" in (clone / "README.md").read_text()
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=clone, text=True).strip()
+        saved = state.one(
+            "SELECT evidence FROM operations WHERE task=? AND status='verified'", task
+        )
+        assert json.loads(saved["evidence"])["commit"] == commit
+        print(
+            "task",
+            task,
+            "project commit",
+            commit,
+            "tools",
+            [json.loads(e["data"])["tool"] for e in events if e["kind"] == "tool.completed"],
+        )
+
+
+@contextmanager
+def worker_rpc(app):
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.bind(str(app.state.path / "worker.sock"))
+        sock.listen(16)
+        server = uvicorn.Server(uvicorn.Config(service(app, schedule=False), log_level="warning"))
+        thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 10
+            while not server.started:
+                assert thread.is_alive() and time.monotonic() < deadline
+                time.sleep(0.05)
+            yield
+        finally:
+            server.should_exit = True
+            thread.join(8)
+
+
+@pytest.mark.parametrize("unreadable", [False, True], ids=["observed", "unknown"])
+def test_codex_dns_recovery(tmp_path, unreadable):
+    if not Path(os.getenv("SWARM_CODEX_AUTH", "")).is_file():
+        pytest.skip("Set SWARM_CODEX_AUTH to a Codex file-backed ChatGPT login")
+    with provider_server() as (zone, endpoint):
+        old, task = lose_create_reply(tmp_path, zone, endpoint)
+        fresh, _ = configured(old.state.path, endpoint)
+        fresh.runtime = CodexRuntime()
+        zone.unreadable = unreadable
+        with worker_rpc(fresh):
+            for _ in range(8):
+                asyncio.run(fresh.step())
+                fresh.state.clock.advance(5)
+            row = fresh.state.one("SELECT status,thread FROM tasks WHERE id=?", task)
+            events = fresh.state.rows("SELECT kind,data FROM events WHERE task=? ORDER BY id", task)
+            calls = [json.loads(e["data"])["tool"] for e in events if e["kind"] == "tool.completed"]
+            assert calls == ["connector_observe_recovery"], events[-12:]
+            assert row["thread"] and row["thread"] != "discarded-thread"
+            assert row["status"] == ("unknown" if unreadable else "verified")
+            assert zone.records == [{"type": "A", "name": "orders", "data": "192.0.2.8"}]
+            assert [c for c in zone.calls if c[0] == "create"] == [("create", "example.test")]
+            assert len(fresh.state.rows("SELECT id FROM alerts")) == int(unreadable)
+            print(
+                "task",
+                task,
+                "thread",
+                row["thread"],
+                "outcome",
+                row["status"],
+                "provider calls",
+                zone.calls,
+            )
 
 
 def test_ingress_service_identity():

@@ -16,6 +16,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def isolate_installation_config(monkeypatch, request):
     for key in (
         "SWARM_NOTIFY_URL",
+        "SWARM_INGRESS_CONFIG",
         "SWARM_NOTIFY_DIR",
         "SWARM_CATALOG",
         "SWARM_REMOTE",
@@ -70,8 +71,10 @@ class AuthorRuntime(NoRuntime):
             self.trace.append(key)
             return tools.call(key, args)
 
-        if task["kind"] == "maintain":
-            package = call("skill_template", kind="permissions")
+        if task["kind"] in ("maintain", "publish"):
+            package = call(
+                "skill_template", kind="permissions" if task["kind"] == "maintain" else "publishing"
+            )
             rev = call("skill_stage", package=package)["revision"]
             assert call("skill_test", revision=rev)["passed"]
             call("skill_activate", revision=rev)

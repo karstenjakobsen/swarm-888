@@ -37,6 +37,8 @@ mailer.service failed'
 
 Expect `{"failed":["orders.service","mailer.service"]}`. The activity feed identifies the calls and revision. Open the skill to inspect its tests. Start a new conversation with different data to exercise reuse. An independent checker can record its observation with `python -m swarm attest CALL_ID '{"failed":["queue.service"]}' 'Checked held-out fixture'` using the prepared environment.
 
+To create ordinary project sources, submit `Create a project named heartbeat containing data/status.json and a README explaining its fields`. The conversation records the commit. Clone the application repository with `git clone "${SWARM_STATE:-$HOME/.local/state/swarm-888}/workspaces/projects/heartbeat.git" heartbeat`.
+
 ## Checks
 
 ```sh
@@ -46,12 +48,14 @@ make test
 uv run --locked pytest tests/test_skills.py::test_author_restart_reuse_and_sourced_log
 uv run --locked pytest tests/test_dns.py::test_dns_crash_recovery
 SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_author_and_reuse
+SWARM_CODEX_AUTH="$HOME/.codex/auth.json" uv run --locked pytest -m live -s tests/test_live.py::test_codex_dns_recovery
+uv run --locked pytest -m live -s tests/test_live_ingress.py
 ```
 
 The default suite uses disposable local repositories, databases, files, and loopback listeners. It runs unprivileged and offline after setup. The live test runs Codex twice with separate worker processes and checks the actual tool results against held-out expectations.
 
 ## Execution scope
 
-Skills are procedures or isolated SQLite transformations over supplied JSON and text. The worker also reconciles explicitly authorized DNS records and fixture modes. Codex runs as an ordinary user. An optional UID 0 fixture worker can observe and change a named owner-owned file's mode. General host shell execution, application deployment, and ACME provisioning are outside the implemented scope.
+Skills are procedures or isolated SQLite transformations over supplied JSON and text. The worker reconciles authorized DNS records, fixture modes and exact-host routes on an existing Caddy server. A publication verifies an existing upstream, lets Caddy obtain and renew its certificate, and checks the HTTPS response for that service. The local ACME test needs Caddy, curl, Pebble and pebble-challtestsrv. Codex runs as an ordinary user. An optional UID 0 broker observes and changes named fixture modes. The worker has no general-purpose host shell.
 
 See the [operations guide](docs/operations.md) for Git, credentials, permissions, backups, and reboot startup. The [acceptance record](docs/acceptance.md) lists the verified paths and the remaining live checks.

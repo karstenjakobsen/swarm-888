@@ -38,6 +38,7 @@ def service(app: Application, schedule: bool = True) -> FastAPI:
     api = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     methods = {
         "summary": app.summary,
+        "task": app.task_summary,
         "events": app.state.events,
         "submit": app.submit,
         "stop": app.stop,

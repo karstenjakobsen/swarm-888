@@ -96,6 +96,8 @@ def controller(state: Path, transport: httpx.AsyncBaseTransport | None = None) -
             return templates.TemplateResponse(request, "login.html", {})
         summary = await rpc("summary")
         selected = next((r for r in summary["tasks"] if r["id"] == task), None)
+        if task and selected is None:
+            selected = await rpc("task", task=task)
         return templates.TemplateResponse(
             request, "home.html", {"state": summary, "selected": selected, "csrf": csrf}
         )
