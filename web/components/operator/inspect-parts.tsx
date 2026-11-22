@@ -16,12 +16,13 @@ export function SourceLink({ catalog, revision, body }: { catalog: CatalogSource
       <div className="flex flex-col gap-2 border-t border-border px-3 py-3">
         <p className="break-all font-mono leading-relaxed">
           <span className="text-muted-foreground">{catalog.repo}</span>
+          {catalog.branch ? <span className="text-muted-foreground"> · {catalog.branch}</span> : null}
           {revision ? <span className="text-muted-foreground">@{revision}</span> : null}
           <br />
           {catalog.path}
         </p>
         <p className="text-pretty leading-relaxed text-muted-foreground">
-          Definition in the simulated external Git catalog. Read-only here; changes land as commits there.
+          {catalog.branch ? 'Definition in the external Git catalog.' : 'Definition in the simulated external Git catalog.'}
         </p>
         {body ? (
           <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-well p-3 font-mono leading-relaxed text-muted-foreground">

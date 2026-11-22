@@ -6,7 +6,7 @@ CONTROLLER_PORT ?= 8000
 CADDY ?= caddy
 export NEXT_TELEMETRY_DISABLED := 1
 
-.PHONY: setup lint format test check web controller worker owner-key gateway api-types check-types build test-live-ui
+.PHONY: setup lint format test check web controller worker owner-key gateway api-types check-types build test-live-ui catalog-init acceptance-docker acceptance-recovery
 setup:
 	uv sync --locked
 	cd web && $(PNPM) install --frozen-lockfile
@@ -39,6 +39,16 @@ web:
 owner-key:
 	$(PY) -m operator_v1.config
 
+catalog-init:
+	$(PY) -m operator_v1.catalog_cli
+
+.PHONY: catalog-pull catalog-push
+catalog-pull:
+	$(PY) -m operator_v1.catalog_cli pull
+
+catalog-push:
+	$(PY) -m operator_v1.catalog_cli push
+
 controller:
 	CONTROLLER_PORT=$(CONTROLLER_PORT) $(PY) -m operator_v1.serve
 
@@ -50,6 +60,19 @@ gateway:
 
 test-live-ui: build
 	cd web && $(PNPM) exec playwright test --workers=1
+
+acceptance-docker: build
+	cd web && OPERATOR_ACCEPTANCE_DOCKER=1 CADDY="$(CADDY)" $(PNPM) exec playwright test tests/docker.spec.ts --workers=1
+
+acceptance-recovery:
+	OPERATOR_ACCEPTANCE_DOCKER=1 $(PY) -m pytest -q -s tests/test_operations.py
+
+.PHONY: backup restore
+backup:
+	$(PY) -m operator_v1.backup export "$(OPERATOR_BACKUP)"
+
+restore:
+	$(PY) -m operator_v1.backup restore "$(OPERATOR_BACKUP)" $(if $(OPERATOR_RESTORE_CATALOG),--catalog-checkout "$(OPERATOR_RESTORE_CATALOG)")
 
 .PHONY: check-fresh
 check-fresh:

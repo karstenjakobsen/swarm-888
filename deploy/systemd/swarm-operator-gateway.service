@@ -1,0 +1,19 @@
+[Unit]
+Description=Swarm operator loopback gateway
+PartOf=swarm-operator.target
+After=swarm-operator-controller.service swarm-operator-web.service
+
+[Service]
+User=caddy
+Group=caddy
+WorkingDirectory=/opt/swarm-operator
+EnvironmentFile=/etc/swarm-operator/operator.env
+ExecStart=/usr/bin/caddy run --config /opt/swarm-operator/Caddyfile --adapter caddyfile
+StateDirectory=swarm-operator-caddy
+Environment=XDG_CONFIG_HOME=/var/lib/swarm-operator-caddy XDG_DATA_HOME=/var/lib/swarm-operator-caddy
+UMask=0077
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=swarm-operator.target

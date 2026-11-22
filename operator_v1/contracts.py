@@ -1,10 +1,31 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, computed_field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    StringConstraints,
+    computed_field,
+)
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
-Kind = Literal["received", "owner_message", "started", "answered", "completed"]
+Kind = Literal[
+    "received",
+    "owner_message",
+    "started",
+    "answered",
+    "completed",
+    "evidence",
+    "failed",
+    "verified",
+    "unknown",
+    "waiting",
+    "system",
+    "stopped",
+]
 
 
 class ApiError(BaseModel):
@@ -23,6 +44,32 @@ class OwnerMessage(BaseModel):
     request_id: UUID = Field(alias="requestId")
 
 
+class DockerStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID = Field(alias="requestId")
+    target: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
+    skill: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,47}$")]
+
+
+class OwnerSteer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["steer"]
+    request_id: UUID = Field(alias="requestId")
+    text: Text
+
+
+class OwnerStop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["stop"]
+    request_id: UUID = Field(alias="requestId")
+
+
+class SupplyCredential(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID = Field(alias="requestId")
+    value: SecretStr
+
+
 class Receipt(BaseModel):
     task_id: str = Field(serialization_alias="taskId")
 
@@ -35,7 +82,7 @@ class Profile(BaseModel):
 
 
 class Outcome(BaseModel):
-    key: Literal["working", "unverified"]
+    key: Literal["working", "unverified", "failed", "verified", "unknown", "needs-you", "stopped"]
     label: str
     seq: int
     why: str
@@ -47,15 +94,30 @@ class Event(BaseModel):
     task: str
     kind: Kind
     text: str
+    data: dict[str, JsonValue] = Field(default_factory=dict)
 
     @computed_field
     @property
     def outcome(self) -> Outcome:
         if self.kind in ("received", "owner_message"):
-            return Outcome(key="working", label="Queued", seq=self.seq, why=self.text)
-        if self.kind == "started":
+            label = "Working" if self.data.get("intent") == "steer" else "Queued"
+            return Outcome(key="working", label=label, seq=self.seq, why=self.text)
+        if self.kind in ("started", "evidence", "system"):
             return Outcome(key="working", label="Working", seq=self.seq, why=self.text)
-        return Outcome(key="unverified", label="Acknowledged", seq=self.seq, why=self.text)
+        if self.kind == "failed":
+            return Outcome(key="failed", label="Failed", seq=self.seq, why=self.text)
+        if self.kind == "verified":
+            return Outcome(
+                key="verified", label="Verified independently", seq=self.seq, why=self.text
+            )
+        if self.kind == "unknown":
+            return Outcome(key="unknown", label="Outcome unknown", seq=self.seq, why=self.text)
+        if self.kind == "waiting":
+            return Outcome(key="needs-you", label="Needs a credential", seq=self.seq, why=self.text)
+        if self.kind == "stopped":
+            return Outcome(key="stopped", label="Stopped", seq=self.seq, why=self.text)
+        label = "Answered, awaiting verification" if self.data.get("modeled") else "Acknowledged"
+        return Outcome(key="unverified", label=label, seq=self.seq, why=self.text)
 
 
 class TaskState(BaseModel):
@@ -64,8 +126,14 @@ class TaskState(BaseModel):
     outcome: Outcome
 
 
+class CatalogInfo(BaseModel):
+    remote: str
+    branch: str
+
+
 class Snapshot(BaseModel):
     profile: Profile
     cursor: int = Field(ge=0)
     tasks: list[TaskState]
     events: list[Event]
+    catalog: CatalogInfo | None = None

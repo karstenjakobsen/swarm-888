@@ -2,31 +2,13 @@ import { expect, test } from '@playwright/test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { freePort, stop } from './processes'
 
 const web = resolve(process.cwd())
 const root = resolve(web, '..')
 const python = join(root, '.venv/bin/python')
-
-async function freePort() {
-  const listener = createServer()
-  listener.listen(0, '127.0.0.1')
-  await once(listener, 'listening')
-  const address = listener.address()
-  if (!address || typeof address === 'string') throw new Error('Expected a TCP port')
-  await new Promise<void>(resolve => listener.close(() => resolve()))
-  return String(address.port)
-}
-
-async function stop(child: ChildProcess) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return
-  const exited = once(child, 'exit')
-  child.kill('SIGTERM')
-  const force = setTimeout(() => child.kill('SIGKILL'), 4000)
-  try { await exited } finally { clearTimeout(force) }
-}
 
 test('private owner message survives a controller outage and replays through Caddy', async ({ page, context, request }) => {
   test.setTimeout(60_000)

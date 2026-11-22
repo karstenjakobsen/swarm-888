@@ -20,7 +20,7 @@ const tabs: { id: InspectTab; label: string; count: (s: Projection) => number }[
 ]
 
 export function InspectView({ tab }: { tab: InspectTab }) {
-  const { state, loaded } = useOperator()
+  const { state, loaded, catalog } = useOperator()
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/', label: 'Back to brief' }} />
@@ -32,6 +32,13 @@ export function InspectView({ tab }: { tab: InspectTab }) {
             hosts.
           </p>
         </div>
+        {catalog ? (
+          <section aria-label="Catalog repository" className="rounded-xl bg-card p-4">
+            <h2 className="text-xs font-medium text-muted-foreground">Catalog repository</h2>
+            <p className="mt-1 break-all font-mono text-sm">{catalog.remote}</p>
+            <p className="font-mono text-xs text-muted-foreground">{catalog.branch}</p>
+          </section>
+        ) : null}
         <nav aria-label="Inspect sections" className="grid grid-cols-4 gap-1 rounded-xl bg-card p-1">
           {tabs.map((t) => (
             <Link

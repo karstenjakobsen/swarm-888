@@ -1,0 +1,18 @@
+[Unit]
+Description=Swarm operator worker
+PartOf=swarm-operator.target
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=swarm-operator
+Group=swarm-operator
+WorkingDirectory=/opt/swarm-operator
+EnvironmentFile=/etc/swarm-operator/operator.env
+ExecStart=/opt/swarm-operator/.venv/bin/python -m operator_v1.worker
+UMask=0077
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=swarm-operator.target

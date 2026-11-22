@@ -11,6 +11,7 @@ const styles: Record<OutcomeKey, { cls: string; Icon: typeof ShieldCheck }> = {
   mitigating: { cls: 'border border-attention/60 text-attention', Icon: CircleDot },
   investigating: { cls: 'bg-secondary text-foreground', Icon: AlertCircle },
   failed: { cls: 'bg-destructive/15 text-destructive', Icon: XCircle },
+  unknown: { cls: 'border border-attention/60 text-attention', Icon: AlertCircle },
   stopped: { cls: 'bg-secondary text-muted-foreground', Icon: CircleSlash },
 }
 

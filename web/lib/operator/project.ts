@@ -114,6 +114,7 @@ export type MemoryVersion = {
   seq: number
   at: string
   text: string
+  removed?: boolean
   source: { task?: string; incident?: string }
 }
 
@@ -121,6 +122,7 @@ export type Memory = {
   id: string
   title: string
   kind: 'fact' | 'preference' | 'procedure'
+  scope?: string
   versions: MemoryVersion[]
   readBy: { task: string; seq: number; at: string; why: string }[]
 }
@@ -181,6 +183,8 @@ export type Incident = {
   detectedBy: string
   severity: 'high' | 'medium' | 'low'
   openedAt: string
+  goal?: string
+  unknown?: { seq: number; at: string; summary: string }
   changes: TrailItem[]
   verification?: { seq: number; at: string; check: string; command: string; output: string }
   resolved?: { seq: number; at: string; summary: string }
@@ -239,6 +243,7 @@ export type Goal = {
   text: string
   check: string
   status: 'holding' | 'drift' | 'blocked' | 'unknown'
+  lifecycle?: 'active' | 'paused' | 'retired'
   observed?: string
   checkedAt?: string
   checkedSeq?: number
@@ -405,6 +410,11 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
         },
       }
     }
+    case 'goal.status': {
+      const goal = e.ref.goal ? recordById(p.goals, e.ref.goal) : undefined
+      if (!goal) return p
+      return { ...p, goals: { ...p.goals, [goal.id]: { ...goal, lifecycle: e.data.status } } }
+    }
     case 'task.received': {
       const id = e.ref.task
       if (!id) return p
@@ -452,6 +462,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           command: e.data.command,
           output: e.data.output,
           routine: e.data.routine,
+          link: e.data.skill ? skillLink(e.data.skill.id, e.data.skill.revision) : undefined,
         }),
       )
     case 'task.answered':
@@ -524,6 +535,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           detail: `Will be sent to ${e.data.destination}`,
         })(t),
         credentialRequest: id,
+        waiting: e.data.pause ? { ...base, on: 'credential' } : t.waiting,
       }))
     }
     case 'credential.supplied': {
@@ -546,12 +558,15 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
       return withTask(
         withC,
         cred.task,
-        trail({
+        (task) => ({
+          ...trail<Task>({
           ...base,
           kind: 'credential',
           title: 'You supplied the credential',
           detail: `Stored in the operator vault. Fingerprint ${e.data.fingerprint}. Value never entered this log.`,
           tone: 'good',
+          })(task),
+          waiting: e.data.resume ? undefined : task.waiting,
         }),
       )
     }
@@ -561,9 +576,10 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
       const inc: Incident = {
         id,
         ...e.data,
+        goal: e.ref.goal,
         openedAt: e.at,
         changes: [],
-        relatedTasks: [],
+        relatedTasks: e.ref.task ? [e.ref.task] : [],
         skillRuns: [],
         trail: [
           { ...base, kind: 'opened', title: `Detected: ${e.data.symptom}`, detail: e.data.detectedBy },
@@ -592,6 +608,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
       return withIncident(p, e.ref.incident, (i) => ({
         ...trail<Incident>(item)(i),
         changes: e.data.kind === 'change' ? [...i.changes, item] : i.changes,
+        skillRuns: e.data.skill ? [...i.skillRuns, {skill: e.data.skill.id, revision: e.data.skill.revision, seq: e.seq}] : i.skillRuns,
       }))
     }
     case 'incident.verified':
@@ -606,6 +623,15 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           tone: 'good',
         })(i),
         verification: { ...base, ...e.data },
+        resolved: e.data.resolved ? { ...base, summary: e.data.check } : i.resolved,
+      }))
+    case 'incident.unknown':
+      return withIncident(p, e.ref.incident, (i) => ({
+        ...trail<Incident>({
+          ...base, kind: 'verification', title: 'Outcome unknown',
+          detail: e.data.summary, tone: 'attention',
+        })(i),
+        unknown: { ...base, summary: e.data.summary },
       }))
     case 'incident.resolved':
       return withIncident(p, e.ref.incident, (i) => ({
@@ -644,6 +670,13 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
     case 'skill.installed': {
       const id = e.ref.skill
       if (!id) return p
+      const withRead = withTask(p, e.ref.task, trail({
+        ...base,
+        kind: 'skill',
+        title: `Read ${e.data.name} @ ${e.data.revision}`,
+        link: skillLink(id, e.data.revision, e.data.name),
+      }))
+      if (recordById(withRead.skills, id)) return withRead
       const skill: Skill = {
         id,
         name: e.data.name,
@@ -664,7 +697,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
         uses: [],
         verifications: [],
       }
-      return { ...p, skills: { ...p.skills, [id]: skill }, skillOrder: [...p.skillOrder, id] }
+      return { ...withRead, skills: { ...withRead.skills, [id]: skill }, skillOrder: [...withRead.skillOrder, id] }
     }
     case 'skill.created': {
       const id = e.ref.skill
@@ -748,18 +781,19 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
     case 'project.registered': {
       const id = e.ref.project
       if (!id) return p
+      const existing = recordById(p.projects, id)
       const project: Project = {
         id,
         ...e.data,
         registeredAt: e.at,
         registeredSeq: e.seq,
-        relatedTasks: [],
+        relatedTasks: existing?.relatedTasks ?? [],
       }
       const withP = linkProject(
         {
           ...p,
           projects: { ...p.projects, [id]: project },
-          projectOrder: p.projects[id] ? p.projectOrder : [...p.projectOrder, id],
+          projectOrder: existing ? p.projectOrder : [...p.projectOrder, id],
         },
         id,
         e.ref.task,
@@ -783,24 +817,25 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
       const id = e.ref.memory
       if (!id) return p
       const prev = p.memories[id]
-      const version: MemoryVersion = { ...base, text: e.data.text, source: { task: e.ref.task, incident: e.ref.incident } }
+      const version: MemoryVersion = { ...base, text: e.data.text, removed: e.data.removed, source: { task: e.ref.task, incident: e.ref.incident } }
       const mem: Memory = prev
-        ? { ...prev, title: e.data.title, kind: e.data.kind, versions: [...prev.versions, version] }
-        : { id, title: e.data.title, kind: e.data.kind, versions: [version], readBy: [] }
+        ? { ...prev, title: e.data.title, kind: e.data.kind, scope: e.data.scope ?? prev.scope, versions: [...prev.versions, version] }
+        : { id, title: e.data.title, kind: e.data.kind, scope: e.data.scope, versions: [version], readBy: [] }
+      const action = e.data.removed ? 'Removed' : prev ? 'Updated' : 'Wrote'
       const withM = {
         ...p,
         memories: { ...p.memories, [id]: mem },
-        memoryOrder: prev ? p.memoryOrder : [...p.memoryOrder, id],
+        memoryOrder: e.data.removed ? p.memoryOrder.filter(existing => existing !== id) : prev ? p.memoryOrder : [...p.memoryOrder, id],
       }
       const withT = withTask(
         withM,
         e.ref.task,
-        trail({ ...base, kind: 'skill', title: `${prev ? 'Updated' : 'Wrote'} memory: ${e.data.title}`, detail: e.data.text, routine: true }),
+        trail({ ...base, kind: 'skill', title: `${action} memory: ${e.data.title}`, detail: e.data.text, routine: true }),
       )
       const withI = withIncident(
         withT,
         e.ref.incident,
-        trail({ ...base, kind: 'skill', title: `${prev ? 'Updated' : 'Wrote'} memory: ${e.data.title}`, detail: e.data.text, routine: true }),
+        trail({ ...base, kind: 'skill', title: `${action} memory: ${e.data.title}`, detail: e.data.text, routine: true }),
       )
       return usage(withI, e.ref.task, (u) => ({
         ...u,
@@ -830,6 +865,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
     case 'connector.configured': {
       const id = e.ref.connector
       if (!id) return p
+      const previous = recordById(p.connectors, id)
       const supplied = e.data.credential.request ? p.credentials[e.data.credential.request]?.supplied : undefined
       const connector: Connector = {
         id,
@@ -847,12 +883,12 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
         },
         configuredAt: e.at,
         catalog: e.data.catalog,
-        uses: [],
+        uses: previous?.uses ?? [],
       }
       return {
         ...p,
         connectors: { ...p.connectors, [id]: connector },
-        connectorOrder: p.connectors[id] ? p.connectorOrder : [...p.connectorOrder, id],
+        connectorOrder: previous ? p.connectorOrder : [...p.connectorOrder, id],
       }
     }
     case 'connector.used': {
@@ -871,7 +907,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           kind: 'change',
           title: `${c.name}: ${e.data.summary}`,
           command: `${c.id.replace(/^c-/, '')}.${e.data.tool}`,
-          output: r ? `${r.change} ${r.name}.${r.zone} ${r.type} ${r.value} ttl=${r.ttl}` : undefined,
+          output: r ? `${r.change} ${r.name}.${r.zone} ${r.type} ${r.value} ttl=${r.ttl}` : e.data.output,
         }),
       )
       return usage(withT, e.data.task, (u) => ({
@@ -889,7 +925,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
         trail({
           ...base,
           kind: 'skill',
-          title: `Revision ${e.data.revision} passed its own tests (${passed}/${e.data.tests.length})`,
+          title: `Revision ${e.data.revision} self-tests (${passed}/${e.data.tests.length} passed)`,
           detail: `Tests ${e.data.authoredBy}.`,
           link: e.ref.skill ? skillLink(e.ref.skill, e.data.revision, name) : undefined,
         }),
@@ -905,6 +941,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
         kind: 'skill',
         title: `Ran skill: ${name ?? skillId} @ ${e.data.revision}`,
         detail: e.data.novelty,
+        output: e.data.output,
         link: skillLink(skillId, e.data.revision, name),
         skill: { id: skillId, revision: e.data.revision },
       }
@@ -937,6 +974,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
 export type OutcomeKey =
   | 'verified'
   | 'failed'
+  | 'unknown'
   | 'stopped'
   | 'needs-you'
   | 'unverified'
@@ -995,6 +1033,7 @@ export function incidentOutcome(i: Incident): Outcome {
       seq: i.verification?.seq ?? i.resolved.seq,
       why: i.verification?.check ?? i.resolved.summary,
     }
+  if (i.unknown) return { key: 'unknown', label: 'Outcome unknown', seq: i.unknown.seq, why: i.unknown.summary }
   if (i.decision && !i.decision.decided)
     return { key: 'needs-you', label: 'Needs your decision', seq: i.decision.seq, why: i.decision.question }
   if (i.decision?.decided)

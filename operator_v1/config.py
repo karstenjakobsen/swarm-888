@@ -1,7 +1,10 @@
+import fcntl
 import os
 import secrets
 import stat
 import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -42,6 +45,47 @@ class Settings:
     @property
     def owner_key(self) -> Path:
         return self.directory / "owner.key"
+
+    @property
+    def catalog_config(self) -> Path:
+        return self.directory / "catalog.json"
+
+    @contextmanager
+    def service_lock(self, service: str) -> Generator[None, None, None]:
+        self.prepare()
+        fd = os.open(
+            self.directory / f"{service}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.geteuid() == 0:
+                owner = self.directory.stat()
+                os.fchown(fd, owner.st_uid, owner.st_gid)
+            yield
+        finally:
+            os.close(fd)
+
+    @contextmanager
+    def database_identity(self) -> Generator[None, None, None]:
+        # The explicit root fixture worker is single-threaded. Create SQLite
+        # journals as the state owner so the ordinary controller can recover them.
+        if os.geteuid() or os.environ.get("OPERATOR_ALLOW_ROOT_WORKER") != "1":
+            yield
+            return
+        owner = self.directory.stat()
+        if not owner.st_uid:
+            yield
+            return
+        group = os.getegid()
+        os.setegid(owner.st_gid)
+        try:
+            os.seteuid(owner.st_uid)
+            try:
+                yield
+            finally:
+                os.seteuid(0)
+        finally:
+            os.setegid(group)
 
     def read_owner_key(self) -> bytes:
         self.prepare()

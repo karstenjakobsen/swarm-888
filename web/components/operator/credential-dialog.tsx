@@ -27,7 +27,7 @@ export function CredentialButton({ credential, taskTitle, className }: { credent
 
 function CredentialDialog({ credential, taskTitle, onClose }: { credential: Credential; taskTitle: string; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null)
-  const { applyDemoCredential } = useOperator()
+  const { mode, supplyCredential } = useOperator()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -35,10 +35,10 @@ function CredentialDialog({ credential, taskTitle, onClose }: { credential: Cred
     ref.current?.showModal()
   }, [])
 
-  async function resumeWithDemo() {
+  async function resume(value?: string) {
     setBusy(true)
     setError(null)
-    const res = await applyDemoCredential(credential.requestId)
+    const res = await supplyCredential(credential.requestId, value)
     setBusy(false)
     if (res.ok) onClose()
     else setError(res.error ?? 'Could not resume the task.')
@@ -82,7 +82,7 @@ function CredentialDialog({ credential, taskTitle, onClose }: { credential: Cred
           <dd className="text-pretty">{credential.storage}</dd>
         </dl>
 
-        <div className="flex gap-3 rounded-xl border border-border bg-well p-4">
+        {mode === 'demo' ? <div className="flex gap-3 rounded-xl border border-border bg-well p-4">
           <FlaskConical className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
           <div className="flex flex-col gap-1">
             <p className="text-sm font-medium">This is a public demo</p>
@@ -91,7 +91,7 @@ function CredentialDialog({ credential, taskTitle, onClose }: { credential: Cred
               happens next.
             </p>
           </div>
-        </div>
+        </div> : null}
 
         {error ? (
           <p role="alert" className="text-sm text-destructive">
@@ -99,15 +99,31 @@ function CredentialDialog({ credential, taskTitle, onClose }: { credential: Cred
           </p>
         ) : null}
 
-        <button
+        {mode === 'demo' ? <button
           type="button"
-          onClick={() => void resumeWithDemo()}
+          onClick={() => void resume()}
           disabled={busy}
           className="flex min-h-12 items-center justify-center gap-2 rounded-lg bg-attention px-4 text-base font-medium text-attention-foreground hover:opacity-90 disabled:opacity-60"
         >
           <Play className="size-4" aria-hidden="true" />
           {busy ? 'Resuming task' : 'Use demo credential and resume'}
-        </button>
+        </button> : (
+          <form className="flex flex-col gap-3" onSubmit={event => {
+            event.preventDefault()
+            const form = event.currentTarget
+            const value = String(new FormData(form).get('value') ?? '')
+            form.reset()
+            void resume(value)
+          }}>
+            <label htmlFor="credential-value" className="text-sm font-medium">Bearer token</label>
+            <input id="credential-value" name="value" type="password" autoComplete="off" required maxLength={4096}
+              className="min-h-11 rounded-lg border border-border bg-background px-3" />
+            <button type="submit" disabled={busy}
+              className="min-h-12 rounded-lg bg-attention px-4 font-medium text-attention-foreground disabled:opacity-60">
+              {busy ? 'Resuming task' : 'Save credential and resume'}
+            </button>
+          </form>
+        )}
       </div>
     </dialog>
   )

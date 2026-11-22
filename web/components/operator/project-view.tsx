@@ -33,7 +33,9 @@ export function ProjectView({ id }: { id: string }) {
               <Meta
                 rows={[
                   ['Hostname', <span key="h" className="font-mono">{p.hostname}</span>],
-                  ['App repo', <span key="r" className="break-all font-mono">{p.repo}</span>],
+                  ['App repo', /^https?:\/\//i.test(p.repo)
+                    ? <a key="r" href={p.repo} className="break-all font-mono underline underline-offset-4">{p.repo}</a>
+                    : <span key="r" className="break-all font-mono">{p.repo}</span>],
                   ['Upstream', <span key="u" className="font-mono">{p.upstream}</span>],
                 ]}
               />

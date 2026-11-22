@@ -4,14 +4,28 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .catalog import Catalog, display_remote
 from .config import Settings
-from .contracts import ApiError, OwnerLogin, OwnerMessage, Receipt, Snapshot
+from .contracts import (
+    ApiError,
+    CatalogInfo,
+    DockerStart,
+    OwnerLogin,
+    OwnerMessage,
+    OwnerSteer,
+    OwnerStop,
+    Receipt,
+    Snapshot,
+    SupplyCredential,
+)
+from .credentials import CredentialError, Credentials
 from .ipc import wake_worker
+from .operations import Operations, OperationUnavailable
 from .state import RequestConflict, State
 
 COOKIE = "operator_session"
@@ -29,9 +43,10 @@ def create_app(
     async def lifespan(_app: FastAPI):
         nonlocal store, owner_key, runtime
         runtime = settings or Settings.load()
-        owner_key = runtime.read_owner_key()
-        store = State(runtime)
-        yield
+        with runtime.service_lock("controller"):
+            owner_key = runtime.read_owner_key()
+            store = State(runtime)
+            yield
 
     app = FastAPI(
         title="VPS operator",
@@ -97,9 +112,32 @@ def create_app(
     def session():
         pass
 
+    @app.post(
+        "/api/secrets",
+        status_code=204,
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses={
+            401: unauthorized,
+            403: forbidden,
+            409: {"model": ApiError, "description": "Credential request unavailable"},
+        },
+    )
+    def supply_credential(body: SupplyCredential) -> None:
+        try:
+            Credentials(runtime, store).supply(body.request_id, body.value.get_secret_value())
+        except CredentialError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        wake_worker(runtime.socket)
+
     @app.get("/api/snapshot", dependencies=[Depends(owner)], responses={401: unauthorized})
     def snapshot() -> Snapshot:
-        return store.snapshot()
+        snapshot = store.snapshot()
+        if runtime.catalog_config.is_file():
+            config = Catalog.load(runtime).config
+            snapshot.catalog = CatalogInfo(
+                remote=display_remote(config.remote), branch=config.branch
+            )
+        return snapshot
 
     @app.post(
         "/api/commands",
@@ -115,6 +153,45 @@ def create_app(
         try:
             task_id = store.submit(body.request_id, body.text)
         except RequestConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        wake_worker(runtime.socket)
+        return Receipt(task_id=task_id)
+
+    @app.post(
+        "/api/tasks/{task}/control",
+        status_code=204,
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses={
+            401: unauthorized,
+            403: forbidden,
+            409: {"model": ApiError, "description": "Task or request conflict"},
+        },
+    )
+    def task_control(
+        task: Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")], body: OwnerSteer | OwnerStop
+    ):
+        try:
+            store.control(
+                task, body.request_id, body.kind, body.text if isinstance(body, OwnerSteer) else ""
+            )
+        except RequestConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        wake_worker(runtime.socket)
+
+    @app.post(
+        "/api/operations/docker-start",
+        status_code=202,
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses={
+            401: unauthorized,
+            403: forbidden,
+            409: {"model": ApiError, "description": "Conflicting request or inactive skill"},
+        },
+    )
+    def docker_start(body: DockerStart) -> Receipt:
+        try:
+            task_id = Operations(store).authorize(body.request_id, body.target, body.skill)
+        except (RequestConflict, OperationUnavailable) as exc:
             raise HTTPException(409, str(exc)) from exc
         wake_worker(runtime.socket)
         return Receipt(task_id=task_id)

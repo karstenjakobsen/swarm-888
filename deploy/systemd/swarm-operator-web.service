@@ -1,0 +1,17 @@
+[Unit]
+Description=Swarm operator private web UI
+PartOf=swarm-operator.target
+
+[Service]
+User=swarm-operator-web
+Group=swarm-operator-web
+WorkingDirectory=/opt/swarm-operator/web
+Environment=OPERATOR_MODE=live NEXT_TELEMETRY_DISABLED=1
+EnvironmentFile=/etc/swarm-operator/operator.env
+ExecStart=/usr/bin/env node node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port ${WEB_PORT}
+UMask=0077
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=swarm-operator.target

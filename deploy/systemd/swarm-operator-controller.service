@@ -1,0 +1,16 @@
+[Unit]
+Description=Swarm operator private controller
+PartOf=swarm-operator.target
+
+[Service]
+User=swarm-operator
+Group=swarm-operator
+WorkingDirectory=/opt/swarm-operator
+EnvironmentFile=/etc/swarm-operator/operator.env
+ExecStart=/opt/swarm-operator/.venv/bin/python -m operator_v1.serve
+UMask=0077
+Restart=on-failure
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=swarm-operator.target

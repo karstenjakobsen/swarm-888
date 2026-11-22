@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { AccessError, operatorSource } from '@/lib/operator/source'
 import type { OperatorMode } from '@/lib/operator/mode'
+import type { components } from '@/lib/operator/api'
 import { OwnerLogin } from './owner-login'
 import type { OperatorEvent, OwnerAction } from '@/lib/operator/types'
 import { apply, emptyProjection, type Projection } from '@/lib/operator/project'
@@ -24,6 +25,7 @@ function storeReducer(s: State, a: Action): State {
 type Ctx = {
   mode: OperatorMode
   name: string
+  catalog?: components['schemas']['CatalogInfo']
   state: Projection
   events: OperatorEvent[]
   loaded: boolean
@@ -33,7 +35,7 @@ type Ctx = {
   simulateDisconnect: (ms?: number) => void
   resetScenario: () => Promise<void>
   send: (body: OwnerAction) => Promise<{ ok: boolean; error?: string }>
-  applyDemoCredential: (requestId: string) => Promise<{ ok: boolean; error?: string }>
+  supplyCredential: (requestId: string, value?: string) => Promise<{ ok: boolean; error?: string }>
 }
 
 const OperatorContext = createContext<Ctx | null>(null)
@@ -44,6 +46,7 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
   const [connection, setConnection] = useState<Connection>('connecting')
   const [catchUp, setCatchUp] = useState<CatchUp | null>(null)
   const [name, setName] = useState('')
+  const [catalog, setCatalog] = useState<Ctx['catalog']>()
   const [access, setAccess] = useState<'loading' | 'ready' | 'login' | 'unavailable'>('loading')
   const [generation, reload] = useReducer((n: number) => n + 1, 0)
   const disconnect = useRef<(ms: number) => void>(() => {})
@@ -98,6 +101,7 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
           cursor = snapshot.cursor
           epoch = snapshot.epoch
           setName(snapshot.name)
+          setCatalog(snapshot.catalog)
           dispatch({ type: 'batch', events: snapshot.events })
           initialized = true
         } else {
@@ -162,19 +166,19 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     </main>
   }
   const value: Ctx = {
-    mode, name, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
+    mode, name, catalog, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
     dismissCatchUp: () => setCatchUp(null),
     simulateDisconnect: (ms = 14_000) => disconnect.current(ms),
     resetScenario: async () => {
       if (mode === 'demo' && (await send({ kind: 'reset' })).ok) reload()
     },
     send,
-    applyDemoCredential: async requestId => {
+    supplyCredential: async (requestId, value) => {
       try {
-        await source.applyDemoCredential(requestId)
+        await source.supplyCredential(requestId, value)
         return { ok: true }
       } catch (error) {
-        return { ok: false, error: error instanceof AccessError ? error.message : 'Could not resume the demo task.' }
+        return { ok: false, error: error instanceof AccessError ? error.message : 'Could not supply the credential.' }
       }
     },
   }

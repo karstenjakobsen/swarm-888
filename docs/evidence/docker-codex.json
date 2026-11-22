@@ -1,0 +1,47 @@
+{
+  "mode": "codex",
+  "creatingTask": "/work/67c1e918dd814d49b832f2e367fd9bb6",
+  "reuseTask": "/work/5334e431cdee4b4e8335613f17c5996c",
+  "skillRevision": "/skills/docker-container-state?rev=b9a691ea41c67de657181731d3022ec20b181aeb",
+  "revision": "b9a691ea41c67de657181731d3022ec20b181aeb",
+  "observations": [
+    {
+      "selector": "swarm.operator.project=ed63a812-691-first",
+      "rows": [
+        {
+          "name": "swarm-ed63a812-691-exit7",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 7
+        },
+        {
+          "name": "swarm-ed63a812-691-running",
+          "image": "alpine:3.22",
+          "state": "running"
+        }
+      ]
+    },
+    {
+      "selector": "swarm.operator.project=ed63a812-691-empty",
+      "rows": []
+    }
+  ],
+  "laterObservations": [
+    {
+      "selector": "swarm.operator.project=ed63a812-691-reuse",
+      "rows": [
+        {
+          "name": "swarm-ed63a812-691-exit13",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 13
+        },
+        {
+          "name": "swarm-ed63a812-691-live",
+          "image": "alpine:3.22",
+          "state": "running"
+        }
+      ]
+    }
+  ]
+}

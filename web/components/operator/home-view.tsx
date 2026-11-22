@@ -199,6 +199,15 @@ function NeedsYou({ items }: { items: NeedItem[] }) {
                   Review evidence and decide
                 </Link>
               </>
+            ) : n.kind === 'unknown' ? (
+              <>
+                <Kicker icon={<Hand className="size-3.5" aria-hidden="true" />} text="Outcome unknown" />
+                <p className="text-pretty text-base font-medium">{n.incident.unknown?.summary}</p>
+                <Link href={`/work/${n.incident.id}`}
+                  className="flex min-h-11 items-center justify-center rounded-lg bg-attention px-4 text-sm font-medium text-attention-foreground">
+                  Review recovery evidence
+                </Link>
+              </>
             ) : n.kind === 'credential' ? (
               <>
                 <Kicker icon={<Hand className="size-3.5" aria-hidden="true" />} text={`Credential · paused since ${clock(n.at)}`} />
@@ -251,14 +260,16 @@ function Goals({ goals }: { goals: Goal[] }) {
       <SectionTitle id="goals-h">Standing goals</SectionTitle>
       <ul className="flex flex-col divide-y divide-border rounded-xl border border-border bg-card">
         {goals.map((g) => (
-          <li key={g.id}>
+          <li key={g.id} id={g.id}>
             <details className="group">
               <summary className="flex min-h-14 cursor-pointer items-center gap-3 px-4 py-3">
                 <span className={cn('size-2.5 shrink-0 rounded-full', goalTone[g.status])} aria-hidden="true" />
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span className="text-pretty text-sm">{g.text}</span>
                   <span className="text-xs text-muted-foreground">
-                    <span className={g.status === 'holding' ? 'text-verified' : 'text-attention'}>{goalWord[g.status]}</span>
+                    <span className={g.status === 'holding' ? 'text-verified' : 'text-attention'}>
+                      {g.lifecycle === 'paused' ? 'Paused' : g.lifecycle === 'retired' ? 'Retired' : goalWord[g.status]}
+                    </span>
                     {g.observed ? ` · ${g.observed}` : ''}
                   </span>
                 </span>

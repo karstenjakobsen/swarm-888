@@ -125,7 +125,7 @@ function Entry({ memory, state }: { memory: Memory; state: Projection }) {
     <article className="flex flex-col gap-7">
       <div className="flex flex-col gap-2">
         <p className="font-mono text-xs text-muted-foreground">
-          Memory · {memoryKind[memory.kind]} · {memory.id}
+          Memory · {memoryKind[memory.kind]}{memory.scope ? ` · ${memory.scope}` : ''} · {memory.id}
         </p>
         <h1 className="text-balance text-2xl font-semibold leading-tight">{memory.title}</h1>
       </div>
@@ -144,7 +144,7 @@ function Entry({ memory, state }: { memory: Memory; state: Projection }) {
                 className={cn('flex flex-col gap-3 rounded-xl border p-4', i === 0 ? 'border-border bg-card' : 'border-dashed border-border')}
               >
                 <p className={cn('whitespace-pre-wrap text-pretty text-sm leading-relaxed', i > 0 && 'text-muted-foreground line-through decoration-muted-foreground/40')}>
-                  {v.text}
+                  {v.removed ? 'Entry removed from active memory.' : v.text}
                 </p>
                 <p className="flex flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">
                   <span>{i === 0 ? (versions.length > 1 ? 'Current · updated' : 'Written') : 'Earlier version'}</span>
@@ -165,7 +165,7 @@ function Entry({ memory, state }: { memory: Memory; state: Projection }) {
         </ol>
       </section>
 
-      <CorrectionRequest memory={memory} />
+      {versions[0]?.removed ? null : <CorrectionRequest memory={memory} />}
 
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium text-muted-foreground">Read by later tasks</h2>

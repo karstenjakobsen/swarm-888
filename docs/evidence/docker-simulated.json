@@ -1,0 +1,47 @@
+{
+  "mode": "simulated",
+  "creatingTask": "/work/0d39e51769f74e47a286846b83edc460",
+  "reuseTask": "/work/8127781a1c3d40fd868d097269039aac",
+  "skillRevision": "/skills/inspect-docker?rev=ab9c0bafa9e84f3a02bf93d3f7675de9a31fb391",
+  "revision": "ab9c0bafa9e84f3a02bf93d3f7675de9a31fb391",
+  "observations": [
+    {
+      "selector": "swarm.operator.project=a249d3a0-1c4-first",
+      "rows": [
+        {
+          "name": "swarm-a249d3a0-1c4-exit7",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 7
+        },
+        {
+          "name": "swarm-a249d3a0-1c4-running",
+          "image": "alpine:3.22",
+          "state": "running"
+        }
+      ]
+    },
+    {
+      "selector": "swarm.operator.project=a249d3a0-1c4-empty",
+      "rows": []
+    }
+  ],
+  "laterObservations": [
+    {
+      "selector": "swarm.operator.project=a249d3a0-1c4-reuse",
+      "rows": [
+        {
+          "name": "swarm-a249d3a0-1c4-exit13",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 13
+        },
+        {
+          "name": "swarm-a249d3a0-1c4-live",
+          "image": "alpine:3.22",
+          "state": "running"
+        }
+      ]
+    }
+  ]
+}

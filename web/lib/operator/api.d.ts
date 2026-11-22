@@ -22,6 +22,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/secrets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Supply Credential */
+        post: operations["supply_credential_api_secrets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/snapshot": {
         parameters: {
             query?: never;
@@ -56,6 +73,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{task}/control": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Task Control */
+        post: operations["task_control_api_tasks__task__control_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/operations/docker-start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Docker Start */
+        post: operations["docker_start_api_operations_docker_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/events": {
         parameters: {
             query?: never;
@@ -82,6 +133,25 @@ export interface components {
             /** Detail */
             detail: string;
         };
+        /** CatalogInfo */
+        CatalogInfo: {
+            /** Remote */
+            remote: string;
+            /** Branch */
+            branch: string;
+        };
+        /** DockerStart */
+        DockerStart: {
+            /**
+             * Requestid
+             * Format: uuid
+             */
+            requestId: string;
+            /** Target */
+            target: string;
+            /** Skill */
+            skill: string;
+        };
         /** Event */
         Event: {
             /** Seq */
@@ -94,18 +164,23 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "received" | "owner_message" | "started" | "answered" | "completed";
+            kind: "received" | "owner_message" | "started" | "answered" | "completed" | "evidence" | "failed" | "verified" | "unknown" | "waiting" | "system" | "stopped";
             /** Text */
             text: string;
+            /** Data */
+            data?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
             readonly outcome: components["schemas"]["Outcome"];
         };
+        JsonValue: unknown;
         /** Outcome */
         Outcome: {
             /**
              * Key
              * @enum {string}
              */
-            key: "working" | "unverified";
+            key: "working" | "unverified" | "failed" | "verified" | "unknown" | "needs-you" | "stopped";
             /** Label */
             label: string;
             /** Seq */
@@ -130,6 +205,34 @@ export interface components {
             kind: "message";
             /** Text */
             text: string;
+            /**
+             * Requestid
+             * Format: uuid
+             */
+            requestId: string;
+        };
+        /** OwnerSteer */
+        OwnerSteer: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "steer";
+            /**
+             * Requestid
+             * Format: uuid
+             */
+            requestId: string;
+            /** Text */
+            text: string;
+        };
+        /** OwnerStop */
+        OwnerStop: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "stop";
             /**
              * Requestid
              * Format: uuid
@@ -161,6 +264,20 @@ export interface components {
             tasks: components["schemas"]["TaskState"][];
             /** Events */
             events: components["schemas"]["Event"][];
+            catalog?: components["schemas"]["CatalogInfo"] | null;
+        };
+        /** SupplyCredential */
+        SupplyCredential: {
+            /**
+             * Requestid
+             * Format: uuid
+             */
+            requestId: string;
+            /**
+             * Value
+             * Format: password
+             */
+            value: string;
         };
         /** TaskState */
         TaskState: {
@@ -267,6 +384,64 @@ export interface operations {
             };
         };
     };
+    supply_credential_api_secrets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SupplyCredential"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Credential request unavailable */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     snapshot_api_snapshot_get: {
         parameters: {
             query?: never;
@@ -346,6 +521,126 @@ export interface operations {
                 };
             };
             /** @description Conflicting request ID */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    task_control_api_tasks__task__control_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OwnerSteer"] | components["schemas"]["OwnerStop"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Task or request conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    docker_start_api_operations_docker_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DockerStart"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Receipt"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflicting request or inactive skill */
             409: {
                 headers: {
                     [name: string]: unknown;

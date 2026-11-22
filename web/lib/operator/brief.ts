@@ -11,12 +11,15 @@ import {
 export type NeedItem =
   | { kind: 'credential'; id: string; credential: Credential; task: Task; at: string }
   | { kind: 'decision'; id: string; incident: Incident; at: string }
+  | { kind: 'unknown'; id: string; incident: Incident; at: string }
   | { kind: 'reply'; id: string; task: Task; at: string }
 
 export function needsYou(p: Projection): NeedItem[] {
   const items: NeedItem[] = []
   for (const id of p.incidentOrder) {
     const i = p.incidents[id]
+    if (i.unknown && !i.resolved)
+      items.push({ kind: 'unknown', id: i.id, incident: i, at: i.unknown.at })
     if (i.decision && !i.decision.decided && !i.resolved)
       items.push({ kind: 'decision', id: i.id, incident: i, at: i.trail.find((t) => t.seq === i.decision!.seq)?.at ?? i.openedAt })
   }
@@ -56,7 +59,7 @@ export function summary(p: Projection) {
   const running = touched.filter((t) => !isTaskFinished(t) && !t.waiting)
   const incidents = p.incidentOrder.map((id) => p.incidents[id]).filter((i) => i.trail.some((x) => x.seq > since))
   const resolved = incidents.filter((i) => incidentOutcome(i).key === 'resolved')
-  const goals = p.goalOrder.map((id) => p.goals[id])
+  const goals = p.goalOrder.map((id) => p.goals[id]).filter((g) => g.lifecycle !== 'paused' && g.lifecycle !== 'retired')
   const holding = goals.filter((g) => g.status === 'holding')
   const off = goals.filter((g) => g.status !== 'holding')
   return { since, finished, running, incidents, resolved, goals, holding, off, needs: needsYou(p) }

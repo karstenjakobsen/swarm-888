@@ -16,7 +16,7 @@ import { clock, dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function WorkView({ id }: { id: string }) {
-  const { state, loaded, mode } = useOperator()
+  const { state, loaded } = useOperator()
   const task = recordById(state.tasks, id)
   const incident = recordById(state.incidents, id)
   return (
@@ -33,7 +33,7 @@ export function WorkView({ id }: { id: string }) {
           <p className="text-muted-foreground">Nothing with this id in the operator&apos;s history.</p>
         )}
       </main>
-      {mode === 'demo' && task && !isTaskFinished(task) ? (
+      {task && !isTaskFinished(task) && task.waiting?.on !== 'credential' ? (
         <Composer taskId={task.id} placeholder={task.waiting?.on === 'reply' ? 'Reply, e.g. "apply"' : 'Steer this task'} />
       ) : (
         <Composer />
@@ -202,7 +202,7 @@ function TaskDetail({ task, state }: { task: Task; state: Projection }) {
       {task.waiting?.on === 'credential' && cred && !cred.supplied ? (
         <div className="flex flex-col gap-3 rounded-2xl border border-attention/40 bg-attention/10 p-4">
           <p className="text-pretty text-sm leading-relaxed">
-            Paused at step {task.plan.findIndex((p) => /upload|s3/i.test(p)) + 1 || '?'} of {task.plan.length}. Needs{' '}
+            {mode === 'demo' ? `Paused at step ${task.plan.findIndex((p) => /upload|s3/i.test(p)) + 1 || '?'} of ${task.plan.length}. Needs ` : 'This task needs '}
             <span className="font-medium">{cred.label}</span>, which will be sent only to{' '}
             <span className="font-mono text-xs">{cred.destination}</span>. This same task resumes as soon as it arrives.
           </p>
@@ -302,7 +302,7 @@ function TaskDetail({ task, state }: { task: Task; state: Projection }) {
         <EvidenceTrail items={task.trail} outcomeSeq={outcome.seq} />
       </Section>
 
-      {mode === 'demo' && !isTaskFinished(task) ? (
+      {!isTaskFinished(task) ? (
         <button
           type="button"
           disabled={stopping}
@@ -332,6 +332,7 @@ function IncidentDetail({ incident, state }: { incident: Incident; state: Projec
         <Fact label="Affected">
           <span className="font-mono text-sm">{incident.resource}</span>
           <span className="text-sm text-muted-foreground">{incident.detectedBy}</span>
+          {incident.goal ? <Link href={`/#${incident.goal}`} className="text-sm underline underline-offset-4">Open standing goal</Link> : null}
         </Fact>
         {incident.skillRuns.length ? (
           <Fact label="Skill it followed">

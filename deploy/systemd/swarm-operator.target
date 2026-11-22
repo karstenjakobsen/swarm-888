@@ -1,0 +1,7 @@
+[Unit]
+Description=Swarm operator
+Wants=swarm-operator-controller.service swarm-operator-worker.service swarm-operator-web.service swarm-operator-gateway.service
+After=swarm-operator-controller.service swarm-operator-worker.service swarm-operator-web.service swarm-operator-gateway.service
+
+[Install]
+WantedBy=multi-user.target
