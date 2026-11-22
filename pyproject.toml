@@ -1,0 +1,28 @@
+[project]
+name = "swarm-operator"
+version = "0.1.0"
+description = "Single-host skill authoring and operations console"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1", "httpx>=0.28,<0.29", "jinja2>=3.1,<4",
+    "jsonschema>=4.23,<5", "mcp==1.29.0", "pydantic>=2.10,<3",
+    "python-multipart>=0.0.20", "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.16,<0.17"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -m 'not live'"
+markers = ["live: explicitly selected external integration"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

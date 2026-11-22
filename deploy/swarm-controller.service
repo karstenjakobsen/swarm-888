@@ -1,0 +1,15 @@
+[Unit]
+Description=Swarm operator loopback console
+After=swarm-worker.service
+Wants=swarm-worker.service
+
+[Service]
+WorkingDirectory=%h/projects/github/karstenjakobsen/swarm-888
+EnvironmentFile=-%h/.config/swarm-888/environment
+ExecStart=%h/projects/github/karstenjakobsen/swarm-888/.venv/bin/python -m swarm controller
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

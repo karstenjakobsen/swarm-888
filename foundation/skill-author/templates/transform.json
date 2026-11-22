@@ -1,0 +1,16 @@
+{
+  "name": "count-lines",
+  "instructions": "Count supplied text lines.",
+  "sql": "SELECT json_object('lines',count(*)) FROM lines",
+  "tests": [
+    {
+      "input": {
+        "text": "one\ntwo"
+      },
+      "expected": {
+        "lines": 2
+      }
+    }
+  ],
+  "named": true
+}

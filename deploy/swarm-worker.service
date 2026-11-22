@@ -1,0 +1,14 @@
+[Unit]
+Description=Swarm operator worker and scheduler
+
+[Service]
+WorkingDirectory=%h/projects/github/karstenjakobsen/swarm-888
+EnvironmentFile=-%h/.config/swarm-888/environment
+ExecStart=%h/projects/github/karstenjakobsen/swarm-888/.venv/bin/python -m swarm worker
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

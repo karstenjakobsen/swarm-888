@@ -1,0 +1,6 @@
+{
+  "name": "publish-service",
+  "instructions": "Identify the service, expected response marker, zone, label and address with the owner. Inspect the existing listener, virtual host and certificate manager using an installed observation capability. Reconcile DNS against the exact owner-authorized target and stop on a conflicting record. Reuse the existing ingress and its automatic ACME renewal mechanism. Record the previous virtual-host configuration and restoration procedure before changing it. Verify the hostname and certificate chain and check the expected service-specific response through HTTPS. Request a missing capability or owner decision if any step lacks a supported action.",
+  "permissions": ["inspect ingress", "reconcile authorized record", "observe HTTPS"],
+  "connectors": ["digitalocean"]
+}

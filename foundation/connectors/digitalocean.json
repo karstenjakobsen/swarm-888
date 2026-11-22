@@ -1,0 +1,5 @@
+{
+  "endpoint": "https://networking.mcp.digitalocean.com/mcp",
+  "authentication": "bearer",
+  "secret": "digitalocean"
+}

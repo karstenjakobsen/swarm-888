@@ -1,0 +1,322 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shlex
+from typing import Protocol
+
+from .catalog import Catalog
+from .dns import (
+    DO_ENDPOINT,
+    CredentialNeeded,
+    DNSProvider,
+    DNSReconciler,
+    Intent,
+    Provider,
+    RemoteMCP,
+)
+from .goals import Maintenance
+from .state import State, encode, identity, name
+from .tools import TaskTools
+
+
+class Runtime(Protocol):
+    async def run(self, app: Application, task: dict) -> str: ...
+    async def interrupt(self) -> None: ...
+    async def steer(self, text: str) -> None: ...
+
+
+class Application:
+    def __init__(
+        self, state: State, catalog: Catalog, runtime: Runtime, provider: Provider | None = None
+    ):
+        self.state, self.catalog, self.runtime = state, catalog, runtime
+        self.remote = RemoteMCP(
+            state, catalog.path / "connectors/digitalocean.json", {"digitalocean": DO_ENDPOINT}
+        )
+        self.dns = DNSReconciler(state, provider or DNSProvider(self.remote))
+        self.maintenance = Maintenance(state, catalog)
+        self.lock = asyncio.Lock()
+        self.current: str | None = None
+
+    def recover(self) -> None:
+        with self.state.tx() as conn:
+            for row in conn.execute(
+                "SELECT * FROM tasks WHERE status IN ('running','stopping')"
+            ).fetchall():
+                status = "interrupted" if row["status"] == "stopping" else "queued"
+                conn.execute(
+                    "UPDATE tasks SET status=?,thread=NULL,turn=NULL WHERE id=?",
+                    (status, row["id"]),
+                )
+                conn.execute("UPDATE tasks SET run=? WHERE id=?", (identity(), row["id"]))
+                self.state.event(
+                    row["id"],
+                    "recovery",
+                    {"previous_run": row["run"], "checkpoint": json.loads(row["checkpoint"])},
+                    conn,
+                )
+
+    def submit(self, text: str) -> str:
+        text = self.state.redact(text.strip())
+        if not text or len(text) > 24000:
+            raise ValueError("Supply a task of 1–24000 characters")
+        kind = "chat"
+        request = {"text": text}
+        if text.startswith("/"):
+            parts = shlex.split(text)
+            kind = parts[0][1:]
+            match [kind, *parts[1:]]:
+                case ["dns", zone, label, address]:
+                    Intent(zone, label, address)
+                    request = {"zone": zone, "label": label, "address": address}
+                case ["maintain", resource, mode, skill, interval]:
+                    request = {
+                        "resource": name(resource),
+                        "mode": mode,
+                        "skill": name(skill),
+                        "interval": int(interval),
+                    }
+                case [("pause" | "resume" | "retire"), goal]:
+                    request = {"goal": goal}
+                case [("diagnose" | "improve"), incident] | ["rebind", incident, _]:
+                    request = {
+                        "incident": incident,
+                        "revision": parts[2] if kind == "rebind" else None,
+                    }
+                case _:
+                    raise ValueError("Unknown operator command or missing arguments")
+        task = identity()
+        checkpoint = {
+            "goal": text,
+            "criteria": "Check the requested outcome against observed results",
+            "last_verified": None,
+            "operations": [],
+            "revisions": [],
+            "next": "Inspect active skills and prior evidence",
+        }
+        with self.state.tx() as conn:
+            conn.execute(
+                "INSERT INTO tasks(id,goal,status,checkpoint,created,run,input,kind) VALUES (?,?,'queued',?,?,?,?,?)",
+                (
+                    task,
+                    text,
+                    encode(checkpoint),
+                    self.state.clock(),
+                    identity(),
+                    encode(request),
+                    kind,
+                ),
+            )
+            self.state.event(task, "owner.message", {"text": text}, conn)
+        return task
+
+    def tools(self, task: str) -> TaskTools:
+        return TaskTools(self.state, self.catalog, task, self.maintenance)
+
+    def context(self, task: dict) -> str:
+        earlier = self.state.rows(
+            "SELECT kind,data FROM events WHERE task=? AND kind IN ('owner.followup','skill.active','tool.completed','question') ORDER BY id DESC LIMIT 8",
+            task["id"],
+        )
+        return encode(
+            {
+                "purpose": os.getenv(
+                    "SWARM_PURPOSE",
+                    "Maintain this owner's local projects and reusable operational skills.",
+                ),
+                "owner_instructions": os.getenv("SWARM_INSTRUCTIONS", ""),
+                "checkpoint": json.loads(task["checkpoint"]),
+                "index": self.catalog.search(),
+                "recent_evidence": list(reversed(earlier)),
+            }
+        )[:32000]
+
+    async def follow(self, task: str, text: str) -> None:
+        row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
+        if (
+            row["kind"] == "dns"
+            and row["status"] == "waiting"
+            and text.strip().lower() == "recheck"
+        ):
+            with self.state.tx() as conn:
+                previous = conn.execute(
+                    "SELECT 1 FROM events WHERE task=? AND kind='dns.dispatch'", (task,)
+                ).fetchone()
+                conn.execute(
+                    "UPDATE operations SET status=?,attempts=0,deadline=? WHERE task=? AND status='conflict'",
+                    (
+                        "dispatched" if previous else "prepared",
+                        self.state.clock() + self.dns.seconds,
+                        task,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", (identity(), task)
+                )
+                self.state.event(task, "owner.followup", {"text": "recheck"}, conn)
+            return
+        if row["kind"] not in ("chat", "maintain", "diagnose", "improve"):
+            raise ValueError("Use an explicit owner command to change this operation")
+        text = self.state.redact(text.strip())
+        if not 1 <= len(text) <= 24000:
+            raise ValueError("Invalid follow-up")
+        self.state.event(task, "owner.followup", {"text": text})
+        if self.current == task and row["status"] == "running":
+            await self.runtime.steer(text)
+            return
+        if self.current == task and row["status"] != "waiting":
+            raise ValueError("Turn is finishing. Retry the follow-up shortly")
+        self.state.change(
+            "UPDATE tasks SET status='queued',wake=0,run=? WHERE id=?", identity(), task
+        )
+
+    async def stop(self, task: str) -> None:
+        row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
+        if row["status"] not in ("queued", "running", "waiting", "credential", "observing"):
+            raise ValueError("This task has already stopped")
+        if self.current == task and row["kind"] in ("chat", "maintain", "diagnose", "improve"):
+            self.state.change("UPDATE tasks SET status='stopping' WHERE id=?", task)
+            await self.runtime.interrupt()
+        else:
+            self.state.change("UPDATE tasks SET status='interrupted' WHERE id=?", task)
+        self.state.event(
+            task,
+            "owner.interrupt",
+            {"observed": self.state.one("SELECT status FROM tasks WHERE id=?", task)["status"]},
+        )
+
+    def credential(self, task: str, token: str) -> None:
+        row = self.state.one("SELECT kind,status FROM tasks WHERE id=?", task)
+        if row != {"kind": "dns", "status": "credential"}:
+            raise ValueError("This task has no outstanding credential request")
+        self.state.secret("digitalocean", token)
+        self.state.change("UPDATE tasks SET status='queued',wake=0 WHERE id=?", task)
+        self.state.event(task, "credential.supplied", {"destination": DO_ENDPOINT})
+
+    async def step(self) -> bool:
+        async with self.lock:
+            rows = self.state.rows(
+                "SELECT * FROM tasks WHERE status IN ('queued','observing') AND wake<=? ORDER BY created LIMIT 1",
+                self.state.clock(),
+            )
+            if not rows:
+                return self.maintenance.tick()
+            row = rows[0]
+            key = row["id"]
+            self.current = key
+            try:
+                self.state.change("UPDATE tasks SET status='running' WHERE id=?", key)
+                self.state.event(key, "run.started", {"run": row["run"], "worker_uid": os.getuid()})
+                status = await self.execute(row)
+                self.state.change(
+                    "UPDATE tasks SET status=? WHERE id=? AND status IN ('running','stopping')",
+                    status,
+                    key,
+                )
+            except CredentialNeeded as exc:
+                self.state.change("UPDATE tasks SET status='credential' WHERE id=?", key)
+                self.state.event(
+                    key, "credential.required", {"secret": str(exc), "destination": DO_ENDPOINT}
+                )
+            except Exception as exc:
+                self.state.change("UPDATE tasks SET status='failed' WHERE id=?", key)
+                self.state.event(
+                    key, "run.failed", {"error": str(exc)[:2000] or type(exc).__name__}
+                )
+            finally:
+                self.current = None
+            self.state.event(
+                key, "run.status", self.state.one("SELECT status FROM tasks WHERE id=?", key)
+            )
+            return True
+
+    async def execute(self, row: dict) -> str:
+        key, kind = row["id"], row["kind"]
+        req = json.loads(row["input"])
+        if kind == "dns":
+            operations = json.loads(row["checkpoint"])["operations"]
+            if operations:
+                journal = self.state.one(
+                    "SELECT intent FROM operations WHERE id=? AND task=? AND authority=?",
+                    operations[0],
+                    key,
+                    key,
+                )
+                req = json.loads(journal["intent"])
+            if isinstance(self.dns.provider, DNSProvider):
+                self.dns.provider.remote.settings()
+            outcome = await self.dns.step(key, Intent(**req))
+            if outcome == "observe":
+                self.state.change("UPDATE tasks SET wake=? WHERE id=?", self.state.clock() + 2, key)
+                return "observing"
+            return "waiting" if outcome == "conflict" else outcome
+        if kind in ("pause", "resume", "retire"):
+            self.maintenance.control(req["goal"], kind)
+            return "verified"
+        if kind in ("diagnose", "improve", "rebind"):
+            result = self.maintenance.followup(req["incident"], req["revision"])
+            self.state.event(key, "incident.followup", result)
+            if kind == "rebind":
+                return "verified"
+            checkpoint = json.loads(row["checkpoint"])
+            checkpoint["incident"] = result
+            checkpoint["next"] = (
+                "Diagnose the recorded observation. For an improvement, stage and test the smallest regression before activation."
+            )
+            row = {**row, "checkpoint": encode(checkpoint)}
+            self.state.change("UPDATE tasks SET checkpoint=? WHERE id=?", row["checkpoint"], key)
+            async with asyncio.timeout(max(0, result["deadline"] - self.state.clock())):
+                outcome = await self.runtime.run(self, row)
+            return "answered" if outcome == "completed" else outcome
+        if kind == "chat" or not self.state.rows("SELECT * FROM active WHERE name=?", req["skill"]):
+            outcome = await self.runtime.run(self, row)
+            if outcome != "completed":
+                return outcome
+            current = self.state.one("SELECT status FROM tasks WHERE id=?", key)["status"]
+            if current != "running":
+                return current
+        if kind == "maintain":
+            existing = self.state.rows("SELECT id FROM goals WHERE authority=?", key)
+            if not existing:
+                self.maintenance.add(key, **req)
+            return "verified"
+        return "answered"
+
+    async def loop(self) -> None:
+        while True:
+            self.state.deliver_alerts()
+            if not await self.step():
+                await asyncio.sleep(0.3)
+
+    def summary(self) -> dict:
+        return {
+            "installation": self.state.one("SELECT value FROM meta WHERE key='installation'")[
+                "value"
+            ],
+            "uid": os.getuid(),
+            "fixture_uid": self.maintenance.host.uid,
+            "tasks": self.state.rows(
+                "SELECT id,goal,status,created FROM tasks ORDER BY created DESC LIMIT 40"
+            ),
+            "skills": self.catalog.search(),
+            "memories": self.state.rows("SELECT * FROM memories ORDER BY updated DESC LIMIT 100"),
+            "goals": self.state.rows("SELECT * FROM goals"),
+            "incidents": self.maintenance.summaries(),
+        }
+
+    def artifact(self, key: str) -> dict:
+        return self.catalog.revision(key)
+
+    def skill_view(self, key: str) -> dict:
+        return {
+            "active": self.catalog.read(key),
+            "revisions": self.state.rows(
+                "SELECT rev,origin,tests,passed FROM revisions WHERE name=?", key
+            ),
+            "calls": self.state.rows(
+                "SELECT c.* FROM calls c JOIN revisions r ON c.rev=r.rev WHERE r.name=? ORDER BY c.rowid DESC LIMIT 100",
+                key,
+            ),
+        }
