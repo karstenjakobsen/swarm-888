@@ -62,7 +62,7 @@ test-live-ui: build
 	cd web && $(PNPM) exec playwright test --workers=1
 
 acceptance-docker: build
-	cd web && OPERATOR_ACCEPTANCE_DOCKER=1 CADDY="$(CADDY)" $(PNPM) exec playwright test tests/docker.spec.ts --workers=1
+	CADDY="$(CADDY)" sh scripts/acceptance-docker.sh $(PNPM)
 
 acceptance-recovery:
 	OPERATOR_ACCEPTANCE_DOCKER=1 $(PY) -m pytest -q -s tests/test_operations.py

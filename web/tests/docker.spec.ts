@@ -40,7 +40,7 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
   docker('image', 'inspect', image, '--format', '{{.Id}}')
   const directory = await mkdtemp(join(process.env.OPERATOR_ACCEPTANCE_PARENT ?? tmpdir(), 'operator-docker-'))
   const state = join(directory, 'state')
-  const owner = 'swarm.operator.acceptance=' + crypto.randomUUID()
+  const owner = 'swarm.operator.acceptance=' + (process.env.OPERATOR_ACCEPTANCE_FIXTURE_RUN ?? crypto.randomUUID())
   console.log('Walkthrough state', directory)
   const owned: string[] = []
   const fixture = (selector: string, name: string, command: string) => {

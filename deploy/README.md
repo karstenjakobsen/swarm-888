@@ -22,7 +22,7 @@ sudo install -d -m 0755 /opt/swarm-operator
 sudo install -d -m 0750 /etc/swarm-operator
 ```
 
-Put the checked-out release in `/opt/swarm-operator` using your normal Git deployment access. With the release writable by its build account, run `make setup && make check`. Keep the completed release readable by both app accounts. Use an administrator-owned release checkout when enabling a root worker.
+Put the checked-out release in `/opt/swarm-operator` using your normal Git deployment access. With the release writable by its build account, run `make setup && make check`. Use a Python interpreter in a shared location readable by the service account so the virtual environment does not point into a private build account home. Keep the completed release readable by both app accounts. Use an administrator-owned release checkout when enabling a root worker. The tested Codex CLI version is 0.166.0.
 
 Initialize under the operator account. Supply the catalog remote as an SSH URL or use a credential helper. The service environment file contains paths and ports.
 

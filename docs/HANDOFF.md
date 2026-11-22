@@ -42,3 +42,5 @@ OPERATOR_ACCEPTANCE_MEMORY=1 OPERATOR_ACCEPTANCE_CONNECTOR=1 OPERATOR_ACCEPTANCE
 ```
 
 Use `CADDY=/absolute/path/to/caddy` where Caddy is outside PATH. The fixture image is `alpine:3.22`. Install Chromium as documented in the root README. Codex mode requires an authenticated CLI as the worker user.
+
+The acceptance command also cleans up by its unique label after the browser process exits. A forced subprocess failure preserved exit status 17 and removed the fixture it created.
