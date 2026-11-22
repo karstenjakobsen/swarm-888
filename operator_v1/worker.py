@@ -8,7 +8,7 @@ from contextlib import closing
 from .config import Settings
 from .goals import StandingGoals
 from .model import ModelError, ModelSession, codex_session, connect_skills
-from .operations import DockerFixtureEngine, Operations
+from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
 
@@ -19,7 +19,7 @@ class MessageWorker:
         self.state = State(settings)
         self.operations = Operations(self.state)
         self.goals = StandingGoals(settings, self.state)
-        self.fixture_engine = DockerFixtureEngine()
+        self.fixture_engine = ConfiguredFixtureEngine(settings.directory / "fixture-engine.json")
         default = "codex" if settings.catalog_config.is_file() else "acknowledge"
         self.mode = os.environ.get("OPERATOR_MODEL", default)
         if self.mode not in ("acknowledge", "codex", "simulated"):

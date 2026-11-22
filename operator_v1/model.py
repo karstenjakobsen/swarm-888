@@ -62,9 +62,9 @@ def user_input(text: str) -> list[dict[str, Any]]:
 
 INSTRUCTIONS = """You are the single-host operator. Use the provided operator MCP tools.
 For skill requests call skill_discover with a short capability keyword before authoring.
-For Docker tasks use the query "docker" so that the result records whether Docker is covered.
 When no active skill matches, read
-the foundational authoring guide, define the procedure and tests yourself, and use the scaffold,
+the foundational authoring guide and inspect the authorized dependencies. Write the executable
+entry point and tests yourself, and use the scaffold,
 test and activate tools. Then invoke the new skill on the owner's input in the same task.
 Call the stable skill_invoke tool if the new named tool is unavailable in this turn's tool list.
 For reuse, invoke the existing revision without editing its definition. When asked to inspect

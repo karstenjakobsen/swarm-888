@@ -11,7 +11,13 @@ from .catalog import Catalog, run_git
 from .config import Settings
 from .state import State
 
-STATE_FILES = ("owner.key", "catalog.json", "connector-bindings.json")
+STATE_FILES = (
+    "owner.key",
+    "catalog.json",
+    "connector-bindings.json",
+    "skill-dependencies.json",
+    "fixture-engine.json",
+)
 STATE_DIRECTORIES = ("revisions", "workspaces", "secrets", "defense")
 DATABASE = "operator.sqlite3"
 BUNDLE = "catalog.bundle"

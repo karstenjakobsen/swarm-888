@@ -1,0 +1,114 @@
+[
+  {
+    "name": "Sort names and show the nonzero exit code only for the exited container",
+    "arguments": {
+      "label": "swarm.operator.project=4cacd634-e72-first"
+    },
+    "commands": [
+      {
+        "dependency": "docker",
+        "argv": [
+          "ps",
+          "-aq",
+          "--filter",
+          "label=swarm.operator.project=4cacd634-e72-first"
+        ],
+        "stdout": "9ee743efc07e\nb2c9384e5cd9\n"
+      },
+      {
+        "dependency": "docker",
+        "argv": [
+          "inspect",
+          "--type",
+          "container",
+          "--format",
+          "{\"name\":{{json .Name}},\"image\":{{json .Config.Image}},\"state\":{{json .State.Status}},\"exitCode\":{{json .State.ExitCode}}}",
+          "9ee743efc07e"
+        ],
+        "stdout": "{\"name\":\"/web\",\"image\":\"example:1\",\"state\":\"running\",\"exitCode\":0}\n"
+      },
+      {
+        "dependency": "docker",
+        "argv": [
+          "inspect",
+          "--type",
+          "container",
+          "--format",
+          "{\"name\":{{json .Name}},\"image\":{{json .Config.Image}},\"state\":{{json .State.Status}},\"exitCode\":{{json .State.ExitCode}}}",
+          "b2c9384e5cd9"
+        ],
+        "stdout": "{\"name\":\"/job\",\"image\":\"example:1\",\"state\":\"exited\",\"exitCode\":7}\n"
+      }
+    ],
+    "expected": [
+      {
+        "name": "job",
+        "image": "example:1",
+        "state": "exited",
+        "exitCode": 7
+      },
+      {
+        "name": "web",
+        "image": "example:1",
+        "state": "running"
+      }
+    ]
+  },
+  {
+    "name": "Keep a zero exit code",
+    "arguments": {
+      "label": "swarm.operator.project=4cacd634-e72-first"
+    },
+    "commands": [
+      {
+        "dependency": "docker",
+        "argv": [
+          "ps",
+          "-aq",
+          "--filter",
+          "label=swarm.operator.project=4cacd634-e72-first"
+        ],
+        "stdout": "9ee743efc07e\n"
+      },
+      {
+        "dependency": "docker",
+        "argv": [
+          "inspect",
+          "--type",
+          "container",
+          "--format",
+          "{\"name\":{{json .Name}},\"image\":{{json .Config.Image}},\"state\":{{json .State.Status}},\"exitCode\":{{json .State.ExitCode}}}",
+          "9ee743efc07e"
+        ],
+        "stdout": "{\"name\":\"/job\",\"image\":\"example:1\",\"state\":\"exited\",\"exitCode\":0}\n"
+      }
+    ],
+    "expected": [
+      {
+        "name": "job",
+        "image": "example:1",
+        "state": "exited",
+        "exitCode": 0
+      }
+    ]
+  },
+  {
+    "name": "Empty selection",
+    "arguments": {
+      "label": "swarm.operator.project=4cacd634-e72-empty"
+    },
+    "commands": [
+      {
+        "dependency": "docker",
+        "argv": [
+          "ps",
+          "-aq",
+          "--filter",
+          "label=swarm.operator.project=4cacd634-e72-empty"
+        ],
+        "stdout": ""
+      }
+    ],
+    "expected": []
+  }
+]

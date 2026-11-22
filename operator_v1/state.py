@@ -76,7 +76,7 @@ CREDENTIAL_SCHEMA = """CREATE TABLE credential_requests(
     UNIQUE(task,connector))"""
 
 GOAL_SCHEMA = (
-    "ALTER TABLE skill_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'docker.inspect_labeled'",
+    "ALTER TABLE skill_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",
     "UPDATE skill_revisions SET source='authoring' WHERE skill='create-skill'",
     """CREATE TABLE standing_goals(
         id TEXT PRIMARY KEY, task TEXT NOT NULL REFERENCES tasks(id), filename TEXT NOT NULL,

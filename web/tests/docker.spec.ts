@@ -59,6 +59,7 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     CONTROLLER_PORT: controllerPort, WEB_PORT: webPort, NEXT_TELEMETRY_DISABLED: '1',
     OPERATOR_CATALOG_REMOTE: join(directory, 'remote.git'),
     OPERATOR_CATALOG_BRANCH: 'main', OPERATOR_CATALOG_CHECKOUT: join(directory, 'catalog'),
+    OPERATOR_SIMULATED_SKILL: join(directory, 'simulated-skill.json'),
     XDG_CONFIG_HOME: directory, XDG_DATA_HOME: directory }
   const children: ChildProcess[] = []
   function run(command: string, args: string[], cwd = root, extraEnv?: Record<string, string>) {
@@ -95,6 +96,9 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
   try {
     execute('git', ['init', '--bare', env.OPERATOR_CATALOG_REMOTE])
     execute('make', ['catalog-init', 'owner-key'])
+    if (model === 'simulated') {
+      await writeFile(env.OPERATOR_SIMULATED_SKILL, execute(python, ['tests/fixture_inspection.py', 'request']), {mode: 0o600})
+    }
     if (process.env.OPERATOR_ACCEPTANCE_MEMORY === '1') {
       const catalog = env.OPERATOR_CATALOG_CHECKOUT
       await writeFile(join(catalog, 'projects/example.json'), JSON.stringify({
@@ -119,9 +123,9 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
       run(python, ['-m', 'uvicorn', 'fixture_connector:app', '--app-dir', 'tests', '--port', connectorPort], root,
         {FIXTURE_MCP_TOKEN: token})
     }
-    const discovery = JSON.parse(execute(python, ['-m', 'operator_v1.skill_list']))
+    const discovery = JSON.parse(execute(python, ['-m', 'operator_v1.skill_list', 'docker']))
     expect(discovery.installed.skills.map((skill: {skill: string}) => skill.skill)).toEqual(['create-skill'])
-    expect(discovery.docker.skills).toEqual([])
+    expect(discovery.matches.skills).toEqual([])
     run(python, ['-m', 'operator_v1.serve'])
     run(process.execPath, ['node_modules/next/dist/bin/next', 'start', '--hostname', '127.0.0.1', '--port', webPort], web)
     run(process.env.CADDY || 'caddy', ['run', '--config', 'Caddyfile', '--adapter', 'caddyfile'])
@@ -133,10 +137,14 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     const suffix = crypto.randomUUID().slice(0, 12)
     const selector = 'swarm.operator.project=' + suffix + '-first'
     const empty = 'swarm.operator.project=' + suffix + '-empty'
-    fixture(selector, 'swarm-' + suffix + '-running', 'sleep 900')
+    const dockerPath = execute('which', ['docker'])
+    const updatePolicy = () => execute(python, ['tests/fixture_inspection.py', 'policy', state, dockerPath,
+      'swarm\\.operator\\.project=' + suffix + '-(first|empty|reuse)', ...owned])
     const firstExit = fixture(selector, 'swarm-' + suffix + '-exit7', 'exit 7')
+    fixture(selector, 'swarm-' + suffix + '-running', 'sleep 900')
     expect(docker('container', 'wait', firstExit)).toBe('7')
-    const first = await ask(page, prompt + ' Use label `' + selector + '`. Also run the skill with `' + empty + '` and report the empty selection.')
+    updatePolicy()
+    const first = await ask(page, prompt + ' Sort containers by name. Use label `' + selector + '`. Also run the skill with `' + empty + '` and report the empty selection.')
     expect(first.events.at(-1)?.kind, JSON.stringify(first.events)).toBe('completed')
     const actions = first.events.map((event: {data: {action?: string}}) => event.data.action)
     for (const action of ['authoring_guide', 'skill_built', 'skill_tested', 'skill_activated', 'skill_invoked']) {
@@ -156,14 +164,15 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     await stop(worker)
     worker = run(python, ['-m', 'operator_v1.worker'])
     const reusedSelector = 'swarm.operator.project=' + suffix + '-reuse'
-    fixture(reusedSelector, 'swarm-' + suffix + '-live', 'sleep 900')
     const secondExit = fixture(reusedSelector, 'swarm-' + suffix + '-exit13', 'exit 13')
+    fixture(reusedSelector, 'swarm-' + suffix + '-live', 'sleep 900')
     expect(docker('container', 'wait', secondExit)).toBe('13')
+    updatePolicy()
     const fresh = await context.newPage()
     fresh.setDefaultTimeout(12_000)
     await fresh.setViewportSize({width: 390, height: 844})
     await fresh.goto(origin)
-    const later = await ask(fresh, prompt + ' Use label `' + reusedSelector + '`.')
+    const later = await ask(fresh, prompt + ' Sort containers by name. Use label `' + reusedSelector + '`.')
     expect(later.events.at(-1)?.kind, JSON.stringify(later.events)).toBe('completed')
     expect(later.events.some((event: {data: {action?: string}}) =>
       event.data.action === 'skill_built' || event.data.action === 'skill_revised')).toBe(false)
@@ -178,8 +187,25 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     await expect(fresh.getByRole('heading', {name: 'Verified on a later task'})).toBeVisible()
     await fresh.locator('a[href="/work/' + later.taskId + '"]').first().click()
     await expect(fresh.getByText('Verified independently', {exact: true}).first()).toBeVisible()
+    const skillPath = 'skills/' + created.skill
+    const tree = execute('git', ['-C', env.OPERATOR_CATALOG_CHECKOUT, 'ls-tree', '-r', created.revision, '--', skillPath])
+    expect(tree.split('\n').map(line => line.split('\t')[1])).toEqual(
+      ['run.lua', 'skill.json', 'tests.json'].map(file => skillPath + '/' + file))
+    const gitFile = (filename: string) => execute('git', ['-C', env.OPERATOR_CATALOG_CHECKOUT,
+      'show', created.revision + ':' + skillPath + '/' + filename])
+    for (const filename of ['run.lua', 'skill.json', 'tests.json']) {
+      await writeFile(join(directory, filename), gitFile(filename) + '\n', {mode: 0o600})
+    }
+    const manifest = JSON.parse(gitFile('skill.json'))
+    expect(manifest.program).toMatchObject({source: 'executable', entrypoint: 'run.lua', dependencies: ['docker']})
+    const calls = (events: Array<{data: { action?: string, revision?: string }}>) =>
+      events.filter(event => event.data.action === 'skill_invoked').map(event => event.data)
+    const creatingCalls = calls(first.events)
+    const reuseCalls = calls(later.events)
+    expect(creatingCalls.map(call => call.revision)).toEqual([created.revision, created.revision])
+    expect(reuseCalls.map(call => call.revision)).toEqual([created.revision])
     const evidence = {mode: model, creatingTask: '/work/' + first.taskId, reuseTask: '/work/' + later.taskId,
-      skillRevision: revisionPath, revision: created.revision, observations, laterObservations}
+      skillRevision: revisionPath, revision: created.revision, tree, creatingCalls, reuseCalls, observations, laterObservations}
     await writeFile(join(directory, 'evidence.json'), JSON.stringify(evidence, null, 2) + '\n', {mode: 0o600})
     console.log(JSON.stringify(evidence, null, 2))
     if (process.env.OPERATOR_ACCEPTANCE_MEMORY === '1') {

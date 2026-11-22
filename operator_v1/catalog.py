@@ -12,7 +12,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .config import Settings
 
-SEED = Path(__file__).parent / "seed" / "v1"
+SEED_VERSION = 2
+SEED = Path(__file__).parent / "seed" / f"v{SEED_VERSION}"
 AUTHORING_SKILL = "create-skill"
 
 
@@ -98,7 +99,7 @@ class Catalog:
         if checkout.is_relative_to(framework) or framework.is_relative_to(checkout):
             raise CatalogError("Use a separate checkout outside the framework repository")
 
-        catalog = cls(settings, CatalogConfig(remote, branch, str(checkout), 1, ""))
+        catalog = cls(settings, CatalogConfig(remote, branch, str(checkout), SEED_VERSION, ""))
         with catalog.locked():
             if settings.catalog_config.exists():
                 existing = cls.load(settings)
@@ -134,14 +135,16 @@ class Catalog:
                 for folder in ("connectors", "projects"):
                     (checkout / folder).mkdir()
                     (checkout / folder / ".gitkeep").touch()
-                (checkout / "seed.json").write_text('{"version": 1}\n')
+                (checkout / "seed.json").write_text(json.dumps({"version": SEED_VERSION}) + "\n")
                 catalog.git("add", "--", "skills", "projects", "connectors", "seed.json")
-                catalog.git("commit", "-m", "Seed the foundational authoring skill v1")
+                catalog.git(
+                    "commit", "-m", f"Seed the foundational authoring skill v{SEED_VERSION}"
+                )
             seed_version = json.loads(catalog.git("show", "HEAD:seed.json"))["version"]
             seed_revision = catalog.git(
                 "log", "--format=%H", "-n", "1", "--", "skills/create-skill"
             ).strip()
-            if seed_version != 1 or not seed_revision:
+            if seed_version not in (1, SEED_VERSION) or not seed_revision:
                 raise CatalogError("The catalog lacks a supported foundational seed")
             if not refs.strip():
                 catalog.push()

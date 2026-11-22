@@ -5,11 +5,15 @@ import json
 import sys
 from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from .config import Settings
-from .skill_program import Row, Selector
+from .skill_program import Row
 from .state import State
+
+Selector = Annotated[
+    str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*=[A-Za-z0-9_.-]+$")
+]
 
 
 class Observation(BaseModel):
@@ -36,11 +40,11 @@ def record(state: State, task: str, grade: Grade) -> dict[str, str]:
             matched = [
                 call
                 for call in calls
-                if json.loads(call["arguments"]).get("selector") == observation.selector
+                if observation.selector in json.loads(call["arguments"]).values()
             ]
             expected = sorted(observation.rows, key=lambda row: str(row.get("name")))
             for call in matched:
-                actual = sorted(json.loads(call["result"]), key=lambda row: str(row.get("name")))
+                actual = json.loads(call["result"])
                 if actual != expected:
                     raise ValueError(f"Skill result differs from Docker for {observation.selector}")
                 identities.add((call["skill"], call["revision"]))

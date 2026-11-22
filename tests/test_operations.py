@@ -1,10 +1,13 @@
 import asyncio
+import json
 import os
 import signal
 import subprocess
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fixture_inspection import inspection_request
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from test_message import controller, headers, login, process, wait_until
@@ -12,7 +15,6 @@ from test_skills import bootstrap
 
 from operator_v1.model import skill_server
 from operator_v1.operations import Observation, Operations
-from operator_v1.simulated_model import inspection_definition
 from operator_v1.state import State
 
 
@@ -27,7 +29,7 @@ def initialized(tmp_path):
         ):
             await session.initialize()
             built = await session.call_tool(
-                "skill_scaffold", {"skill": "inspect-docker", "definition": inspection_definition()}
+                "skill_scaffold", {"skill": "inspect-docker", **inspection_request()}
             )
             assert not built.isError
             tested = await session.call_tool("skill_test", built.structuredContent)
@@ -119,22 +121,26 @@ def test_real_docker_recovers_after_worker_process_dies(tmp_path):
         "120",
     )
     try:
+        config = settings.directory / "fixture-engine.json"
+        config.write_text(
+            json.dumps([os.sys.executable, str(Path(__file__).with_name("fixture_engine.py"))])
+        )
         with controller(settings) as client:
             task = request_start(client, settings, target)
             code = """
 import os
 import signal
 from operator_v1.config import Settings
-from operator_v1.operations import DockerFixtureEngine
+from operator_v1.operations import ConfiguredFixtureEngine
 from operator_v1.worker import MessageWorker
 
-class DieAfterDispatch(DockerFixtureEngine):
+class DieAfterDispatch(ConfiguredFixtureEngine):
     def start(self, target):
         super().start(target)
         os.kill(os.getpid(), signal.SIGKILL)
 
 worker = MessageWorker(Settings.load())
-worker.fixture_engine = DieAfterDispatch()
+worker.fixture_engine = DieAfterDispatch(worker.settings.directory / "fixture-engine.json")
 worker.serve()
 """
             killed = subprocess.run(

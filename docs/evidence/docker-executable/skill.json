@@ -1,0 +1,29 @@
+{
+  "name": "container-status-by-label",
+  "purpose": "Report container names, images, states and exit codes for exited containers matching an exact Docker project label, sorted by name.",
+  "procedure": [
+    "List all matching container IDs with the supplied label filter.",
+    "Inspect each ID, strip the leading slash from its name, and include the exit code for exited containers.",
+    "Return the rows sorted by name or an empty array if there are no matches."
+  ],
+  "program": {
+    "source": "executable",
+    "entrypoint": "run.lua",
+    "dependencies": [
+      "docker"
+    ],
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "Exact Docker project label in key=value form."
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

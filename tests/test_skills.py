@@ -5,12 +5,12 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+from fixture_inspection import inspection_request, write_policy
 from mcp import ClientSession, types
 from mcp.client.stdio import stdio_client
 
 from operator_v1.config import Settings
 from operator_v1.model import skill_server
-from operator_v1.simulated_model import inspection_definition
 from operator_v1.state import State
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,7 @@ def bootstrap(tmp_path: Path) -> tuple[Settings, dict[str, str]]:
     return settings, env
 
 
-def test_bootstrap_and_hot_plug(tmp_path, monkeypatch):
+def test_bootstrap_and_hot_plug(tmp_path):
     settings, env = bootstrap(tmp_path)
     state = State(settings)
     task = state.submit(uuid4(), "Inspect the fixture")
@@ -41,7 +41,7 @@ def test_bootstrap_and_hot_plug(tmp_path, monkeypatch):
     docker = bin_dir / "docker"
     docker.write_text('#!/bin/sh\n[ "$1" = ps ] && [ "$3" = --filter ]\n')
     docker.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    write_policy(settings.directory, str(docker))
 
     async def exercise():
         changed = asyncio.Event()
@@ -67,10 +67,8 @@ def test_bootstrap_and_hot_plug(tmp_path, monkeypatch):
                 "create-skill"
             ]
             assert (await call("skill_discover", query="inspect docker"))["skills"] == []
-            assert (await call("skill_authoring_guide"))["template"]["program"]
-            candidate = await call(
-                "skill_scaffold", skill="inspect-docker", definition=inspection_definition()
-            )
+            assert (await call("skill_authoring_guide"))["template"]["definition"]["program"]
+            candidate = await call("skill_scaffold", skill="inspect-docker", **inspection_request())
             assert len(candidate["revision"]) == 40
             assert (await call("skill_test", **candidate))["passed"]
             await call("skill_activate", **candidate)
@@ -80,7 +78,11 @@ def test_bootstrap_and_hot_plug(tmp_path, monkeypatch):
             }
             assert (await call("run_inspect-docker", selector="swarm.test=empty"))["result"] == []
             assert (
-                await call("skill_invoke", skill="inspect-docker", selector="swarm.test=empty")
+                await call(
+                    "skill_invoke",
+                    skill="inspect-docker",
+                    arguments={"selector": "swarm.test=empty"},
+                )
             )["revision"] == candidate["revision"]
             return candidate["revision"]
 
@@ -107,7 +109,7 @@ def test_bootstrap_and_hot_plug(tmp_path, monkeypatch):
     ]
 
 
-def test_revision_pinning_failed_candidate_and_rollback(tmp_path, monkeypatch):
+def test_revision_pinning_failed_candidate_and_rollback(tmp_path):
     settings, _ = bootstrap(tmp_path)
     tool_dir = tmp_path / "bin"
     tool_dir.mkdir()
@@ -124,7 +126,7 @@ def test_revision_pinning_failed_candidate_and_rollback(tmp_path, monkeypatch):
         "exit 0\n"
     )
     docker.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tool_dir) + os.pathsep + os.environ["PATH"])
+    write_policy(settings.directory, str(docker))
 
     async def exercise():
         async with (
@@ -138,13 +140,13 @@ def test_revision_pinning_failed_candidate_and_rollback(tmp_path, monkeypatch):
                 assert not result.isError, result.content
                 return result.structuredContent
 
-            async def candidate(definition):
-                return await call("skill_scaffold", skill="inspect-docker", definition=definition)
+            async def candidate(request):
+                return await call("skill_scaffold", skill="inspect-docker", **request)
 
             async def active():
                 return (await call("skill_discover", query="docker"))["skills"][0]["revision"]
 
-            first = await candidate(inspection_definition())
+            first = await candidate(inspection_request())
             assert (await call("skill_test", **first))["passed"]
             await call("skill_activate", **first)
             pending = asyncio.create_task(call("run_inspect-docker", selector="swarm.test=hold"))
@@ -152,9 +154,11 @@ def test_revision_pinning_failed_candidate_and_rollback(tmp_path, monkeypatch):
                 async with asyncio.timeout(5):
                     while not started.exists():
                         await asyncio.sleep(0.02)
-                second = await candidate(
-                    {**inspection_definition(), "name": "Docker inspection v2"}
+                second_request = inspection_request()
+                second_request["entrypoint"] = (
+                    "-- Second executable revision\n" + second_request["entrypoint"]
                 )
+                second = await candidate(second_request)
                 assert (await call("skill_test", **second))["passed"]
                 await call("skill_activate", **second)
                 assert await active() == second["revision"]
@@ -165,8 +169,8 @@ def test_revision_pinning_failed_candidate_and_rollback(tmp_path, monkeypatch):
                 release.touch()
             assert (await pending)["revision"] == first["revision"]
 
-            definition = inspection_definition()
-            definition["tests"][2]["expected"] = [{"name": "invalid expected output"}]
+            definition = inspection_request()
+            definition["definition"]["tests"][2]["expected"] = [{"name": "invalid expected output"}]
             broken = await candidate(definition)
             assert not (await call("skill_test", **broken))["passed"]
             assert (await session.call_tool("skill_activate", broken)).isError

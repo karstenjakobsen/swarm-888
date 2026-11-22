@@ -1,20 +1,19 @@
 import asyncio
 import json
-import os
 from pathlib import Path
 from uuid import uuid4
 
+from fixture_inspection import inspection_request, write_policy
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from test_skills import ROOT, bootstrap
 
 from operator_v1.catalog import run_git
 from operator_v1.model import skill_server
-from operator_v1.simulated_model import inspection_definition
 from operator_v1.state import State
 
 
-def test_catalog_fast_forward_conflict_and_offline_skill(tmp_path, monkeypatch):
+def test_catalog_fast_forward_conflict_and_offline_skill(tmp_path):
     settings, env = bootstrap(tmp_path)
     checkout = Path(env["OPERATOR_CATALOG_CHECKOUT"])
     remote = Path(env["OPERATOR_CATALOG_REMOTE"])
@@ -51,7 +50,7 @@ def test_catalog_fast_forward_conflict_and_offline_skill(tmp_path, monkeypatch):
     helper = tmp_path / "docker"
     helper.write_text("#!/bin/sh\nexit 0\n")
     helper.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    write_policy(settings.directory, str(helper))
 
     async def build():
         async with (
@@ -63,7 +62,7 @@ def test_catalog_fast_forward_conflict_and_offline_skill(tmp_path, monkeypatch):
             assert read_project.structuredContent["repo"] == "https://example.invalid/app.git"
             assert read_project.structuredContent["catalog"]["path"] == "projects/example.json"
             result = await session.call_tool(
-                "skill_scaffold", {"skill": "inspect-docker", "definition": inspection_definition()}
+                "skill_scaffold", {"skill": "inspect-docker", **inspection_request()}
             )
             assert not result.isError, result.content
             candidate = result.structuredContent

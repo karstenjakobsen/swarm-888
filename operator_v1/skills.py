@@ -7,7 +7,8 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from .catalog import AUTHORING_SKILL, Catalog, display_remote
-from .skill_program import DockerSelection, SkillDefinition, SkillError
+from .executor import load_dependencies
+from .skill_program import ExecutableProgram, SkillDefinition, SkillError
 from .state import State
 
 
@@ -55,7 +56,8 @@ class Skills:
                 dict(row)
                 for row in db.execute(
                     """SELECT skill,revision,description,source FROM active_skills
-                       JOIN skill_revisions USING(skill,revision) ORDER BY skill"""
+                       JOIN skill_revisions USING(skill,revision)
+                       WHERE source IN ('authoring','executable','file.mode') ORDER BY skill"""
                 )
             ]
 
@@ -96,10 +98,35 @@ class Skills:
             "template": json.loads((path / "template.json").read_text()),
         }
 
-    def scaffold(self, skill: str, definition: SkillDefinition) -> dict[str, JsonValue]:
+    @property
+    def dependency_policy(self) -> Path:
+        return self.catalog.settings.directory / "skill-dependencies.json"
+
+    def dependencies(self) -> dict:
+        return {
+            name: [command.model_dump() for command in dependency.commands]
+            for name, dependency in load_dependencies(self.dependency_policy).items()
+        }
+
+    def scaffold(
+        self, skill: str, definition: SkillDefinition, entrypoint: str | None = None
+    ) -> dict[str, JsonValue]:
         if skill == AUTHORING_SKILL:
             raise SkillError("The foundational skill is versioned with the framework")
-        payload = definition.model_dump_json(indent=2) + "\n"
+        executable = isinstance(definition.program, ExecutableProgram)
+        if executable != bool(entrypoint):
+            raise SkillError("Executable definitions require an entry point")
+        files = {
+            "skill.json": definition.model_dump_json(
+                indent=2, exclude={"tests"} if executable else None
+            )
+            + "\n"
+        }
+        if entrypoint:
+            files["run.lua"] = entrypoint.rstrip() + "\n"
+            files["tests.json"] = (
+                json.dumps([test.model_dump() for test in definition.tests], indent=2) + "\n"
+            )
         with self.catalog.locked():
             root = self.catalog.checkout / "skills"
             directory = root / skill
@@ -108,16 +135,25 @@ class Skills:
             if self.catalog.git("status", "--porcelain"):
                 raise SkillError("Catalog checkout has local changes")
             directory.mkdir(exist_ok=True)
-            source = directory / "skill.json"
-            if source.is_symlink():
-                raise SkillError("Skill definition cannot be a symbolic link")
-            relative = str(source.relative_to(self.catalog.checkout))
-            if not source.exists() or source.read_text() != payload:
-                source.write_text(payload)
+            paths = [directory / name for name in files]
+            if any(path.is_symlink() for path in paths):
+                raise SkillError("Skill files cannot be symbolic links")
+            manifest = directory / "skill.json"
+            if manifest.is_file():
+                previous = json.loads(manifest.read_text())["program"]["source"]
+                if (
+                    previous in ("executable", "file.mode")
+                    and previous != definition.program.source
+                ):
+                    raise SkillError("Use a new skill ID when changing its execution type")
+            relative = str(directory.relative_to(self.catalog.checkout))
+            if any(not path.is_file() or path.read_text() != files[path.name] for path in paths):
+                for path in paths:
+                    path.write_text(files[path.name])
                 self.catalog.git("add", "--", relative)
                 self.catalog.git("commit", "-m", f"Define skill {skill}", "--", relative)
             revision = self.catalog.git("log", "-n", "1", "--format=%H", "--", relative).strip()
-            self.catalog.retain(skill, revision, "skill.json")
+            self.catalog.retain(skill, revision, *files)
             with self.state.transaction(write=True) as db:
                 exists = db.execute(
                     "SELECT 1 FROM skill_revisions WHERE skill=? AND revision=?", (skill, revision)
@@ -144,15 +180,17 @@ class Skills:
     def revision_path(self, skill: str, revision: str) -> Path:
         return self.catalog.settings.directory / "revisions" / revision / skill
 
-    def execute(self, skill: str, revision: str, action: str, arguments=None) -> list:
+    def execute(self, skill: str, revision: str, action: str, arguments=None):
         try:
-            definition = json.loads(
-                (self.revision_path(skill, revision) / "skill.json").read_text()
-            )
             execution = subprocess.run(
-                [sys.executable, "-m", "operator_v1.skill_program"],
+                [sys.executable, "-m", "operator_v1.executor"],
                 input=json.dumps(
-                    {"action": action, "definition": definition, "arguments": arguments}
+                    {
+                        "action": action,
+                        "path": str(self.revision_path(skill, revision)),
+                        "policy": str(self.dependency_policy),
+                        "arguments": arguments,
+                    }
                 ),
                 text=True,
                 capture_output=True,
@@ -162,9 +200,9 @@ class Skills:
             result = json.loads(execution.stdout)
         except (OSError, ValueError, subprocess.SubprocessError):
             raise SkillError("The pinned skill helper could not complete") from None
-        if isinstance(result, dict):
+        if "error" in result:
             raise SkillError(result["error"])
-        return result
+        return result["result"]
 
     def test(self, skill: str, revision: str) -> dict[str, JsonValue]:
         results = self.execute(skill, revision, "test")
@@ -238,7 +276,12 @@ class Skills:
                 )
         return {"skill": skill, "revision": revision, "changed": changed}
 
-    def invoke(self, skill: str, arguments: DockerSelection) -> dict[str, JsonValue]:
+    def input_schema(self, skill: str, revision: str) -> dict:
+        return json.loads((self.revision_path(skill, revision) / "skill.json").read_text())[
+            "program"
+        ]["input_schema"]
+
+    def invoke(self, skill: str, arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
         with self.state.transaction() as db:
             row = db.execute(
                 "SELECT revision FROM active_skills WHERE skill=?", (skill,)
@@ -246,7 +289,7 @@ class Skills:
         if not row or skill == AUTHORING_SKILL:
             raise SkillError("No executable active revision")
         revision = row["revision"]
-        args = arguments.model_dump()
+        args = arguments
         result = self.execute(skill, revision, "invoke", args)
         with self.state.transaction(write=True) as db:
             call = db.execute(

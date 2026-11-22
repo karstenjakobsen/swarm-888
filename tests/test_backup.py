@@ -1,9 +1,9 @@
 import asyncio
-import os
 import stat
 from uuid import uuid4
 
 import pytest
+from fixture_inspection import write_policy
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from test_message import controller, login
@@ -16,7 +16,7 @@ from operator_v1.model import skill_server
 from operator_v1.state import State
 
 
-def test_restore_reopens_tasks_and_runs_the_pinned_skill_offline(tmp_path, monkeypatch):
+def test_restore_reopens_tasks_and_runs_the_pinned_skill_offline(tmp_path):
     settings, _, revision = initialized(tmp_path)
     state = State(settings)
     task = state.submit(uuid4(), "Inspect the fixtures")
@@ -49,7 +49,7 @@ def test_restore_reopens_tasks_and_runs_the_pinned_skill_offline(tmp_path, monke
     docker = tmp_path / "docker"
     docker.write_text("#!/bin/sh\nexit 0\n")
     docker.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    write_policy(restored.directory, str(docker))
 
     async def invoke():
         async with (

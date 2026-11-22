@@ -1,34 +1,13 @@
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from mcp import ClientSession
 
 from .model import ModelError, Turn
-
-
-def inspection_definition() -> dict[str, Any]:
-    running = {"name": "running", "image": "demo", "state": "running"}
-    exited = {"name": "exited", "image": "demo", "state": "exited", "exitCode": 7}
-    return {
-        "name": "Inspect Docker containers",
-        "purpose": "Inspect Docker containers by exact label and report their state.",
-        "procedure": [
-            "Select all Docker containers matching the exact label.",
-            "Return their name, image, and state. Include exitCode for exited containers.",
-        ],
-        "program": {
-            "source": "docker.inspect_labeled",
-            "fields": {"name": "name", "image": "image", "state": "state"},
-            "exit_code": {"field": "exitCode", "when_state": "exited"},
-        },
-        "tests": [
-            {"name": "running", "rows": [{**running, "exitCode": 0}], "expected": [running]},
-            {"name": "exited", "rows": [exited], "expected": [exited]},
-            {"name": "empty", "rows": [], "expected": []},
-        ],
-    }
 
 
 class SimulatedModel:
@@ -123,16 +102,18 @@ class SimulatedModel:
             return memory["text"]
         selectors = re.findall(r"`([a-zA-Z][a-zA-Z0-9_.-]+=[a-zA-Z0-9_.-]+)`", text)
         if not selectors:
-            raise ModelError("The simulated Docker task needs an exact label selector")
-        discovery = await self.call("skill_discover", query="docker inspect")
+            raise ModelError("The simulated authoring task needs an input selector")
+        path = os.environ.get("OPERATOR_SIMULATED_SKILL")
+        if not path:
+            raise ModelError("Configure a simulated authoring fixture")
+        fixture = json.loads(Path(path).read_text())
+        query, skill, parameter = (fixture.pop(key) for key in ("query", "skill", "input"))
+        discovery = await self.call("skill_discover", query=query)
         if discovery["skills"]:
             skill = discovery["skills"][0]["skill"]
         else:
             await self.call("skill_authoring_guide")
-            skill = "inspect-docker"
-            candidate = await self.call(
-                "skill_scaffold", skill=skill, definition=inspection_definition()
-            )
+            candidate = await self.call("skill_scaffold", skill=skill, **fixture)
             await self.call("skill_test", **candidate)
             await self.call("skill_activate", **candidate)
         name = "run_" + skill
@@ -140,5 +121,5 @@ class SimulatedModel:
             raise ModelError("The newly activated named tool was not discoverable")
         results = {}
         for selector in dict.fromkeys(selectors):
-            results[selector] = (await self.call(name, selector=selector))["result"]
+            results[selector] = (await self.call(name, **{parameter: selector}))["result"]
         return json.dumps(results, indent=2)

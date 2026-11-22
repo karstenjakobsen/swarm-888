@@ -1,15 +1,16 @@
 import json
+import subprocess
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from pathlib import Path
+from typing import Literal, Protocol, cast
 from uuid import UUID
 
 from .contracts import Kind
-from .skill_program import SkillError, docker
+from .skill_program import SkillError
 from .state import RequestConflict, State
 
-FIXTURE_LABEL = "swarm.operator.acceptance"
 Observation = Literal["running", "stopped", "unsupported", "unreadable"]
 
 
@@ -22,31 +23,36 @@ class FixtureEngine(Protocol):
     def start(self, target: str) -> None: ...
 
 
-class DockerFixtureEngine:
+class ConfiguredFixtureEngine:
+    """Optional owner-installed command for the authorized fixture mutation path."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def call(self, action: str, target: str) -> str:
+        try:
+            argv = json.loads(self.path.read_text())
+            if not argv or not isinstance(argv, list) or not Path(argv[0]).is_absolute():
+                raise ValueError
+            return subprocess.run(
+                [*argv, action, target], check=True, capture_output=True, text=True, timeout=12
+            ).stdout.strip()
+        except (OSError, TypeError, ValueError, subprocess.SubprocessError):
+            raise SkillError("The configured fixture engine did not complete") from None
+
     def observe(self, target: str) -> Observation:
         try:
-            output = docker(
-                "container",
-                "inspect",
-                "--format",
-                "{{json .Id}} {{json .Config.Labels}} {{json .State.Status}}",
-                target,
-            )
-            decoder = json.JSONDecoder()
-            identity, end = decoder.raw_decode(output)
-            output = output[end:].lstrip()
-            labels, end = decoder.raw_decode(output)
-            status = json.loads(output[end:])
-        except (SkillError, ValueError):
+            observed = self.call("observe", target)
+        except SkillError:
             return "unreadable"
-        if identity != target or not (labels or {}).get(FIXTURE_LABEL):
-            return "unsupported"
-        if status == "running":
-            return "running"
-        return "stopped" if status in ("created", "exited") else "unsupported"
+        return (
+            cast(Observation, observed)
+            if observed in ("running", "stopped", "unsupported")
+            else "unreadable"
+        )
 
     def start(self, target: str) -> None:
-        docker("container", "start", target)
+        self.call("start", target)
 
 
 class Operations:
@@ -69,7 +75,7 @@ class Operations:
                 raise RequestConflict("Request ID already used for an owner message")
             active = db.execute(
                 """SELECT revision FROM active_skills JOIN skill_revisions USING(skill,revision)
-                   WHERE skill=? AND source='docker.inspect_labeled'""",
+                   WHERE skill=? AND source='executable'""",
                 (skill,),
             ).fetchone()
             if not active:

@@ -1,0 +1,23 @@
+{
+  "skill": "example",
+  "entrypoint": "return function(args) return {args.value} end",
+  "definition": {
+    "name": "example",
+    "purpose": "Return the supplied value.",
+    "procedure": ["Read the supplied value and return it in an array."],
+    "program": {
+      "source": "executable",
+      "entrypoint": "run.lua",
+      "dependencies": [],
+      "input_schema": {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": false
+      }
+    },
+    "tests": [
+      {"name": "round trip", "arguments": {"value": "hello"}, "commands": [], "expected": ["hello"]}
+    ]
+  }
+}

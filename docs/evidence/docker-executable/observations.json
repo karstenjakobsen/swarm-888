@@ -1,0 +1,106 @@
+{
+  "mode": "codex",
+  "creatingTask": "/work/dd9f74b358b143df9667c1c1fa81198c",
+  "reuseTask": "/work/327388abcbe84a529cd72cd6d2bec65f",
+  "skillRevision": "/skills/container-status-by-label?rev=8839aa367ac3e6f2240939d94b2ad870d49c5a74",
+  "revision": "8839aa367ac3e6f2240939d94b2ad870d49c5a74",
+  "tree": "100644 blob f7d1c38bc5a8ab84d66ecc77c02b1b5b10ee4516\tskills/container-status-by-label/run.lua\n100644 blob 9cc0e5932905b9eff6c539c83c24b71b91611ed4\tskills/container-status-by-label/skill.json\n100644 blob f195aed2d6b6e48cd07f0fc9a5d8fa6a7f584137\tskills/container-status-by-label/tests.json",
+  "creatingCalls": [
+    {
+      "action": "skill_invoked",
+      "skill": "container-status-by-label",
+      "revision": "8839aa367ac3e6f2240939d94b2ad870d49c5a74",
+      "arguments": {
+        "label": "swarm.operator.project=4cacd634-e72-empty"
+      },
+      "result": [],
+      "call": 1
+    },
+    {
+      "action": "skill_invoked",
+      "skill": "container-status-by-label",
+      "revision": "8839aa367ac3e6f2240939d94b2ad870d49c5a74",
+      "arguments": {
+        "label": "swarm.operator.project=4cacd634-e72-first"
+      },
+      "result": [
+        {
+          "state": "exited",
+          "name": "swarm-4cacd634-e72-exit7",
+          "image": "alpine:3.22",
+          "exitCode": 7
+        },
+        {
+          "state": "running",
+          "name": "swarm-4cacd634-e72-running",
+          "image": "alpine:3.22"
+        }
+      ],
+      "call": 2
+    }
+  ],
+  "reuseCalls": [
+    {
+      "action": "skill_invoked",
+      "skill": "container-status-by-label",
+      "revision": "8839aa367ac3e6f2240939d94b2ad870d49c5a74",
+      "arguments": {
+        "label": "swarm.operator.project=4cacd634-e72-reuse"
+      },
+      "result": [
+        {
+          "exitCode": 13,
+          "name": "swarm-4cacd634-e72-exit13",
+          "state": "exited",
+          "image": "alpine:3.22"
+        },
+        {
+          "name": "swarm-4cacd634-e72-live",
+          "state": "running",
+          "image": "alpine:3.22"
+        }
+      ],
+      "call": 3
+    }
+  ],
+  "observations": [
+    {
+      "selector": "swarm.operator.project=4cacd634-e72-first",
+      "rows": [
+        {
+          "name": "swarm-4cacd634-e72-running",
+          "image": "alpine:3.22",
+          "state": "running"
+        },
+        {
+          "name": "swarm-4cacd634-e72-exit7",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 7
+        }
+      ]
+    },
+    {
+      "selector": "swarm.operator.project=4cacd634-e72-empty",
+      "rows": []
+    }
+  ],
+  "laterObservations": [
+    {
+      "selector": "swarm.operator.project=4cacd634-e72-reuse",
+      "rows": [
+        {
+          "name": "swarm-4cacd634-e72-live",
+          "image": "alpine:3.22",
+          "state": "running"
+        },
+        {
+          "name": "swarm-4cacd634-e72-exit13",
+          "image": "alpine:3.22",
+          "state": "exited",
+          "exitCode": 13
+        }
+      ]
+    }
+  ]
+}

@@ -40,7 +40,9 @@ export OPERATOR_CATALOG_CHECKOUT="$HOME/vps-operator-catalog"
 make catalog-init
 ```
 
-Run `codex login status` as the account running the worker. Restart the worker after initializing the catalog. The worker defaults to Codex when the catalog exists. Set `OPERATOR_MODEL=acknowledge` to keep acknowledgment-only behavior or use `OPERATOR_MODEL=simulated` for the deterministic Docker acceptance scenario. The live authoring tools accept a declarative skill definition and launch the pinned read-only program in a separate process.
+Run `codex login status` as the account running the worker. Restart the worker after initializing the catalog. The worker defaults to Codex when the catalog exists. Set `OPERATOR_MODEL=acknowledge` to keep acknowledgment-only behavior or use `OPERATOR_MODEL=simulated` for the deterministic acceptance scenario.
+
+Executable skills commit `skill.json`, `run.lua`, and `tests.json` together. The generic executor runs the retained entry point from the selected revision in a separate process. Self-tests supply mock command outputs. Live calls use dependency names and argument rules approved in `skill-dependencies.json` in the owner-controlled state directory. The acceptance runner supplies this file for its Docker fixtures. Catalog data can declare dependencies and can only call arguments permitted by that policy.
 
 Use `make catalog-pull` to fast-forward the clean catalog checkout and `make catalog-push` to publish its commits. A divergent remote leaves the local branch and the fetched branch intact for a normal Git merge. Previously activated revisions run from retained contents during an outage. Define a project in `projects/<id>.json` with `name`, `description`, and its separate `repo` URL. The operator's `project_read` tool links that definition to the current task.
 
@@ -62,6 +64,8 @@ To run the public fixture UI locally, use `cd web && OPERATOR_MODE=demo corepack
 - `make test-live-ui` runs Playwright against the production UI, a real loopback Caddy origin, FastAPI and a separate worker using disposable state. Install the test browser once with `cd web && corepack pnpm exec playwright install chromium`. The browser check covers owner sign-in, task submission, unauthorized and cross-origin requests, a controller outage during a queued task, stream catch-up and reload.
 - `make acceptance-docker` creates a fresh external catalog and starts a temporary live stack. It creates uniquely labeled Docker fixtures, submits two tasks through the phone-width browser, compares tool output with independent Docker observations, and verifies revision reuse after a worker restart. The runner removes its containers and retains the private state path and `evidence.json` so the task pages can be reopened.
 - `make acceptance-recovery` interrupts a disposable worker after one authorized start of a stopped fixture. It checks the recovered SQLite checkpoint, the independent Docker state, and the absence of a second dispatch. The separate unreadable-target test verifies a bounded unknown outcome.
+
+The recovery fixture uses an owner-installed engine command in `fixture-engine.json`. The acceptance test writes that configuration for its temporary state. The worker keeps authorization and journaling in the framework and invokes the configured command for observation and dispatch.
 
 Before running the Docker walkthrough, check the intended engine and prepare the fixture image.
 

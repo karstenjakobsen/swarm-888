@@ -7,7 +7,7 @@ from typing import Any
 from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
-from pydantic import Field, ValidationError
+from pydantic import Field, JsonValue, ValidationError
 
 from .catalog import Catalog, CatalogError
 from .config import Settings
@@ -25,7 +25,6 @@ from .memory import (
 )
 from .projects import ReadProject, read_project
 from .skill_program import (
-    DockerSelection,
     Revision,
     SkillDefinition,
     SkillError,
@@ -45,6 +44,7 @@ class Discover(ToolArguments):
 class Scaffold(ToolArguments):
     skill: SkillId
     definition: SkillDefinition
+    entrypoint: str | None = Field(default=None, max_length=32_768)
 
 
 class SkillRevision(ToolArguments):
@@ -52,8 +52,9 @@ class SkillRevision(ToolArguments):
     revision: Revision
 
 
-class Invoke(DockerSelection):
+class Invoke(ToolArguments):
     skill: SkillId
+    arguments: dict[str, JsonValue]
 
 
 TOOLS = {
@@ -64,6 +65,10 @@ TOOLS = {
     "skill_authoring_guide": (
         ToolArguments,
         "Read the foundational skill and the definition template.",
+    ),
+    "skill_dependencies": (
+        ToolArguments,
+        "List owner-approved external commands and argument rules.",
     ),
     "skill_scaffold": (
         Scaffold,
@@ -130,11 +135,11 @@ def build_server(skills: Skills) -> Server:
             types.Tool(
                 name=NAMED_PREFIX + item["skill"],
                 description=item["description"],
-                inputSchema=DockerSelection.model_json_schema(),
+                inputSchema=skills.input_schema(item["skill"], item["revision"]),
                 annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
             )
             for item in active
-            if item["source"] == "docker.inspect_labeled"
+            if item["source"] == "executable"
         ]
 
     def dispatch(name: str, arguments: dict[str, Any]) -> dict:
@@ -146,9 +151,12 @@ def build_server(skills: Skills) -> Server:
             case "skill_authoring_guide":
                 ToolArguments.model_validate(arguments)
                 return skills.authoring_guide()
+            case "skill_dependencies":
+                ToolArguments.model_validate(arguments)
+                return skills.dependencies()
             case "skill_scaffold":
                 draft = Scaffold.model_validate(arguments)
-                return skills.scaffold(draft.skill, draft.definition)
+                return skills.scaffold(draft.skill, draft.definition, draft.entrypoint)
             case "skill_test":
                 candidate = SkillRevision.model_validate(arguments)
                 return skills.test(candidate.skill, candidate.revision)
@@ -159,9 +167,7 @@ def build_server(skills: Skills) -> Server:
                 )
             case "skill_invoke":
                 invocation = Invoke.model_validate(arguments)
-                return skills.invoke(
-                    invocation.skill, DockerSelection(selector=invocation.selector)
-                )
+                return skills.invoke(invocation.skill, invocation.arguments)
             case "memory_search":
                 return memory.search(SearchMemory.model_validate(arguments))
             case "memory_read":
@@ -186,8 +192,10 @@ def build_server(skills: Skills) -> Server:
                 project = ReadProject.model_validate(arguments)
                 return read_project(skills.catalog, skills.state, skills.task, project.project)
         if name.startswith(NAMED_PREFIX):
-            skill = Invoke.model_validate({**arguments, "skill": name.removeprefix(NAMED_PREFIX)})
-            return skills.invoke(skill.skill, DockerSelection(selector=skill.selector))
+            invocation = Invoke.model_validate(
+                {"skill": name.removeprefix(NAMED_PREFIX), "arguments": arguments}
+            )
+            return skills.invoke(invocation.skill, invocation.arguments)
         raise SkillError("Unknown skill tool")
 
     @server.call_tool(validate_input=False)

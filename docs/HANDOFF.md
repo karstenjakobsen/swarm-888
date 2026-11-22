@@ -6,17 +6,21 @@ The live application adds an authenticated transport and a browser projection fo
 
 ## Verified Docker walkthrough
 
-**Autonomous authoring verified.** Codex CLI 0.166.0 drove authoring through the local MCP server. Docker Desktop 29.3.1 ran the fixture containers in WSL2 using context `default`. The runner started with an empty bare catalog, initialized the bundled seed, and submitted the two requests through Chromium at 390 × 844.
+**Executable skill authoring verified.** Codex CLI 0.166.0 wrote the inspection procedure on a fresh v2 catalog containing only the generic authoring skill. Docker Desktop 29.3.1 ran the fixtures in WSL2 using context `default`. The two owner requests went through Chromium at 390 × 844.
 
 | Record | ID or revision |
 | --- | --- |
-| Creating task | `67c1e918dd814d49b832f2e367fd9bb6` |
-| Reuse task after worker restart | `5334e431cdee4b4e8335613f17c5996c` |
-| `docker-container-state` | `b9a691ea41c67de657181731d3022ec20b181aeb` |
+| Creating task | `dd9f74b358b143df9667c1c1fa81198c` |
+| Reuse task after worker restart | `327388abcbe84a529cd72cd6d2bec65f` |
+| `container-status-by-label` | `8839aa367ac3e6f2240939d94b2ad870d49c5a74` |
 
-The creating task searched for Docker coverage and found no match. It read the foundational guide, committed and self-tested a new skill, activated that SHA and called it on both input labels. The runner observed one running container and one exited container with code 7. The empty label returned zero rows. After the worker restart, the second task invoked the same full SHA without an intervening catalog commit. Its different label matched one running container and one exited container with code 13. Both comparisons included the exact names, images and states from Docker. [Autonomous run observations](evidence/docker-codex.json)
+Codex committed the [entry point](evidence/docker-executable/run.lua), [manifest](evidence/docker-executable/skill.json), and [self-tests](evidence/docker-executable/tests.json) together in the [recorded Git tree](evidence/docker-executable/git-tree.txt). The Lua entry point owns label selection, inspection, name normalization, field selection, exit-code handling, and ordering. The framework executes the pinned entry point and passes only commands allowed by the owner policy. The Docker command policy and independent grading live in the acceptance runner. The former `docker.inspect_labeled` provider has been removed.
 
-The runner exported that state and restored it with a separate catalog checkout. Both original task pages opened at the saved cursor `24`. The restored revision ran against a new empty Docker selection. The local restored preview uses port 8083. Its owner key is in `/tmp/operator-docker-RUtS1K/restored/owner.key`. Open the [creating task](http://127.0.0.1:8083/work/67c1e918dd814d49b832f2e367fd9bb6), [reuse task](http://127.0.0.1:8083/work/5334e431cdee4b4e8335613f17c5996c), and [shared revision](http://127.0.0.1:8083/skills/docker-container-state?rev=b9a691ea41c67de657181731d3022ec20b181aeb).
+The first task invoked the new revision on a running container, an exited container with code 7, and an empty selection. The second task invoked the same full SHA after the worker restarted, using a new label with different container names and exit code 13. Independent engine observations matched the exact rows and their order. [Creating task record](evidence/docker-executable/creating-task.json) · [Reuse task record](evidence/docker-executable/reuse-task.json) · [Independent observations](evidence/docker-executable/observations.json)
+
+The local preview uses port 8084 and the owner key in `/tmp/operator-docker-wNmbaj/state/owner.key`. Open the [creating task](http://127.0.0.1:8084/work/dd9f74b358b143df9667c1c1fa81198c), [reuse task](http://127.0.0.1:8084/work/327388abcbe84a529cd72cd6d2bec65f), and [shared revision](http://127.0.0.1:8084/skills/container-status-by-label?rev=8839aa367ac3e6f2240939d94b2ad870d49c5a74).
+
+The [earlier Codex](evidence/docker-codex.json) and [simulated](evidence/docker-simulated.json) records cover the previous declarative wrappers. Those runs verified the tool lifecycle and exact-SHA reuse. The wrapper records remain readable as historical evidence.
 
 ## Slice review and acceptance
 
@@ -24,7 +28,7 @@ The runner exported that state and restored it with a separate catalog checkout.
 | --- | --- | --- |
 | 1–2 | Next.js selects the data source on the server. FastAPI owns authentication, commands, and replay. Stable request IDs make retries idempotent. | **Real** loopback Caddy, Next.js, SQLite, and worker. Playwright covered unauthorized reads, mutations and streams, a lost receipt, and a backend outage without fixture fallback. Demo DNS/TLS and credential examples are **simulated**. |
 | 3 | Git stores definitions and immutable revisions. The Python MCP server owns discovery, self-tests and activation. The model adapter owns Codex app-server messages. | **Real** test Git remote and MCP list-change notification. A newly activated tool became callable on the same connection. Start and resume ran through the worker. Steer and interrupt were verified with a controllable model double. |
-| 4 | The Docker adapter returns selected fields. The independent grader compares the recorded call to separate engine observations. | **Real** autonomous Codex run and exact-SHA reuse. Also **integration verified with simulated authoring**, using real Git, Docker, MCP and persistence. [Simulated authoring observations](evidence/docker-simulated.json) |
+| 4 | The catalog entry point owns Docker inspection. The independent grader compares the recorded calls against separate Docker observations. | **Real** Codex-authored executable and same-SHA reuse after worker restart. [Executable run observations](evidence/docker-executable/observations.json) |
 | 5 | The worker journals authorization, target, pinned revision and dispatch count before changing a fixture. Rollback restores a previously active tested revision. | **Real** Docker start and worker termination followed by reconciliation. One dispatch. **Simulated unreadable target** ended unknown after bounded observations. MCP tests held an invocation open across activation and verified a rejected candidate and rollback. |
 | 6 | Catalog updates fast-forward. Conflicts preserve both Git histories. Memory revisions retain their writers and exact reads. | **Real** two checkouts, conflict and offline retained invocation. A phone-width UI correction and later read used the **simulated model** with real memory persistence. |
 | 7 | The authenticated request goes to FastAPI. The vault binds its token to an owner-approved destination before the MCP client can send it. | **Real** loopback Streamable HTTP with a synthetic token. Credential submission resumed the original task. A changed endpoint was blocked. A delayed read timed out and produced no successful call. The fixture's echoed token was redacted. |
