@@ -12,6 +12,23 @@ from swarm.state import State
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def isolate_installation_config(monkeypatch, request):
+    for key in (
+        "SWARM_NOTIFY_URL",
+        "SWARM_NOTIFY_DIR",
+        "SWARM_CATALOG",
+        "SWARM_REMOTE",
+        "SWARM_BRANCH",
+        "SWARM_FIXTURE_FD",
+        "SWARM_INSTRUCTIONS",
+        "SWARM_PURPOSE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    if request.node.get_closest_marker("live") is None:
+        monkeypatch.delenv("SWARM_CODEX_AUTH", raising=False)
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0

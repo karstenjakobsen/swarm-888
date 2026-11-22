@@ -137,7 +137,7 @@ class Application:
         row = self.state.one("SELECT * FROM tasks WHERE id=?", task)
         if (
             row["kind"] == "dns"
-            and row["status"] == "waiting"
+            and row["status"] in ("waiting", "unknown")
             and text.strip().lower() == "recheck"
         ):
             with self.state.tx() as conn:
@@ -145,7 +145,7 @@ class Application:
                     "SELECT 1 FROM events WHERE task=? AND kind='dns.dispatch'", (task,)
                 ).fetchone()
                 conn.execute(
-                    "UPDATE operations SET status=?,attempts=0,deadline=? WHERE task=? AND status='conflict'",
+                    "UPDATE operations SET status=?,attempts=0,deadline=? WHERE task=? AND status IN ('unknown','conflict')",
                     (
                         "dispatched" if previous else "prepared",
                         self.state.clock() + self.dns.seconds,

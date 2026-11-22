@@ -14,6 +14,10 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
+
+from .notifications import Destination
+
 ROOT = Path(__file__).resolve().parent.parent
 NAME = r"[a-z][a-z0-9-]{0,47}"
 
@@ -99,6 +103,10 @@ class State:
         if self.path.stat().st_uid != os.getuid() or self.path.stat().st_mode & 0o077:
             raise ValueError("State directory must be private and owned by the worker")
         self.clock = clock
+        self.notifications = Destination(
+            Path(os.getenv("SWARM_NOTIFY_DIR", self.path / "notifications")),
+            os.getenv("SWARM_NOTIFY_URL", ""),
+        )
         self.db = self.path / "state.sqlite"
         with self.tx() as conn:
             conn.executescript(SCHEMA)
@@ -183,10 +191,12 @@ class State:
         return rows
 
     def alert(self, key: str, summary: str) -> None:
-        self.change(
-            "INSERT OR IGNORE INTO alerts VALUES (?,?,?)", key, self.redact(summary), self.clock()
-        )
-        self.change("INSERT OR IGNORE INTO deliveries VALUES (?,0,0)", key)
+        with self.tx() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alerts VALUES (?,?,?)",
+                (key, self.redact(summary), self.clock()),
+            )
+            conn.execute("INSERT OR IGNORE INTO deliveries VALUES (?,0,0)", (key,))
         self.deliver_alerts()
 
     def deliver_alerts(self) -> None:
@@ -196,27 +206,10 @@ class State:
         )
         for row in pending:
             try:
-                self.deliver(row)
-            except OSError:
+                self.notifications.deliver(row["id"], encode(row))
+            except (OSError, httpx.HTTPError):
                 self.change(
                     "UPDATE deliveries SET retry=? WHERE id=?", self.clock() + 30, row["id"]
                 )
             else:
                 self.change("UPDATE deliveries SET delivered=1 WHERE id=?", row["id"])
-
-    def deliver(self, row: dict) -> None:
-        key = row["id"]
-        # One file per incident makes retrying delivery idempotent across a crash.
-        dest = Path(os.environ.get("SWARM_NOTIFY_DIR", self.path / "notifications"))
-        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = dest / (key + ".json")
-        if target.exists():
-            return
-        tmp = dest / ("." + identity())
-        tmp.write_text(encode(row))
-        try:
-            os.link(tmp, target)
-        except FileExistsError:
-            pass
-        finally:
-            tmp.unlink()

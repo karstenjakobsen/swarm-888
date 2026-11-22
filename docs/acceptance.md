@@ -17,7 +17,7 @@ A local Chromium session signed into the running controller, opened the Alpine m
 
 ## Default acceptance suite
 
-`make setup && make check` installs the locked environment and runs Ruff checks, format verification, and pytest. The automated tests use temporary state.
+`make setup && make check` installs the locked environment and runs Ruff checks, format verification, and pytest. The automated tests use temporary state. Notification tests also simulate an HTTPS receiver that accepts delivery and loses its reply. The receiver sees one incident ID across both attempts.
 
 | Coverage | Boundary exercised |
 | --- | --- |

@@ -214,6 +214,25 @@ class DNSReconciler:
             and self.state.clock() < row["deadline"]
         ):
             with self.state.tx() as conn:
+                pending = conn.execute(
+                    """SELECT o.id FROM operations o WHERE o.id<>? AND o.target=?
+                    AND o.status IN ('dispatched','unknown','conflict')
+                    AND EXISTS(SELECT 1 FROM events e WHERE e.task=o.task AND e.kind='dns.dispatch')
+                    LIMIT 1""",
+                    (op, intent.hostname),
+                ).fetchone()
+                if pending:
+                    reason = {
+                        "status": "conflict",
+                        "prior_operation": pending["id"],
+                        "evidence": "Earlier create has an unresolved outcome",
+                    }
+                    conn.execute(
+                        "UPDATE operations SET status='conflict',evidence=? WHERE id=?",
+                        (encode(reason), op),
+                    )
+                    self.state.event(task, "dns.conflict", reason, conn)
+                    return "conflict"
                 changed = conn.execute(
                     "UPDATE operations SET status='dispatched' WHERE id=? AND status='prepared' AND EXISTS (SELECT 1 FROM tasks WHERE id=? AND status='running')",
                     (op, task),

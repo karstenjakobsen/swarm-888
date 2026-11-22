@@ -154,3 +154,30 @@ def test_serialized_tasks(app):
         assert order == [a, b]
 
     asyncio.run(scenario())
+
+
+def test_alert_lost_reply_deduplicated_at_receiver(app, clock):
+    import httpx
+
+    from swarm.notifications import Destination
+
+    deliveries = []
+    inbox = {}
+
+    def receive(request):
+        key = request.headers["Idempotency-Key"]
+        assert request.method == "PUT" and request.url.path.endswith("/" + key)
+        inbox[key] = request.content
+        deliveries.append(key)
+        if len(deliveries) == 1:
+            raise httpx.ReadTimeout("simulated lost reply")
+        return httpx.Response(204)
+
+    app.state.notifications = Destination(
+        app.state.path, "https://notify.invalid/incidents", httpx.MockTransport(receive)
+    )
+    app.state.alert("incident-1", "Owner action needed for demo")
+    clock.advance(31)
+    app.state.deliver_alerts()
+    app.state.alert("incident-1", "Same incident")
+    assert deliveries == ["incident-1", "incident-1"] and len(inbox) == 1

@@ -183,3 +183,32 @@ def test_secret_destination_and_redaction(app):
     task = app.submit("remember synthetic-access-token")
     assert "synthetic-access-token" not in str(app.state.events())
     assert "[redacted]" in app.state.one("SELECT goal FROM tasks WHERE id=?", task)["goal"]
+
+
+def test_overlapping_owner_tasks_do_not_replay_unacknowledged_create(app, clock, run):
+    from swarm.dns import DNSReconciler, Observation
+
+    class StaleReader:
+        creates = 0
+
+        async def observe(self, intent):
+            return Observation("absent", "Replica still reports absence")
+
+        async def create(self, intent, operation):
+            self.creates += 1
+            raise TimeoutError
+
+    provider = StaleReader()
+    app.dns = DNSReconciler(app.state, provider)
+    first = app.submit("/dns example.test orders 192.0.2.8")
+    run(app.step())
+    second = app.submit("/dns example.test orders 192.0.2.8")
+    run(app.step())
+    assert (
+        provider.creates == 1
+        and app.state.one("SELECT status FROM tasks WHERE id=?", second)["status"] == "waiting"
+    )
+    assert (
+        app.tools(first).connector_result(second)["evidence"]["prior_operation"]
+        == app.tools(first).connector_result(first)["id"]
+    )

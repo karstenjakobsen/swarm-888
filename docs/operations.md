@@ -23,7 +23,7 @@ This authorizes observing the named fixture and restoring its mode every five se
 
 Use `/pause GOAL_ID`, `/resume GOAL_ID`, and `/retire GOAL_ID` in new conversations. An open incident supports `/diagnose INCIDENT_ID`, `/improve INCIDENT_ID`, and `/rebind INCIDENT_ID FULL_REVISION`. Diagnostics and revisions consume the existing incident's attempt and wall-clock budgets. Inspect the follow-up task for its result and the incident for the independently observed host outcome. An unresolved incident stops dispatch. After owner remediation, retire the old goal and establish a new one if continued maintenance is wanted.
 
-Set `SWARM_NOTIFY_DIR` to a monitored, owner-controlled local directory to receive one redacted JSON file per unresolved incident, including ambiguous DNS operations. The default is the state's `notifications/` directory. The durable outbox retries failed delivery and publishes each ID atomically, including while the UI is closed.
+Set `SWARM_NOTIFY_DIR` to a monitored, owner-controlled local directory to receive one redacted JSON file per unresolved incident, including ambiguous DNS operations. The default is the state's `notifications/` directory. To deliver over HTTPS, set `SWARM_NOTIFY_URL` to an owner-controlled alert collection. The receiver must upsert the JSON alert on `PUT <collection>/<incident-id>` and honor its `Idempotency-Key`. This selects HTTPS as the delivery destination. The durable outbox retries failed delivery and publishes each ID atomically, including while the UI is closed.
 
 ## Optional UID 0 fixture worker
 

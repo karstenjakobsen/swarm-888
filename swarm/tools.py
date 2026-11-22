@@ -56,6 +56,14 @@ class TaskTools:
         """Restore a previously activated revision for future calls."""
         return self.catalog.rollback(self.task, name, revision)
 
+    def connector_result(self, owner_task: str) -> dict:
+        """Read a redacted, journaled DNS observation to pass into a skill."""
+        row = self.s.one(
+            "SELECT o.id,o.target,o.status,o.evidence FROM operations o JOIN tasks t ON t.id=o.task WHERE t.kind='dns' AND t.id=?",
+            owner_task,
+        )
+        return {**row, "evidence": json.loads(row["evidence"]) if row["evidence"] else None}
+
     def catalog_sync(self) -> dict:
         """Fast-forward and push the configured external Git catalog."""
         return self.catalog.sync()
@@ -114,7 +122,7 @@ class TaskTools:
         return {"status": "waiting"}
 
     def methods(self) -> dict:
-        prefixes = ("skill_", "catalog_", "memory_")
+        prefixes = ("skill_", "catalog_", "memory_", "connector_")
         return {
             key: getattr(self, key)
             for key in dir(type(self))
