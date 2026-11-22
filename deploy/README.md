@@ -4,7 +4,7 @@ The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Us
 
 ## Deploy the pinned VPS release with Ansible
 
-From the repository root, run the single-host playbook with Ansible Core 2.19 and the framework commit `13f3819` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and private Git catalog live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `97026ab` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and private Git catalog live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
 
 ```sh
 ansible-playbook -i server-212, deploy/ansible/deploy.yml
@@ -16,12 +16,13 @@ Open the private tunnel from your workstation and visit [the operator UI](http:/
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-212
 ```
 
-The acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. For persistence acceptance, run the reboot playbook during an authorized maintenance window. It reboots the entire VPS. Rerun deployment after SSH returns and then verify the persisted baseline.
+The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.
 
 ```sh
+ansible-playbook -i server-212, deploy/ansible/deploy.yml -e framework_revision=13f38198f37d320d397e4bec260400bf51924f6a
 ansible-playbook -i server-212, deploy/ansible/acceptance.yml
 ansible-playbook -i server-212, deploy/ansible/reboot.yml -e '{"operator_reboot_authorized":true}'
-ansible-playbook -i server-212, deploy/ansible/deploy.yml
+ansible-playbook -i server-212, deploy/ansible/deploy.yml -e framework_revision=13f38198f37d320d397e4bec260400bf51924f6a
 ansible-playbook -i server-212, deploy/ansible/acceptance.yml -e acceptance_phase=after
 ```
 

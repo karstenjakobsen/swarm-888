@@ -5,7 +5,7 @@
   gather_facts: true
   vars:
     ansible_python_interpreter: /usr/bin/python3
-    framework_revision: "13f38198f37d320d397e4bec260400bf51924f6a"
+    framework_revision: "97026ababe286d0f4894d75fa4ee3784278521c9"
     repository: "{{ playbook_dir }}/../.."
     release: "/opt/swarm-operator-releases/{{ framework_revision }}"
     toolchain: /opt/swarm-operator-tools
