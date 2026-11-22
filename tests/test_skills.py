@@ -157,3 +157,18 @@ def test_inflight_pinning(app, monkeypatch):
     assert app.catalog.active("count-lines") == b
     app.catalog.rollback("owner", "count-lines", a)
     assert app.catalog.active("count-lines") == a
+
+
+def test_activation_preserves_active_revision_if_tested_object_is_lost(app):
+    spec = app.tools("author").skill_template()
+    first = app.catalog.stage("author", Package(**spec))["revision"]
+    assert app.catalog.test("author", first)["passed"]
+    app.catalog.activate("author", first)
+    spec["instructions"] += " Return the line count."
+    second = app.catalog.stage("update", Package(**spec))["revision"]
+    assert app.catalog.test("update", second)["passed"]
+    (app.state.path / "objects" / second).unlink()
+    with pytest.raises(ValueError, match="object is unavailable"):
+        app.catalog.activate("update", second)
+    assert app.catalog.run("use", "count-lines", {"text": "one"})["revision"] == first
+    assert not app.state.rows("SELECT id FROM activations WHERE rev=?", second)

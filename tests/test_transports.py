@@ -23,16 +23,18 @@ from swarm.worker import service
 
 
 def test_mcp_hotplug_inflight_rollback(app, monkeypatch):
-    actual = app.catalog.evaluate
-    started, release = threading.Event(), threading.Event()
+    active = app.catalog.active
+    hold, started, release = threading.Event(), threading.Event(), threading.Event()
 
-    def evaluate(rev, args):
-        if args.get("hold"):
+    def select_revision(key):
+        selected = active(key)
+        if hold.is_set():
+            hold.clear()
             started.set()
             assert release.wait(15)
-        return actual(rev, args)
+        return selected
 
-    monkeypatch.setattr(app.catalog, "evaluate", evaluate)
+    monkeypatch.setattr(app.catalog, "active", select_revision)
     with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as sock:
         path = str(Path(directory) / "s")
         sock.bind(path)
@@ -90,12 +92,14 @@ def test_mcp_hotplug_inflight_rollback(app, monkeypatch):
                     a = await install()
                     await asyncio.wait_for(notices.wait(), 5)
                     assert "local_count_lines" in await names()
+                    hold.set()
                     pinned = asyncio.create_task(
-                        call("local_count_lines", arguments={"hold": True, "text": "one\ntwo"})
+                        call("local_count_lines", arguments={"text": "one\ntwo"})
                     )
                     assert await asyncio.to_thread(started.wait, 4)
                     package["sql"] = (
-                        "SELECT json_object('lines',count(*)+coalesce(json_extract(:input,'$.extra'),0)) FROM lines"
+                        "SELECT CASE WHEN json_extract(:input,'$.invalid') THEN json('invalid') ELSE "
+                        "json_object('lines',count(*)+coalesce(json_extract(:input,'$.extra'),0)) END FROM lines"
                     )
                     package["tests"] = [
                         {"input": {"text": "one", "extra": 2}, "expected": {"lines": 3}}
@@ -106,6 +110,14 @@ def test_mcp_hotplug_inflight_rollback(app, monkeypatch):
                     assert (await call("local_count_lines", arguments={"extra": 5}))["result"] == {
                         "lines": 5
                     }
+                    failed = await client.call_tool(
+                        "local_count_lines", {"arguments": {"invalid": True}}
+                    )
+                    assert failed.isError
+                    recorded = app.skill_view("count-lines")["calls"][0]
+                    assert recorded["id"] in failed.content[0].text
+                    evidence = await call("skill_evidence", call=recorded["id"])
+                    assert evidence["failure"]["exit_status"] == 1 and evidence["actual"] is None
                     package["sql"] = "not a program"
                     bad = (await call("skill_stage", package=package))["revision"]
                     assert not (await call("skill_test", revision=bad))["passed"]

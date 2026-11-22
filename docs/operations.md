@@ -14,6 +14,8 @@ Skills can declare descriptive permissions, connector dependencies, and inline i
 
 When an independent check finds an incorrect result, record its expected JSON with `python -m swarm attest CALL_ID EXPECTED_JSON OBSERVATION` using the prepared environment. Submit `/learn CALL_ID` to authorize a correction. The operator retrieves the redacted input and check, reproduces the failure, and tests a candidate against the inherited cases and a new regression case. The worker compares the candidate to the original independent expectation before activating it, then invokes the active revision again. The original failed call and the correction have separate records. Each learning task has a five-minute deadline and a budget of 24 actions, carried across restarts.
 
+If a helper exits before returning JSON, its MCP error and the skill view give the failed call ID. Record the output the call should have returned with the same `attest` command. The worker retains the redacted input, error and observed process exit status. A learning run checks that the same failure occurs on the original revision before trying a correction.
+
 ## Standing goals and notifications
 
 With the worker running, create a disposable fixture as the owner:

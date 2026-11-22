@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS activations(id INTEGER PRIMARY KEY, name TEXT, rev TE
 CREATE TABLE IF NOT EXISTS calls(id TEXT PRIMARY KEY, task TEXT, rev TEXT, input_hash TEXT,
  result TEXT, checked TEXT, verified_reuse INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS call_inputs(call TEXT PRIMARY KEY, arguments TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS call_failures(call TEXT PRIMARY KEY, error TEXT NOT NULL, exit_status INTEGER);
 CREATE TABLE IF NOT EXISTS connector_observations(task TEXT PRIMARY KEY, intent TEXT NOT NULL,
  result TEXT, observed REAL, attempts INTEGER NOT NULL DEFAULT 0, deadline REAL);
 CREATE TABLE IF NOT EXISTS operations(

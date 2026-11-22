@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from swarm.catalog import Catalog, Package
+from swarm.application import Application
+from swarm.catalog import Catalog, FailedInvocation, Package
 
 
 def checked_failure(catalog: Catalog):
@@ -32,6 +33,61 @@ def checked_failure(catalog: Catalog):
         "Independent grader parsed uppercase status",
     )["passed"]
     return old, result
+
+
+def checked_helper_failure(catalog: Catalog):
+    old = Package(
+        name="service-port",
+        instructions="Return the supplied integer port. When it is omitted, return port 80.",
+        sql="SELECT json_object('port',coalesce(json_extract(:input,'$.port'),json('missing')))",
+        tests=[{"input": {"port": 443}, "expected": {"port": 443}}],
+    )
+    rev = catalog.stage("port-author", old)["revision"]
+    assert catalog.test("port-author", rev)["passed"]
+    catalog.activate("port-author", rev)
+    assert catalog.run("port-author", old.name, {"port": 8080})["result"] == {"port": 8080}
+    with pytest.raises(FailedInvocation) as exc:
+        catalog.run("port-check", old.name, {"service": "orders"})
+    call = exc.value.call
+    assert catalog.attest(call, {"port": 80}, "Independent check of the default port") == {
+        "passed": False,
+        "verified_reuse": False,
+    }
+    return old, {"call": call, "revision": rev}
+
+
+def test_failed_helper_can_be_reproduced_and_corrected_after_restart(app, run):
+    old, failure = checked_helper_failure(app.catalog)
+    app.state.secret("fixture-token", "fixture-port-secret")
+    with pytest.raises(FailedInvocation) as exc:
+        app.catalog.run("redaction-check", old.name, {"service": "fixture-port-secret"})
+    assert app.catalog.evidence(exc.value.call)["arguments"] == {"service": "[redacted]"}
+    source = app.catalog.evidence(failure["call"])
+    assert source["actual"] is None and source["failure"]["exit_status"] == 1
+    task = app.submit("/learn " + failure["call"])
+
+    class FixPort:
+        async def run(self, fresh, row):
+            tools = fresh.tools(row["id"])
+            record = tools.call("skill_evidence", {"call": failure["call"]})
+            assert record == source
+            fixed = old.model_dump()
+            fixed["sql"] = fixed["sql"].replace("json('missing')", "80")
+            fixed["tests"] = [{"input": {}, "expected": {"port": 80}}]
+            rev = tools.call("skill_stage", {"package": fixed})["revision"]
+            assert tools.call("skill_test", {"revision": rev})["passed"]
+            tools.call("skill_activate", {"revision": rev})
+            return "completed"
+
+    fresh = Application(app.state, Catalog(app.state), FixPort())
+    fresh.recover()
+    run(fresh.step())
+    assert fresh.task_summary(task)["status"] == "verified"
+    events = {e["kind"]: e["data"] for e in fresh.state.events() if e["task"] == task}
+    assert events["learning.reproduced"]["failure"] == source["failure"]
+    assert events["learning.result"]["result"] == {"port": 80}
+    assert events["learning.result"]["revision"] != failure["revision"]
+    assert fresh.catalog.evidence(failure["call"]) == source
 
 
 def test_revision_requires_a_regression_and_passes_private_input(app, run):

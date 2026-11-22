@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -18,6 +19,24 @@ from .state import NAME, ROOT, State, digest, encode, identity, name
 
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class HelperFailed(ValueError):
+    def __init__(self, exit_status: int, detail: str):
+        self.exit_status = exit_status
+        super().__init__(f"Helper exit {exit_status}: {detail}")
+
+
+class FailedInvocation(ValueError):
+    def __init__(self, call: str, error: str):
+        self.call = call
+        super().__init__(f"Skill call {call} failed: {error}")
+
+
+@dataclass(frozen=True)
+class Execution:
+    result: dict | None
+    failure: dict | None = None
 
 
 class Connector(Contract):
@@ -307,11 +326,17 @@ class Catalog:
         )
         return {"revision": rev, "git": commit}
 
+    def verify_object(self, rev: str, spec_text: str) -> None:
+        try:
+            stored = (self.state.path / "objects" / rev).read_text()
+        except OSError as exc:
+            raise ValueError("Immutable skill object is unavailable") from exc
+        if stored != spec_text:
+            raise ValueError("Immutable object failed integrity check")
+
     def evaluate(self, rev: str, arguments: dict) -> dict:
         row = self.revision(rev)
-        spec_text = (self.state.path / "objects" / rev).read_text()
-        if spec_text != encode(row["spec"]):
-            raise ValueError("Immutable object failed integrity check")
+        self.verify_object(rev, encode(row["spec"]))
         if not row["spec"].get("sql"):
             raise ValueError("Read this procedural skill with skill_read")
         validate_value(arguments, row["spec"].get("input_schema", {}))
@@ -327,13 +352,27 @@ class Catalog:
             env={},
             cwd=self.state.path / "workspaces",
         )
-        if result.returncode or len(result.stdout.encode()) > 64000:
-            raise ValueError(
-                f"Helper exit {result.returncode}: " + self.state.redact(result.stderr[:500])
-            )
+        if result.returncode:
+            raise HelperFailed(result.returncode, self.state.redact(result.stderr.strip())[:500])
+        if len(result.stdout.encode()) > 64000:
+            raise ValueError("Helper output exceeds 64 KB")
         value = self.state.redact(json.loads(result.stdout))
         validate_value(value, row["spec"].get("output_schema", {}))
         return value
+
+    def observe_execution(self, rev: str, arguments: dict) -> Execution:
+        try:
+            return Execution(self.evaluate(rev, arguments))
+        except (ValueError, subprocess.SubprocessError) as exc:
+            status = exc.exit_status if isinstance(exc, HelperFailed) else None
+            message = (
+                "Skill execution timed out"
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else str(exc)
+            )
+            return Execution(
+                None, {"error": self.state.redact(message)[:1200], "exit_status": status}
+            )
 
     def test(self, task: str, revision: str) -> dict:
         row = self.revision(revision)
@@ -351,13 +390,12 @@ class Catalog:
             except (ValueError, subprocess.SubprocessError) as exc:
                 results.append({**case, "error": str(exc), "passed": False})
         if not row["spec"].get("sql"):
-            results.append(
-                {
-                    "check": "procedural package integrity",
-                    "passed": (self.state.path / "objects" / revision).read_text()
-                    == encode(row["spec"]),
-                }
-            )
+            check = {"check": "procedural package integrity", "passed": True}
+            try:
+                self.verify_object(revision, encode(row["spec"]))
+            except ValueError as exc:
+                check.update(passed=False, error=str(exc))
+            results.append(check)
         passed = all(r["passed"] for r in results)
         self.state.change(
             "UPDATE revisions SET tests=?,passed=? WHERE rev=?", encode(results), passed, revision
@@ -370,10 +408,11 @@ class Catalog:
     def activate(self, task: str, revision: str, *, previous: str | None = None) -> dict:
         with self.state.tx() as conn:
             row = conn.execute(
-                "SELECT name FROM revisions WHERE rev=? AND passed=1", (revision,)
+                "SELECT name,spec FROM revisions WHERE rev=? AND passed=1", (revision,)
             ).fetchone()
             if not row:
                 raise ValueError("Test this revision successfully before activation")
+            self.verify_object(revision, row["spec"])
             if previous is not None:
                 active = conn.execute(
                     "SELECT rev FROM active WHERE name=?", (row["name"],)
@@ -394,31 +433,59 @@ class Catalog:
         self.state.one("SELECT id FROM activations WHERE name=? AND rev=?", key, revision)
         return self.activate(task, revision)
 
-    def run(self, task: str, key: str, arguments: dict) -> dict:
+    def run(
+        self,
+        task: str,
+        key: str,
+        arguments: dict,
+        *,
+        named: bool = False,
+        expected_revision: str | None = None,
+    ) -> dict:
         rev = self.active(key)
+        if expected_revision is not None and expected_revision != rev:
+            raise ValueError("The active revision changed before invocation")
+        if named and not self.revision(rev)["spec"]["named"]:
+            raise ValueError("Named tool is inactive")
         call = identity()
         arguments = self.state.redact(arguments)
-        try:
-            result = self.evaluate(rev, arguments)
-        except (ValueError, subprocess.SubprocessError) as exc:
-            self.state.event(
-                task,
-                "skill.failed",
-                {"revision": rev, "error": str(exc), "input_hash": digest(arguments)},
-            )
-            raise
+        encoded = encode(arguments)
+        if len(encoded.encode()) > 96000:
+            raise ValueError("Input exceeds 96 KB")
+        outcome = self.observe_execution(rev, arguments)
+        failure = outcome.failure
         with self.state.tx() as conn:
             conn.execute(
                 "INSERT INTO calls(id,task,rev,input_hash,result) VALUES (?,?,?,?,?)",
-                (call, task, rev, digest(arguments), encode(result)),
+                (
+                    call,
+                    task,
+                    rev,
+                    digest(arguments),
+                    encode(outcome.result) if failure is None else None,
+                ),
             )
-            conn.execute("INSERT INTO call_inputs VALUES (?,?)", (call, encode(arguments)))
-        return {"call": call, "revision": rev, "exit_status": 0, "result": result}
+            conn.execute("INSERT INTO call_inputs VALUES (?,?)", (call, encoded))
+            if failure is not None:
+                conn.execute(
+                    "INSERT INTO call_failures VALUES (?,?,?)",
+                    (call, failure["error"], failure["exit_status"]),
+                )
+                self.state.event(
+                    task,
+                    "skill.failed",
+                    {"call": call, "revision": rev, **failure, "input_hash": digest(arguments)},
+                    conn,
+                )
+        if failure is not None:
+            raise FailedInvocation(call, failure["error"])
+        return {"call": call, "revision": rev, "exit_status": 0, "result": outcome.result}
 
     def evidence(self, call: str) -> dict:
         row = self.state.one(
-            """SELECT c.task,c.rev,r.name,c.result,c.checked,c.input_hash,i.arguments
+            """SELECT c.task,c.rev,r.name,c.result,c.checked,c.input_hash,i.arguments,f.error,f.exit_status
             FROM calls c JOIN revisions r ON r.rev=c.rev LEFT JOIN call_inputs i ON i.call=c.id
+            LEFT JOIN call_failures f ON f.call=c.id
             WHERE c.id=?""",
             call,
         )
@@ -442,7 +509,10 @@ class Catalog:
                 "revision": row["rev"],
                 "skill": row["name"],
                 "arguments": arguments,
-                "actual": json.loads(row["result"]),
+                "actual": json.loads(row["result"]) if row["result"] is not None else None,
+                "failure": {"error": row["error"], "exit_status": row["exit_status"]}
+                if row["error"] is not None
+                else None,
                 "check": json.loads(row["checked"]) if row["checked"] else None,
             }
         )
@@ -453,7 +523,7 @@ class Catalog:
             call,
         )
         different = self.state.rows(
-            "SELECT id FROM calls WHERE rev=? AND task=? AND input_hash<>? AND rowid<? AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.rev=? AND c.task=? AND c.input_hash=?)",
+            "SELECT id FROM calls WHERE rev=? AND task=? AND result IS NOT NULL AND input_hash<>? AND rowid<? AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.rev=? AND c.task=? AND c.input_hash=?)",
             row["rev"],
             row["author"],
             row["input_hash"],
@@ -467,14 +537,20 @@ class Catalog:
         evidence = self.state.redact(
             {"expected": expected, "observation": observation, "passed": passed}
         )
-        self.state.change(
-            "UPDATE calls SET checked=?,verified_reuse=? WHERE id=?", encode(evidence), reuse, call
-        )
-        self.state.event(
-            row["task"], "independent.check", {"call": call, **evidence, "verified_reuse": reuse}
-        )
-        if passed:
-            self.state.change(
-                "UPDATE tasks SET status='verified' WHERE id=? AND status='answered'", row["task"]
+        with self.state.tx() as conn:
+            conn.execute(
+                "UPDATE calls SET checked=?,verified_reuse=? WHERE id=?",
+                (encode(evidence), reuse, call),
             )
+            self.state.event(
+                row["task"],
+                "independent.check",
+                {"call": call, **evidence, "verified_reuse": reuse},
+                conn,
+            )
+            if passed:
+                conn.execute(
+                    "UPDATE tasks SET status='verified' WHERE id=? AND status='answered'",
+                    (row["task"],),
+                )
         return {"passed": passed, "verified_reuse": reuse}

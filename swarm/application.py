@@ -567,7 +567,9 @@ class Application:
                 "SELECT rev,origin,tests,passed FROM revisions WHERE name=?", key
             ),
             "calls": self.state.rows(
-                "SELECT c.* FROM calls c JOIN revisions r ON c.rev=r.rev WHERE r.name=? ORDER BY c.rowid DESC LIMIT 100",
+                """SELECT c.*,f.error,CASE WHEN c.result IS NOT NULL THEN 0 ELSE f.exit_status END AS exit_status
+                FROM calls c JOIN revisions r ON c.rev=r.rev
+                LEFT JOIN call_failures f ON f.call=c.id WHERE r.name=? ORDER BY c.rowid DESC LIMIT 100""",
                 key,
             ),
             "operations": self.state.rows(
@@ -578,6 +580,7 @@ class Application:
             "failures": self.state.rows(
                 """SELECT e.task,e.data,e.at FROM events e JOIN revisions r
                 ON r.rev=json_extract(e.data,'$.revision') WHERE r.name=? AND e.kind='skill.failed'
+                AND json_extract(e.data,'$.call') IS NULL
                 ORDER BY e.id DESC LIMIT 100""",
                 key,
             ),

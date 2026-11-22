@@ -257,9 +257,9 @@ class TaskTools:
                     raise ValueError("Revision is outside the incident")
             if key.startswith("local_"):
                 skill = key[6:].replace("_", "-")
-                if not self.catalog.read(skill)["spec"]["named"]:
-                    raise ValueError("Named tool is inactive")
-                result = self.skill_run(skill, **arguments)
+                if set(arguments) != {"arguments"} or not isinstance(arguments["arguments"], dict):
+                    raise ValueError("Supply the skill input in an arguments object")
+                result = self.catalog.run(self.task, skill, arguments["arguments"], named=True)
             else:
                 method = self.methods().get(key)
                 if not method:

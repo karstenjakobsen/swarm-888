@@ -17,7 +17,7 @@ import pytest
 import uvicorn
 from test_connectors import configure_observation, monitoring_provider
 from test_dns import configured, lose_create_reply, provider_server
-from test_learning import checked_failure
+from test_learning import checked_failure, checked_helper_failure
 
 from swarm.catalog import Catalog
 from swarm.dns import DO_ENDPOINT, DNSProvider, Intent, RemoteMCP
@@ -120,10 +120,15 @@ def test_codex_author_and_reuse(tmp_path):
     assert not list((state.path / "workspaces").rglob("surprise.txt"))
 
 
-def test_codex_learns_from_failed_check(tmp_path):
+@pytest.mark.parametrize(
+    ("prepare", "expected"),
+    [(checked_failure, {"failed": ["archive.service"]}), (checked_helper_failure, {"port": 80})],
+    ids=["incorrect-result", "helper-exit"],
+)
+def test_codex_learns_from_failed_check(tmp_path, prepare, expected):
     state = State(tmp_path / "live")
     catalog = Catalog(state)
-    old, failed = checked_failure(catalog)
+    old, failed = prepare(catalog)
     with live_conversation(state, "/learn " + failed["call"], "verified") as (_, task, events):
         rev = catalog.active(old.name)
         cases = catalog.revision(rev)["tests"]
@@ -134,11 +139,17 @@ def test_codex_learns_from_failed_check(tmp_path):
                 "data"
             ]
         )
-        assert saved["passed"] and saved["result"] == {"failed": ["archive.service"]}
+        assert saved["passed"] and saved["result"] == expected
         assert {"learning.reproduced", "learning.candidate", "learning.result"} <= {
             e["kind"] for e in events
         }
         assert not catalog.evidence(failed["call"])["check"]["passed"]
+        if catalog.evidence(failed["call"])["failure"]:
+            reproduced = next(
+                json.loads(e["data"]) for e in events if e["kind"] == "learning.reproduced"
+            )
+            assert reproduced["failure"]["exit_status"] == 1
+            assert "malformed JSON" in reproduced["failure"]["error"]
         print(
             "task",
             task,

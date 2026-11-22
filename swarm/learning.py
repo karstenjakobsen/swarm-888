@@ -73,8 +73,10 @@ class Learning:
         ):
             return
         source = self.catalog.evidence(req["source_call"])
-        actual = self.catalog.evaluate(req["previous"], source["arguments"])
-        if encode(actual) == encode(req["expected"]):
+        outcome = self.catalog.observe_execution(req["previous"], source["arguments"])
+        if outcome.failure != source["failure"]:
+            raise ValueError("The original execution failure could not be reproduced")
+        if outcome.failure is None and encode(outcome.result) == encode(req["expected"]):
             raise ValueError("The independent check now passes on the original revision")
         self.state.event(
             task,
@@ -82,7 +84,8 @@ class Learning:
             {
                 "source_call": req["source_call"],
                 "revision": req["previous"],
-                "actual": actual,
+                "actual": outcome.result,
+                "failure": outcome.failure,
                 "expected": req["expected"],
             },
         )
@@ -133,7 +136,7 @@ class Learning:
         if not self.state.rows("SELECT 1 FROM activations WHERE task=? AND rev=?", task, revision):
             return False
         arguments = self.catalog.evidence(req["source_call"])["arguments"]
-        result = self.catalog.run(task, req["skill"], arguments)
+        result = self.catalog.run(task, req["skill"], arguments, expected_revision=revision)
         checked = self.catalog.attest(
             result["call"],
             req["expected"],
