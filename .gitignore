@@ -1,6 +1,0 @@
-__pycache__/
-*.py[cod]
-.swarm/
-dist/
-.venv/
-.ruff_cache/
