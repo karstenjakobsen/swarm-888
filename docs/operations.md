@@ -96,3 +96,17 @@ systemctl --user status swarm-worker.service swarm-controller.service
 ```
 
 After reboot, the worker resumes scheduling from SQLite and serves the controller on its private socket. Disable startup with `systemctl --user disable --now swarm-controller.service swarm-worker.service`. Keep linger enabled if other user services depend on it.
+
+To exercise reboot recovery on a disposable VPS, enable the units and lingering as above. Create a fresh fixture and submit the standing goal while the worker is running.
+
+```sh
+install -m 600 /dev/null "${SWARM_STATE:-$HOME/.local/state/swarm-888}/fixtures/boot-demo"
+uv run --locked python -m swarm submit '/maintain boot-demo 600 fixture-permissions 3'
+```
+
+Record the goal ID shown in the console and wait for its first healthy observation. Save the current boot ID from `cat /proc/sys/kernel/random/boot_id`. Stop the two units with `systemctl --user stop swarm-controller.service swarm-worker.service`, change the fixture to mode 644, and reboot the disposable VPS. After it comes back, run the following from the checkout with the two saved values. The grader reads the boot identity, post-boot journal, fixture, socket and HTTP endpoint.
+
+```sh
+SWARM_TEST_PREVIOUS_BOOT_ID=PREVIOUS_BOOT_UUID SWARM_TEST_BOOT_GOAL=GOAL_ID \
+  uv run --locked pytest -m live -s tests/test_live_boot.py
+```

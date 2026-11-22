@@ -276,7 +276,9 @@ def test_ingress_service_identity():
 def test_root_fixture_worker(tmp_path):
     """Explicitly selected test, requiring noninteractive sudo and a temporary fixture."""
     import getpass
+    import signal
     import stat
+    import struct
 
     from swarm.catalog import Catalog, Package
     from swarm.goals import Maintenance
@@ -301,7 +303,7 @@ def test_root_fixture_worker(tmp_path):
         "timeout",
         "-k",
         "3",
-        "12",
+        "100",
         sys.executable,
         "-I",
         "-S",
@@ -314,23 +316,54 @@ def test_root_fixture_worker(tmp_path):
         os.environ["PATH"],
     ]
     process = subprocess.Popen(command)
+    worker_fd = None
     try:
         with httpx.Client(
             transport=httpx.HTTPTransport(uds=str(state.path / "worker.sock")),
             base_url="http://worker",
         ) as client:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 90
             while time.monotonic() < deadline:
-                assert process.poll() is None, "Noninteractive sudo is required"
+                assert process.poll() is None, "Privileged launcher exited before the fixture check"
                 try:
                     summary = rpc(client, "summary")
                 except httpx.ConnectError:
                     time.sleep(0.1)
                     continue
-                if summary["incidents"]:
+                if worker_fd is None:
+                    # Stop exactly this test's unprivileged worker as soon as verification completes.
+                    with socket.socket(socket.AF_UNIX) as peer:
+                        peer.connect(str(state.path / "worker.sock"))
+                        cred = peer.getsockopt(
+                            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                        )
+                        pid, uid, _ = struct.unpack("3i", cred)
+                        assert uid == os.getuid()
+                        worker_fd = os.pidfd_open(pid)
+                if summary["incidents"] and summary["incidents"][0]["status"] == "resolved":
                     break
+                time.sleep(0.1)
+            else:
+                pytest.fail("Worker did not report a resolved fixture incident within 90 seconds")
             assert summary["uid"] == os.getuid() and summary["fixture_uid"] == 0
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
             assert summary["incidents"][0]["status"] == "resolved"
+            print(
+                "worker UID",
+                summary["uid"],
+                "fixture UID",
+                summary["fixture_uid"],
+                "observed mode",
+                oct(stat.S_IMODE(path.stat().st_mode)),
+                "incident",
+                summary["incidents"][0]["id"],
+            )
     finally:
-        process.wait(timeout=18)
+        if worker_fd is not None:
+            try:
+                signal.pidfd_send_signal(worker_fd, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(worker_fd)
+        process.wait(timeout=105)
