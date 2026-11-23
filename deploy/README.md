@@ -10,10 +10,16 @@ Sync the project environment from the repository root to install Ansible Core 2.
 uv sync --locked
 ```
 
-From the repository root, run the single-host playbook with the pinned framework commit `752e7b0` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+From the repository root, run the single-host playbook with the pinned framework commit available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The default `operator_worker_mode` is `acknowledge` and runs the root fixture worker, which processes the standing-goal queue.
 
 ```sh
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml
+```
+
+For catalog authoring through the Operator API, select `codex` mode. Install `/usr/local/bin/codex` on the VPS and sign in as `swarm-operator` using the service account setup below. **Inspect → Worker** reports `codex` mode and the unprivileged worker identity after deployment.
+
+```sh
+uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e operator_worker_mode=codex
 ```
 
 Open the private tunnel from your workstation and visit [the operator UI](http://127.0.0.1:18080). Sign in with the owner key at `/var/lib/swarm-operator/state/owner.key`. Keep the local port at `18080` to match the configured browser origin.
@@ -24,7 +30,7 @@ ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-21
 
 Open **Inspect → Worker** after signing in to see the worker's heartbeat, active task, queue depth, and runtime details. The tab refreshes about every three seconds. A heartbeat older than 30 seconds is shown as stale.
 
-On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore. The deployed root fixture worker runs in acknowledgment mode.
+On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 
 To switch an existing installation, stop the controller and worker and export a state backup first. Run `python -m operator_v1.catalog_cli switch --from-remote <current-remote> --deploy-key` as the unprivileged operator account with the new `OPERATOR_CATALOG_REMOTE`, `OPERATOR_CATALOG_BRANCH`, and a separate `OPERATOR_CATALOG_CHECKOUT` configured in its environment. The switch requires a seeded target and archives the previous binding under `catalog-history` in the state directory. Start the controller and worker and check **Inspect → Catalog**.
 

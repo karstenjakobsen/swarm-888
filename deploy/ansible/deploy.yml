@@ -13,6 +13,7 @@
     uv_version: "0.12.5"
     operator_home: /var/lib/swarm-operator
     operator_state: "{{ operator_home }}/state"
+    operator_worker_mode: acknowledge
     bootstrap_acceptance_catalog: false
     node_home: "{{ toolchain }}/node-v{{ node_version }}-linux-x64"
     node_archive: "node-v{{ node_version }}-linux-x64.tar.xz"
@@ -30,6 +31,7 @@
           - ansible_facts['service_mgr'] == "systemd"
           - ansible_facts['architecture'] == "x86_64"
           - framework_revision is match('^[a-f0-9]{40}$')
+          - operator_worker_mode in ['acknowledge', 'codex']
         quiet: true
 
     - name: Check existing system dependencies
@@ -64,6 +66,12 @@
         - {path: /opt/swarm-operator-releases, owner: root, mode: '0755'}
         - {path: "{{ release }}", owner: root, mode: '0755'}
         - {path: "{{ toolchain }}", owner: root, mode: '0755'}
+
+    - name: Check Codex sign-in as the unprivileged worker
+      ansible.builtin.command:
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /usr/local/bin/codex, login, status]
+      changed_when: false
+      when: operator_worker_mode == 'codex'
 
     - name: Inspect release completion marker
       ansible.builtin.stat:
@@ -227,9 +235,15 @@
         - name: worker
           settings: |
             [Service]
+            {% if operator_worker_mode == 'codex' %}
+            User=swarm-operator
+            Group=swarm-operator
+            Environment=OPERATOR_MODEL=codex
+            {% else %}
             User=root
             Group=root
             Environment=OPERATOR_ALLOW_ROOT_WORKER=1 OPERATOR_MODEL=acknowledge
+            {% endif %}
         - name: web
           settings: |
             [Service]
