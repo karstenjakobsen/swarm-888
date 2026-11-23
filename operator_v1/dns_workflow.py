@@ -55,24 +55,21 @@ class DnsWorkflow:
         return canonical_id
 
     def prepare(self, task: str, zone: str) -> str | None:
-        goal = f"dns-{zone}"
         with self.state.transaction(write=True) as db:
             existing = db.execute("SELECT * FROM dns_requests WHERE task=?", (task,)).fetchone()
             if existing and existing["phase"] != "preparing":
                 return existing["connector"] if existing["phase"] == "approved" else None
             if not existing:
-                first = db.execute("SELECT 1 FROM dns_requests WHERE zone=?", (zone,)).fetchone()
                 db.execute(
                     "INSERT INTO dns_requests VALUES (?, ?, NULL, 'preparing')", (task, zone)
                 )
-                if not first:
-                    self.state.append(
-                        db,
-                        task,
-                        "evidence",
-                        f"Saved the goal to read DNS records for {zone} on demand.",
-                        {"action": "dns_goal", "goal": goal, "zone": zone},
-                    )
+                self.state.append(
+                    db,
+                    task,
+                    "evidence",
+                    f"Verify the DNS records returned by DigitalOcean for {zone}.",
+                    {"action": "dns_task_objective", "zone": zone},
+                )
 
         connector = self.save_catalog_item("connector", CONNECTOR, DEFINITION)
         skill = self.save_catalog_item("skill", SKILL, GUIDE_FIELDS, files={"SKILL.md": GUIDE})
@@ -147,14 +144,14 @@ class DnsWorkflow:
         except CredentialRequired:
             return
         except (CatalogError, CredentialError) as error:
-            self.fail(task, zone, str(error))
+            self.state.fail(task, str(error))
             return
         except OSError:
-            self.fail(task, zone, "Could not save or read the local DigitalOcean configuration")
+            self.state.fail(task, "Could not save or read the local DigitalOcean configuration")
             return
 
         if not isinstance(records, list):
-            self.fail(task, zone, "The DigitalOcean connector did not return a DNS record list")
+            self.state.fail(task, "The DigitalOcean connector did not return a DNS record list")
             return
         count = len(records)
         noun = "record" if count == 1 else "records"
@@ -172,22 +169,3 @@ class DnsWorkflow:
                     summary,
                     {"action": "dns_verified", "zone": zone, "count": count},
                 )
-                self.check_goal(db, task, zone, "holding", summary)
-
-    def fail(self, task: str, zone: str, summary: str) -> None:
-        self.state.fail(task, summary)
-        with self.state.transaction(write=True) as db:
-            latest = db.execute(
-                "SELECT kind FROM events WHERE task=? ORDER BY seq DESC LIMIT 1", (task,)
-            ).fetchone()
-            if latest and latest["kind"] == "failed":
-                self.check_goal(db, task, zone, "blocked", summary)
-
-    def check_goal(self, db, task: str, zone: str, status: str, summary: str) -> None:
-        self.state.append(
-            db,
-            task,
-            "system",
-            summary,
-            {"action": "dns_goal_checked", "goal": f"dns-{zone}", "status": status, "zone": zone},
-        )

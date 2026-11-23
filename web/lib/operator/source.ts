@@ -34,14 +34,6 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
   const data = event.data
   if (typeof data?.goal === 'string') {
     const ref = {...meta.ref, goal: data.goal, incident: typeof data.incident === 'string' ? data.incident : undefined}
-    if (data.action === 'dns_goal' && typeof data.zone === 'string') {
-      return { ...meta, ref, type: 'goal.standing',
-        data: { text: 'Read DNS records for ' + data.zone + ' on demand', check: 'Read through the approved DigitalOcean connector.' } }
-    }
-    if (data.action === 'dns_goal_checked' && (data.status === 'holding' || data.status === 'blocked')) {
-      return { ...meta, ref, type: 'goal.checked',
-        data: { status: data.status, observed: event.text, command: 'DigitalOcean DNS read', output: event.text } }
-    }
     if (data.action === 'goal_created' && typeof data.filename === 'string' && typeof data.expected === 'string') {
       return { ...meta, ref, type: 'goal.standing',
         data: {text: `Keep ${data.filename} at mode ${data.expected}`, check: 'Read the file permission bits.'} }

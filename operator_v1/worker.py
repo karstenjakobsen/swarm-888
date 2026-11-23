@@ -4,12 +4,15 @@ import os
 import socket
 import stat
 import time
+from collections.abc import Coroutine
 from contextlib import closing, suppress
+from typing import Any
 
 from .config import Settings
 from .digitalocean import requested_zone
 from .dns_workflow import DnsWorkflow
 from .goals import StandingGoals
+from .memory_review import MemoryReview
 from .model import ModelError, ModelSession, ModelSignInRequired, codex_session, connect_skills
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
@@ -24,6 +27,8 @@ class MessageWorker:
         self.settings = settings
         self.state = State(settings)
         self.dns = DnsWorkflow(self.state)
+        self.memory_review = MemoryReview(self.state)
+        self.next_memory_review = 0.0
         self.operations = Operations(self.state)
         self.goals = StandingGoals(settings, self.state)
         self.fixture_engine = ConfiguredFixtureEngine(settings.directory / "fixture-engine.json")
@@ -93,6 +98,7 @@ class MessageWorker:
                 operations_only=self.mode == "codex" and self.auth.status.state != "ready"
             )
             if task is None:
+                await self.review_memory_when_idle()
                 return
             self.idle.clear()
             self.heartbeat.publish(task)
@@ -116,9 +122,10 @@ class MessageWorker:
             return
         if zone := requested_zone(self.state.text(task)):
             await asyncio.to_thread(self.dns.run, task, zone)
+            self.next_memory_review = 0.0
             return
         try:
-            answer = await self.answer_with_heartbeat(task)
+            answer = await self.run_with_heartbeat(task, self.answer(task))
         except ModelSignInRequired as error:
             self.auth.require_reconnect()
             self.state.fail(task, str(error))
@@ -131,8 +138,35 @@ class MessageWorker:
             if answer is not None:
                 self.state.finish(task, answer, "The operator completed the turn", modeled=True)
 
-    async def answer_with_heartbeat(self, task: str) -> str | None:
-        turn = asyncio.create_task(self.answer(task))
+    async def review_memory_when_idle(self) -> None:
+        if (
+            self.mode != "codex"
+            or self.auth.status.state != "ready"
+            or time.monotonic() < self.next_memory_review
+        ):
+            return
+        self.next_memory_review = time.monotonic() + 30
+        task = self.memory_review.pending()
+        if task is None:
+            return
+        self.idle.clear()
+        self.heartbeat.publish(task)
+        try:
+            await self.run_with_heartbeat(task, self.memory_review.run(task))
+            self.next_memory_review = 0.0
+        except ModelSignInRequired:
+            self.auth.require_reconnect()
+        except (ModelError, OSError, TimeoutError, ExceptionGroup) as error:
+            logging.getLogger(__name__).warning("Memory review failed: %s", type(error).__name__)
+            self.next_memory_review = time.monotonic() + 60
+        finally:
+            self.idle.set()
+            self.heartbeat.publish()
+
+    async def run_with_heartbeat[Result](
+        self, task: str, work: Coroutine[Any, Any, Result]
+    ) -> Result:
+        turn = asyncio.create_task(work)
         try:
             while not turn.done():
                 await asyncio.wait((turn,), timeout=HEARTBEAT_INTERVAL)

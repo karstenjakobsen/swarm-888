@@ -77,7 +77,10 @@ TOOLS = {
     "skill_invoke": (Invoke, "Invoke the current active revision of a skill by its ID."),
     "memory_search": (SearchMemory, "Find current memory entries by text and optional scope."),
     "memory_read": (ReadMemory, "Read a memory entry and record why this task used it."),
-    "memory_write": (WriteMemory, "Save an owner-authorized fact, preference, or procedure."),
+    "memory_write": (
+        WriteMemory,
+        "Save a useful fact, preference, or procedure to operator memory.",
+    ),
     "memory_revise": (ReviseMemory, "Update the specified memory revision and preserve history."),
     "memory_remove": (RemoveMemory, "Remove a memory from active use while preserving provenance."),
     "connector_read": (ConnectorRead, "Use the configured read-only MCP tool for a connector."),
@@ -105,16 +108,17 @@ LOCAL_WRITE_TOOLS = frozenset(
         "goal_change",
     }
 )
+MEMORY_REVIEW_TOOLS = frozenset({"memory_search", "memory_read", "memory_write"})
 
 
-def build_server(skills: Skills) -> Server:
+def build_server(skills: Skills, *, memory_review: bool = False) -> Server:
     server = Server("operator-skills")
     memory = MemoryStore(skills.state, skills.task)
     goals = StandingGoals(skills.state.settings, skills.state)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        active = await asyncio.to_thread(skills.active)
+        active = [] if memory_review else await asyncio.to_thread(skills.active)
         return [
             types.Tool(
                 name=name,
@@ -127,6 +131,7 @@ def build_server(skills: Skills) -> Server:
                 ),
             )
             for name, (model, description) in TOOLS.items()
+            if not memory_review or name in MEMORY_REVIEW_TOOLS
         ] + [
             types.Tool(
                 name=NAMED_PREFIX + item["skill"],
@@ -139,6 +144,8 @@ def build_server(skills: Skills) -> Server:
         ]
 
     def dispatch(name: str, arguments: dict[str, Any]) -> dict:
+        if memory_review and name not in MEMORY_REVIEW_TOOLS:
+            raise SkillError("Only memory review tools are available")
         if skills.task and skills.state.stopped(skills.task):
             raise SkillError("This task was stopped")
         match name:
@@ -168,7 +175,17 @@ def build_server(skills: Skills) -> Server:
                 invocation = Invoke.model_validate(arguments)
                 return skills.invoke(invocation.skill, invocation.arguments)
             case "memory_search":
-                return memory.search(SearchMemory.model_validate(arguments))
+                result = memory.search(SearchMemory.model_validate(arguments))
+                if memory_review and skills.task:
+                    with skills.state.transaction(write=True) as db:
+                        skills.state.append(
+                            db,
+                            skills.task,
+                            "system",
+                            "Checked existing memory.",
+                            {"action": "memory_review_search"},
+                        )
+                return result
             case "memory_read":
                 return memory.read(ReadMemory.model_validate(arguments))
             case "memory_write":
@@ -221,10 +238,10 @@ def build_server(skills: Skills) -> Server:
     return server
 
 
-async def serve(task: str | None) -> None:
+async def serve(task: str | None, *, memory_review: bool = False) -> None:
     settings = Settings.load()
     catalog = Catalog.load(settings) if settings.catalog_config.is_file() else None
-    server = build_server(Skills(catalog, State(settings), task))
+    server = build_server(Skills(catalog, State(settings), task), memory_review=memory_review)
     options = server.create_initialization_options(NotificationOptions(tools_changed=True))
     async with stdio_server() as (read, write):
         await server.run(read, write, options)
@@ -234,4 +251,6 @@ if __name__ == "__main__":
     os.umask(0o077)
     parser = argparse.ArgumentParser()
     parser.add_argument("--task")
-    asyncio.run(serve(parser.parse_args().task))
+    parser.add_argument("--memory-review", action="store_true")
+    args = parser.parse_args()
+    asyncio.run(serve(args.task, memory_review=args.memory_review))

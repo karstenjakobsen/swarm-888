@@ -7,7 +7,7 @@ import { AppHeader } from './app-header'
 import { Composer } from './composer'
 import { OutcomeChip } from './outcome-chip'
 import { CredentialButton } from './credential-dialog'
-import { plural, rowOutcome, summary, workSince, type NeedItem } from '@/lib/operator/brief'
+import { finishedRow, plural, rowOutcome, summary, workSince, type NeedItem, type WorkRow } from '@/lib/operator/brief'
 import { clock, dayClock, duration } from '@/lib/operator/format'
 import type { Goal, Projection, Skill } from '@/lib/operator/project'
 import { cn } from '@/lib/utils'
@@ -47,6 +47,9 @@ function Loading() {
 function Home({ state }: { state: Projection }) {
   const s = summary(state)
   const rows = workSince(state, s.since)
+  const finished = rows.filter(finishedRow)
+  const active = rows.filter((row) => !finishedRow(row))
+  const since = state.ownerLeft ? 'since ' + clock(state.ownerLeft.at) : undefined
   const skills = Object.values(state.skills)
 
   return (
@@ -56,30 +59,9 @@ function Home({ state }: { state: Projection }) {
         <NeedsYou items={s.needs} />
       </div>
       <div className="flex flex-col gap-8">
-        <section aria-labelledby="work-h" className="flex flex-col gap-3">
-          <SectionTitle id="work-h" aside={state.ownerLeft ? `since ${clock(state.ownerLeft.at)}` : undefined}>
-            What happened
-          </SectionTitle>
-          <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-            {rows.map((r) => {
-              const o = rowOutcome(r)
-              return (
-                <li key={r.id}>
-                  <Link href={`/work/${r.id}`} className="flex min-h-16 items-center gap-3 px-4 py-3 hover:bg-secondary/60">
-                    <span className="w-11 shrink-0 font-mono text-xs text-muted-foreground">{clock(r.at)}</span>
-                    <span className="flex min-w-0 flex-1 flex-col gap-1.5">
-                      <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                        {r.kind === 'incident' ? 'Incident' : r.task.source === 'schedule' ? 'Scheduled' : 'Your task'}
-                      </span>
-                      <span className="text-pretty text-sm font-medium leading-snug">{r.title}</span>
-                      <OutcomeChip outcome={o} className="self-start" />
-                    </span>
-                    <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                  </Link>
-                </li>
-              )
-            })}
-          </ul>
+        <section aria-label="What happened" className="flex flex-col gap-5">
+          <WorkRows id="active-work-h" title="In progress" rows={active} aside={since} />
+          <WorkRows id="completed-work-h" title="Completed work" rows={finished} aside={active.length ? undefined : since} />
         </section>
 
         <Goals goals={state.goalOrder.map((id) => state.goals[id])} />
@@ -94,6 +76,32 @@ function Home({ state }: { state: Projection }) {
         ) : null}
       </div>
     </div>
+  )
+}
+
+function WorkRows({ id, title, rows, aside }: { id: string; title: string; rows: WorkRow[]; aside?: string }) {
+  if (!rows.length) return null
+  return (
+    <section aria-labelledby={id} className="flex flex-col gap-3">
+      <SectionTitle id={id} aside={aside}>{title}</SectionTitle>
+      <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+        {rows.map((row) => (
+          <li key={row.id}>
+            <Link href={'/work/' + row.id} className="flex min-h-16 items-center gap-3 px-4 py-3 hover:bg-secondary/60">
+              <span className="w-11 shrink-0 font-mono text-xs text-muted-foreground">{clock(row.at)}</span>
+              <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+                <span className="text-xs text-muted-foreground">
+                  {row.kind === 'incident' ? 'Incident' : row.task.source === 'schedule' ? 'Scheduled' : 'Your task'}
+                </span>
+                <span className="text-pretty text-sm font-medium leading-snug">{row.title}</span>
+                <OutcomeChip outcome={rowOutcome(row)} className="self-start" />
+              </span>
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

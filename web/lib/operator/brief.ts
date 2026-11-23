@@ -43,7 +43,8 @@ export function workSince(p: Projection, sinceSeq: number): WorkRow[] {
   for (const id of p.taskOrder) {
     const t = p.tasks[id]
     if (t.trail.some((x) => x.seq > sinceSeq) && t.source !== 'incident')
-      rows.push({ kind: 'task', id, title: t.title, at: t.lastAt, task: t })
+      rows.push({ kind: 'task', id, title: t.title,
+        at: t.stopped?.at ?? t.verification?.at ?? t.completed?.at ?? t.lastAt, task: t })
   }
   for (const id of p.incidentOrder) {
     const i = p.incidents[id]
@@ -71,4 +72,8 @@ export function plural(n: number, one: string, many = `${one}s`) {
 
 export function rowOutcome(r: WorkRow) {
   return r.kind === 'task' ? taskOutcome(r.task) : incidentOutcome(r.incident)
+}
+
+export function finishedRow(row: WorkRow) {
+  return row.kind === 'task' ? isTaskFinished(row.task) : Boolean(row.incident.resolved)
 }

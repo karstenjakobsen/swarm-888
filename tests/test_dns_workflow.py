@@ -84,7 +84,9 @@ def test_dns_goal_approval_credential_and_verified_read_resume_same_task(tmp_pat
         first = events(task)
         assert first[-1].outcome.label == "Needs approval"
         assert first[-1].data["scope"] == "domain:read"
-        assert len([event for event in first if event.data.get("action") == "dns_goal"]) == 1
+        assert (
+            len([event for event in first if event.data.get("action") == "dns_task_objective"]) == 1
+        )
         assert not zones
         asyncio.run(worker.drain())
         assert events(task) == first
@@ -120,6 +122,7 @@ def test_dns_goal_approval_credential_and_verified_read_resume_same_task(tmp_pat
         asyncio.run(MessageWorker(settings).drain())
         assert next(t for t in state.snapshot().tasks if t.id == task).outcome.key == "verified"
         assert any(event.data.get("action") == "connector_used" for event in events(task))
+        assert not any(event.data.get("action") == "dns_goal" for event in events(task))
         assert token not in client.get("/api/snapshot").text
 
         again = submit()

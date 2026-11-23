@@ -34,7 +34,7 @@ If the Codex worker shows **Sign-in required**, choose **Connect** or **Reconnec
 
 Choose **Disconnect** to sign the worker out of ChatGPT. The worker finishes its current task before signing out and holds new model tasks until you reconnect.
 
-With Skills and Connectors catalogs connected, ask the operator to list DNS records for a zone using DigitalOcean. The worker saves the on-demand goal and drafts the connector and guide in the local catalog. Review the destination and read-only scope on the task page, then supply a token with `domain:read` in the credential dialog. The task resumes with a live DNS read. Use the catalog publish preview if you want to publish the drafts.
+With Skills and Connectors catalogs connected, ask the operator to list DNS records for a zone using DigitalOcean. The worker saves the task and drafts the connector and guide in the local catalog. Review the destination and read-only scope on the task page, then supply a token with `domain:read` in the credential dialog. The task resumes with a live DNS read. After verification it appears in **Completed work**, and the operator reviews the evidence to decide what to keep in **Inspect → Memory**. Use the catalog publish preview if you want to publish the drafts.
 
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 
