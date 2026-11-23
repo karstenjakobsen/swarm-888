@@ -19,7 +19,7 @@ const tabs: { id: InspectTab; label: string; count?: (s: Projection) => number }
   { id: 'skills', label: 'Skills', count: (s) => s.skillOrder.length },
   { id: 'connectors', label: 'Connectors', count: (s) => s.connectorOrder.length },
   { id: 'projects', label: 'Projects', count: (s) => s.projectOrder.length },
-  { id: 'worker', label: 'Worker' },
+  { id: 'worker', label: 'Workers' },
   { id: 'catalog', label: 'Catalog' },
 ]
 

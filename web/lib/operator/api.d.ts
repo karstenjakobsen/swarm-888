@@ -177,6 +177,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/worker/auth/{action}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Change Worker Auth */
+        post: operations["change_worker_auth_api_worker_auth__action__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/commands": {
         parameters: {
             query?: never;
@@ -583,6 +600,32 @@ export interface components {
             checkpoint: "queued" | "running" | "completed";
             outcome: components["schemas"]["Outcome"];
         };
+        /** WorkerAuthStatus */
+        WorkerAuthStatus: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "checking" | "ready" | "required" | "starting" | "waiting" | "unavailable";
+            login?: components["schemas"]["WorkerLoginChallenge"] | null;
+            /** Message */
+            message?: string | null;
+            /**
+             * Reconnect
+             * @default false
+             */
+            reconnect: boolean;
+        };
+        /** WorkerLoginChallenge */
+        WorkerLoginChallenge: {
+            /**
+             * Verification Url
+             * @constant
+             */
+            verification_url: "https://auth.openai.com/codex/device";
+            /** User Code */
+            user_code: string;
+        };
         /** WorkerReport */
         WorkerReport: {
             /** Host */
@@ -598,6 +641,8 @@ export interface components {
             uid: number;
             /** Gid */
             gid: number;
+            /** User */
+            user?: string | null;
             /**
              * Started At
              * Format: date-time
@@ -623,6 +668,7 @@ export interface components {
             /** Queued Tasks */
             queued_tasks: number;
             report: components["schemas"]["WorkerReport"] | null;
+            auth?: components["schemas"]["WorkerAuthStatus"] | null;
         };
     };
     responses: never;
@@ -1288,6 +1334,73 @@ export interface operations {
             };
             /** @description Invalid request */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    change_worker_auth_api_worker_auth__action__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                action: "connect" | "cancel";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerAuthStatus"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Worker does not use Codex */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Worker unavailable */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

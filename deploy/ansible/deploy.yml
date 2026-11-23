@@ -117,24 +117,6 @@
             owner: root
             group: root
 
-        - name: Check Codex sign-in as the unprivileged worker
-          ansible.builtin.command:
-            argv: [/usr/sbin/runuser, -u, swarm-operator, --, "{{ codex_cli }}", login, status]
-          changed_when: false
-          register: codex_login
-          failed_when: codex_login.rc != 0 and 'Not logged in' not in codex_login.stderr
-
-        - name: Require Codex sign-in before switching the worker
-          ansible.builtin.assert:
-            that: codex_login.rc == 0
-            fail_msg: |-
-              In a root terminal on the VPS, run this command.
-
-              /usr/sbin/runuser -u swarm-operator -- {{ codex_cli }} login --device-auth
-
-              Open the displayed link, enter the one-time code, and rerun this playbook.
-            quiet: true
-
     - name: Inspect release completion marker
       ansible.builtin.stat:
         path: "{{ release }}/.framework-revision"

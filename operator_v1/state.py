@@ -244,12 +244,15 @@ class State:
             ).fetchone()
             return row[0] if row else None
 
-    def claim(self) -> str | None:
+    def claim(self, *, operations_only: bool = False) -> str | None:
         with self.transaction(write=True) as db:
             row = db.execute(
                 """SELECT id,checkpoint FROM tasks WHERE checkpoint!='completed'
                    AND NOT EXISTS(SELECT 1 FROM credential_requests AS c WHERE c.task=tasks.id
-                                  AND NOT c.supplied) ORDER BY rowid LIMIT 1"""
+                                  AND NOT c.supplied)
+                   AND (NOT ? OR EXISTS(SELECT 1 FROM operations WHERE task=tasks.id))
+                   ORDER BY rowid LIMIT 1""",
+                (operations_only,),
             ).fetchone()
             if row is None:
                 return None

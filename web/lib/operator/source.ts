@@ -205,6 +205,10 @@ export async function readWorkerStatus(signal: AbortSignal): Promise<API['Worker
   return response.json()
 }
 
+export async function changeWorkerAuth(action: 'connect' | 'cancel'): Promise<API['WorkerAuthStatus']> {
+  return post('/api/worker/auth/' + action, {})
+}
+
 export async function readCatalogStatus(signal: AbortSignal): Promise<API['CatalogStatus']> {
   const response = await fetch('/api/catalog', { cache: 'no-store', signal })
   if (!response.ok) throw new AccessError(response.status, 'Could not load catalog status.')

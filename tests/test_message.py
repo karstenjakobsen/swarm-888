@@ -279,7 +279,12 @@ def test_private_worker_status_and_heartbeat_expiry(tmp_path):
         login(client, settings)
         response = client.get("/api/worker")
         assert response.headers["Cache-Control"] == "no-store"
-        assert response.json() == {"health": "unreported", "queued_tasks": 0, "report": None}
+        assert response.json() == {
+            "health": "unreported",
+            "queued_tasks": 0,
+            "report": None,
+            "auth": None,
+        }
 
         state = State(settings)
         active = state.submit(uuid4(), "Active task")
@@ -294,6 +299,8 @@ def test_private_worker_status_and_heartbeat_expiry(tmp_path):
         assert online["report"]["active_task"] == active
         assert online["report"]["uid"] == os.geteuid()
         assert online["report"]["pid"] == os.getpid()
+        assert online["auth"] is None
+        assert client.post("/api/worker/auth/connect", headers=headers(settings)).status_code == 409
 
         heartbeat.publish()
         idle = client.get("/api/worker").json()

@@ -1,5 +1,6 @@
 import logging
 import os
+import pwd
 import socket
 import tempfile
 import time
@@ -30,12 +31,18 @@ class WorkerHeartbeat:
         release = Path(__file__).resolve().parents[1] / ".framework-revision"
         revision = release.read_text().strip() if release.is_file() else None
         now = datetime.now(UTC)
+        uid = os.geteuid()
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            user = None
         self.report = WorkerReport(
             host=socket.gethostname(),
             pid=os.getpid(),
             mode=mode,
-            uid=os.geteuid(),
+            uid=uid,
             gid=os.getegid(),
+            user=user,
             started_at=now,
             last_heartbeat=now,
             revision=revision,

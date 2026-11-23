@@ -16,20 +16,11 @@ From the repository root, run the single-host playbook with the pinned framework
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml
 ```
 
-For catalog authoring through the Operator API, select `codex` mode. The playbook installs the Codex CLI and its code-mode host from the same pinned release, then checks sign-in as `swarm-operator` before switching the worker.
+For catalog authoring through the Operator API, select `codex` mode. The playbook installs the pinned Codex CLI and code-mode host and starts the worker as `swarm-operator`.
 
 ```sh
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e operator_worker_mode=codex
 ```
-
-If the playbook asks for sign-in, enable device code login in your ChatGPT security settings or ask your workspace admin to enable it. Run the command printed by the playbook from a root terminal on the VPS.
-
-```sh
-/usr/sbin/runuser -u swarm-operator -- \
-  /opt/swarm-operator-tools/codex-0.166.0/codex-x86_64-unknown-linux-musl login --device-auth
-```
-
-Open the link printed by Codex, sign in, and enter the one-time code in your browser. Rerun the deployment after sign-in succeeds. **Inspect → Worker** reports `codex` mode and the unprivileged worker identity. [Codex device sign-in](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
 Open the private tunnel from your workstation and visit [the operator UI](http://127.0.0.1:18080). Sign in with the owner key at `/var/lib/swarm-operator/state/owner.key`. Keep the local port at `18080` to match the configured browser origin.
 
@@ -37,7 +28,9 @@ Open the private tunnel from your workstation and visit [the operator UI](http:/
 ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-212
 ```
 
-Open **Inspect → Worker** after signing in to see the worker's heartbeat, active task, queue depth, and runtime details. The tab refreshes about every three seconds. A heartbeat older than 30 seconds is shown as stale.
+Open **Inspect → Workers** after signing in to see the worker's heartbeat, Linux account, active task, and queue depth. The tab refreshes about every three seconds. A heartbeat older than 30 seconds is shown as stale.
+
+If the Codex worker shows **Sign-in required**, choose **Connect** or **Reconnect**. Open the verification page and enter the displayed code. Device code login must be enabled in your ChatGPT security settings or by your workspace admin. When the worker shows **Ready**, it resumes queued model tasks automatically. [Codex device sign-in](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 

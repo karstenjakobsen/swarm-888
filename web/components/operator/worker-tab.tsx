@@ -1,9 +1,10 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Button } from '@/components/ui/button'
 import type { components } from '@/lib/operator/api'
-import { readWorkerStatus } from '@/lib/operator/source'
+import { AccessError, changeWorkerAuth, readWorkerStatus } from '@/lib/operator/source'
 import { cn } from '@/lib/utils'
 import { useOperator } from './store'
 
@@ -13,6 +14,15 @@ const modes = {
   acknowledge: 'Acknowledgment',
   codex: 'Codex',
   simulated: 'Simulated',
+}
+
+const authLabels = {
+  checking: 'Checking sign-in…',
+  ready: 'Ready',
+  required: 'Sign-in required',
+  starting: 'Requesting a code…',
+  waiting: 'Waiting for ChatGPT sign-in',
+  unavailable: 'Sign-in status unavailable',
 }
 
 function WorkerField({ label, children }: { label: string; children: ReactNode }) {
@@ -28,6 +38,9 @@ export function WorkerTab() {
   const { mode, state } = useOperator()
   const [status, setStatus] = useState<WorkerStatus>()
   const [unavailable, setUnavailable] = useState(false)
+  const [acting, setActing] = useState(false)
+  const [error, setError] = useState('')
+  const actionVersion = useRef(0)
 
   useEffect(() => {
     if (mode !== 'live') return
@@ -35,11 +48,14 @@ export function WorkerTab() {
     let timer: ReturnType<typeof setTimeout>
 
     async function refresh() {
+      const version = actionVersion.current
       try {
         const current = await readWorkerStatus(AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]))
         if (abort.signal.aborted) return
-        setStatus(current)
-        setUnavailable(false)
+        if (version === actionVersion.current) {
+          setStatus(current)
+          setUnavailable(false)
+        }
       } catch {
         if (!abort.signal.aborted) setUnavailable(true)
       }
@@ -55,6 +71,7 @@ export function WorkerTab() {
 
   const report = status?.report
   const online = !unavailable && status?.health === 'online'
+  const auth = online ? status?.auth : null
   const health = mode === 'demo' ? 'Demo has no live worker'
     : unavailable ? 'Worker status unavailable'
     : !status ? 'Checking worker status…'
@@ -62,6 +79,21 @@ export function WorkerTab() {
     : status.health === 'stale' ? 'Heartbeat stale'
     : 'No worker heartbeat yet'
   const task = online ? report?.active_task : null
+
+  async function updateAuth(action: 'connect' | 'cancel') {
+    actionVersion.current += 1
+    setActing(true)
+    setError('')
+    try {
+      const updated = await changeWorkerAuth(action)
+      actionVersion.current += 1
+      setStatus((current) => current && { ...current, auth: updated })
+    } catch (cause) {
+      setError(cause instanceof AccessError ? cause.message : 'Could not reach the worker.')
+    } finally {
+      setActing(false)
+    }
+  }
 
   return (
     <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4" aria-label="Worker status">
@@ -72,6 +104,45 @@ export function WorkerTab() {
           {health}
         </p>
       </div>
+      {auth && (
+        <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-medium">Codex connection</h3>
+              <p role="status" className={cn('mt-0.5 text-sm', auth.state === 'ready' ? 'text-verified' : 'text-muted-foreground')}>
+                {authLabels[auth.state]}
+              </p>
+            </div>
+            {(auth.state === 'required' || auth.state === 'unavailable') && (
+              <Button onClick={() => void updateAuth('connect')} disabled={acting}>
+                {auth.reconnect ? 'Reconnect' : 'Connect'}
+              </Button>
+            )}
+            {(auth.state === 'starting' || auth.state === 'waiting') && (
+              <Button variant="outline" onClick={() => void updateAuth('cancel')} disabled={acting}>Cancel sign-in</Button>
+            )}
+          </div>
+          {auth.login ? (
+            <div className="flex flex-col items-start gap-2">
+              <p className="text-sm">Open the verification page and enter this one-time code.</p>
+              <code className="select-all rounded-md bg-secondary px-3 py-2 font-mono text-base font-semibold">{auth.login.user_code}</code>
+              <a
+                className="text-sm font-medium text-primary underline underline-offset-4"
+                href={auth.login.verification_url}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open ChatGPT verification
+              </a>
+            </div>
+          ) : auth.state === 'required' ? (
+            <p className="text-sm text-muted-foreground">
+              Model tasks wait for sign-in. Device code login must be enabled in ChatGPT settings or by your workspace admin.
+            </p>
+          ) : null}
+          {(error || auth.message) && <p role="alert" className="text-sm text-attention">{error || auth.message}</p>}
+        </div>
+      )}
       {status && (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t border-border pt-4 sm:grid-cols-3">
           <WorkerField label="Queued tasks">{unavailable ? 'Unavailable' : status.queued_tasks}</WorkerField>
@@ -89,6 +160,7 @@ export function WorkerTab() {
               </WorkerField>
               <WorkerField label="Host">{report.host}</WorkerField>
               <WorkerField label="Model mode">{modes[report.mode]}</WorkerField>
+              <WorkerField label="Linux account">{report.user ? <code>{report.user}</code> : 'Unavailable'}</WorkerField>
               <WorkerField label="Effective UID / GID"><code>{report.uid} / {report.gid}</code></WorkerField>
               <WorkerField label="PID"><code>{report.pid}</code></WorkerField>
               <WorkerField label="Started">

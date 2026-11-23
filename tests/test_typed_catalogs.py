@@ -186,7 +186,7 @@ def test_task_authors_and_invokes_exact_revision_after_pull(tmp_path, monkeypatc
     worker = MessageWorker(settings)
     skill = f"{PUBLISHER}-skill-fixture-lookup"
     creating = state.submit(uuid4(), "Look up fixture `swarm.test=a`")
-    worker.drain()
+    asyncio.run(worker.drain())
     active = state.active_skill_revision(skill)
     assert active == catalog.git("rev-parse", "HEAD").strip()
     assert catalogs.for_kind("skill").item("skill", skill).path == "fixture-lookup/operator.yaml"
@@ -221,7 +221,7 @@ def test_task_authors_and_invokes_exact_revision_after_pull(tmp_path, monkeypatc
     assert catalogs.for_kind("skill").revision != active
 
     reuse = state.submit(uuid4(), "Look up fixture `swarm.test=b`")
-    worker.drain()
+    asyncio.run(worker.drain())
     with state.transaction() as db:
         rows = db.execute(
             "SELECT task,skill,revision,result FROM skill_calls ORDER BY id"

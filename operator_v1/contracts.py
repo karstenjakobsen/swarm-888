@@ -247,13 +247,27 @@ class WorkerReport(BaseModel):
     mode: Literal["acknowledge", "codex", "simulated"]
     uid: int = Field(ge=0)
     gid: int = Field(ge=0)
+    user: str | None = None
     started_at: AwareDatetime
     last_heartbeat: AwareDatetime
     revision: str | None
     active_task: str | None
 
 
+class WorkerLoginChallenge(BaseModel):
+    verification_url: Literal["https://auth.openai.com/codex/device"]
+    user_code: Annotated[str, StringConstraints(pattern=r"^[A-Z0-9-]{4,32}$")]
+
+
+class WorkerAuthStatus(BaseModel):
+    state: Literal["checking", "ready", "required", "starting", "waiting", "unavailable"]
+    login: WorkerLoginChallenge | None = None
+    message: str | None = None
+    reconnect: bool = False
+
+
 class WorkerStatus(BaseModel):
     health: Literal["online", "stale", "unreported"]
     queued_tasks: int = Field(ge=0)
     report: WorkerReport | None
+    auth: WorkerAuthStatus | None = None

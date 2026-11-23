@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -19,6 +19,10 @@ from .skill_mcp import LOCAL_WRITE_TOOLS
 
 class ModelError(RuntimeError):
     """The configured model did not finish the turn."""
+
+
+class ModelSignInRequired(ModelError):
+    """The model provider rejected the worker's credentials."""
 
 
 @dataclass(frozen=True)
@@ -81,17 +85,12 @@ to "777", and its self-test rows use expectedMode with expected results of the f
 Host mutations are unavailable in this session. Report failures clearly."""
 
 
-class CodexSession:
-    def __init__(self, process: asyncio.subprocess.Process, workspace: Path, profile: Profile):
+class CodexRpc:
+    def __init__(self, process: asyncio.subprocess.Process, notify: Callable[[str, dict], None]):
         self.process = process
-        self.workspace = workspace
-        self.instructions = INSTRUCTIONS + "\nOperator purpose: " + profile.purpose
-        if profile.instructions:
-            self.instructions += "\nOwner instructions: " + profile.instructions
+        self.notify = notify
         self.counter = 0
         self.pending: dict[int, asyncio.Future] = {}
-        self.results: dict[Turn, asyncio.Future[str]] = {}
-        self.messages: dict[Turn, dict[str, str]] = {}
 
     async def send(self, message: dict) -> None:
         assert self.process.stdin
@@ -127,24 +126,43 @@ class CodexSession:
                     future = self.pending[key]
                     if not future.done():
                         future.set_result(message)
-                elif method == "item/agentMessage/delta":
-                    params = message["params"]
-                    turn = Turn(params["threadId"], params["turnId"])
-                    chunks = self.messages.setdefault(turn, {})
-                    chunks[params["itemId"]] = chunks.get(params["itemId"], "") + params["delta"]
-                elif method == "turn/completed":
-                    params = message["params"]
-                    turn = Turn(params["threadId"], params["turn"]["id"])
-                    future = self.result_future(turn)
-                    if not future.done():
-                        if params["turn"]["status"] == "completed":
-                            future.set_result("\n\n".join(self.messages.pop(turn, {}).values()))
-                        else:
-                            future.set_result("")
+                elif method:
+                    self.notify(method, message.get("params", {}))
         finally:
             for waiting in self.pending.values():
                 if not waiting.done():
                     waiting.set_result({"error": "Codex app-server disconnected"})
+            self.notify("disconnected", {})
+
+
+class CodexSession:
+    def __init__(self, workspace: Path, profile: Profile):
+        self.rpc: CodexRpc
+        self.workspace = workspace
+        self.instructions = INSTRUCTIONS + "\nOperator purpose: " + profile.purpose
+        if profile.instructions:
+            self.instructions += "\nOwner instructions: " + profile.instructions
+        self.results: dict[Turn, asyncio.Future[str]] = {}
+        self.messages: dict[Turn, dict[str, str]] = {}
+
+    def notify(self, method: str, params: dict) -> None:
+        if method == "item/agentMessage/delta":
+            turn = Turn(params["threadId"], params["turnId"])
+            chunks = self.messages.setdefault(turn, {})
+            chunks[params["itemId"]] = params["delta"]
+        elif method == "turn/completed":
+            update = params["turn"]
+            turn = Turn(params["threadId"], update["id"])
+            future = self.result_future(turn)
+            if future.done():
+                return
+            if update["status"] == "completed":
+                future.set_result("\n\n".join(self.messages.pop(turn, {}).values()))
+            elif (update.get("error") or {}).get("codexErrorInfo") == "unauthorized":
+                future.set_exception(ModelSignInRequired("The worker needs to sign in again"))
+            else:
+                future.set_result("")
+        elif method == "disconnected":
             for waiting in self.results.values():
                 if not waiting.done():
                     waiting.set_result("")
@@ -155,13 +173,13 @@ class CodexSession:
         return self.results[turn]
 
     async def create_turn(self, thread_id: str, text: str) -> Turn:
-        response = await self.request(
+        response = await self.rpc.request(
             "turn/start", {"threadId": thread_id, "input": user_input(text)}
         )
         return Turn(thread_id, response["turn"]["id"])
 
     async def start(self, text: str) -> Turn:
-        response = await self.request(
+        response = await self.rpc.request(
             "thread/start",
             {
                 "cwd": str(self.workspace),
@@ -173,7 +191,7 @@ class CodexSession:
         return await self.create_turn(response["thread"]["id"], text)
 
     async def resume(self, thread_id: str, text: str) -> Turn:
-        await self.request(
+        await self.rpc.request(
             "thread/resume",
             {
                 "threadId": thread_id,
@@ -186,13 +204,15 @@ class CodexSession:
         return await self.create_turn(thread_id, text)
 
     async def steer(self, turn: Turn, text: str) -> None:
-        await self.request(
+        await self.rpc.request(
             "turn/steer",
             {"threadId": turn.thread_id, "expectedTurnId": turn.turn_id, "input": user_input(text)},
         )
 
     async def interrupt(self, turn: Turn) -> None:
-        await self.request("turn/interrupt", {"threadId": turn.thread_id, "turnId": turn.turn_id})
+        await self.rpc.request(
+            "turn/interrupt", {"threadId": turn.thread_id, "turnId": turn.turn_id}
+        )
 
     async def result(self, turn: Turn) -> str:
         answer = await asyncio.wait_for(self.result_future(turn), 240)
@@ -225,11 +245,10 @@ async def codex_session(
         + local_approvals
         + "}}}"
     )
-    process = await asyncio.create_subprocess_exec(
-        os.environ.get("OPERATOR_CODEX", "codex"),
-        "app-server",
-        "--listen",
-        "stdio://",
+    session = CodexSession(workspace, profile)
+    async with app_server(
+        workspace,
+        session.notify,
         "--disable",
         "shell_tool",
         "--disable",
@@ -242,20 +261,36 @@ async def codex_session(
         'web_search="disabled"',
         "-c",
         f"mcp_servers={mcp_config}",
+    ) as rpc:
+        session.rpc = rpc
+        yield session
+
+
+@asynccontextmanager
+async def app_server(
+    directory: Path, notify: Callable[[str, dict], None], *args: str, startup_timeout: int = 45
+) -> AsyncGenerator[CodexRpc, None]:
+    process = await asyncio.create_subprocess_exec(
+        os.environ.get("OPERATOR_CODEX", "codex"),
+        "app-server",
+        "--listen",
+        "stdio://",
+        *args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
-        cwd=workspace,
+        cwd=directory,
         limit=8 * 1024 * 1024,
     )
-    session = CodexSession(process, workspace, profile)
-    reader = asyncio.create_task(session.read())
+    rpc = CodexRpc(process, notify)
+    reader = asyncio.create_task(rpc.read())
     try:
-        await session.request(
-            "initialize", {"clientInfo": {"name": "vps-operator", "version": "1"}}
-        )
-        await session.send({"method": "initialized"})
-        yield session
+        async with asyncio.timeout(startup_timeout):
+            await rpc.request(
+                "initialize", {"clientInfo": {"name": "vps-operator", "version": "1"}}
+            )
+            await rpc.send({"method": "initialized"})
+        yield rpc
     finally:
         if process.stdin:
             process.stdin.close()

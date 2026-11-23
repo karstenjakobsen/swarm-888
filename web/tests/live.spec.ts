@@ -118,7 +118,7 @@ test('private owner message survives a controller outage and replays through Cad
     await page.getByRole('button', {name:'Send'}).click()
     await expect(page.getByRole('region', {name:'What happened'}).getByRole('link').filter({hasText:command.text})).toHaveCount(2)
     await page.getByRole('link', {name:'Inspect', exact:true}).click()
-    await page.getByRole('link', {name:'Worker', exact:true}).click()
+    await page.getByRole('link', {name:'Workers', exact:true}).click()
     const worker = page.getByRole('region', {name:'Worker status'})
     await expect(worker.getByRole('status')).toHaveText('Online')
     await expect(worker.getByText('Idle', {exact:true})).toBeVisible()

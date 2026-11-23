@@ -47,7 +47,7 @@ git ls-remote "$OPERATOR_CATALOG_REMOTE"
 make catalog-init
 ```
 
-Run `codex login status` as the account running the worker. Restart the worker after initializing the catalog. The worker defaults to Codex when the catalog exists. Set `OPERATOR_MODEL=acknowledge` to keep acknowledgment-only behavior or use `OPERATOR_MODEL=simulated` for the deterministic acceptance scenario.
+The worker defaults to Codex when the catalog exists. If **Inspect → Workers** shows **Sign-in required**, choose **Connect** and follow the device sign-in steps. Queued model tasks resume when the worker is ready. Set `OPERATOR_MODEL=acknowledge` to keep acknowledgment-only behavior or use `OPERATOR_MODEL=simulated` for the deterministic acceptance scenario.
 
 Executable skills commit `skill.json`, `run.lua`, and `tests.json` together. The generic executor runs the retained entry point from the selected revision in a separate process. Self-tests supply mock command outputs. Live calls use dependency names and argument rules approved in `skill-dependencies.json` in the owner-controlled state directory. The acceptance runner supplies this file for its Docker fixtures. Catalog data can declare dependencies and can only call arguments permitted by that policy.
 

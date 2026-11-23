@@ -31,10 +31,11 @@ from .contracts import (
     Receipt,
     Snapshot,
     SupplyCredential,
+    WorkerAuthStatus,
     WorkerStatus,
 )
 from .credentials import CredentialError, Credentials
-from .ipc import wake_worker
+from .ipc import wake_worker, worker_auth
 from .operations import Operations, OperationUnavailable
 from .skill_program import SkillError, SkillRevision
 from .skills import Skills
@@ -253,17 +254,44 @@ def create_app(
         return setup.status()
 
     @app.get("/api/worker", dependencies=[Depends(owner)], responses={401: unauthorized})
-    def worker_status() -> WorkerStatus:
+    async def worker_status() -> WorkerStatus:
         report = read_worker_report(runtime)
-        count = store.queued_tasks()
+        count = await run_in_threadpool(store.queued_tasks)
         if report is None:
             return WorkerStatus(health="unreported", queued_tasks=count, report=None)
         age = (datetime.now(UTC) - report.last_heartbeat).total_seconds()
+        online = 0 <= age <= HEARTBEAT_MAX_AGE
+        auth = None
+        if online and report.mode == "codex" and report.uid != 0:
+            try:
+                auth = await worker_auth(runtime.socket, "status")
+            except (OSError, TimeoutError, ValueError):
+                auth = WorkerAuthStatus(state="unavailable", message="Worker did not respond.")
         return WorkerStatus(
-            health="online" if 0 <= age <= HEARTBEAT_MAX_AGE else "stale",
+            health="online" if online else "stale",
             queued_tasks=count,
             report=report,
+            auth=auth,
         )
+
+    @app.post(
+        "/api/worker/auth/{action}",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses={
+            401: unauthorized,
+            403: forbidden,
+            409: {"model": ApiError, "description": "Worker does not use Codex"},
+            503: {"model": ApiError, "description": "Worker unavailable"},
+        },
+    )
+    async def change_worker_auth(action: Literal["connect", "cancel"]) -> WorkerAuthStatus:
+        report = read_worker_report(runtime)
+        if report and (report.mode != "codex" or report.uid == 0):
+            raise HTTPException(409, "ChatGPT sign-in requires an unprivileged Codex worker")
+        try:
+            return await worker_auth(runtime.socket, action)
+        except (OSError, TimeoutError, ValueError) as error:
+            raise HTTPException(503, "The worker did not respond") from error
 
     @app.post(
         "/api/commands",

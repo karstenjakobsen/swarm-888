@@ -4,15 +4,16 @@ import os
 import socket
 import stat
 import time
-from contextlib import closing
+from contextlib import closing, suppress
 
 from .config import Settings
 from .goals import StandingGoals
-from .model import ModelError, ModelSession, codex_session, connect_skills
+from .model import ModelError, ModelSession, ModelSignInRequired, codex_session, connect_skills
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
 from .typed_catalogs import TypedCatalogs
+from .worker_auth import WorkerAuth
 from .worker_status import HEARTBEAT_INTERVAL, WorkerHeartbeat
 
 
@@ -28,6 +29,8 @@ class MessageWorker:
         if self.mode not in ("acknowledge", "codex", "simulated"):
             raise ValueError("OPERATOR_MODEL must be acknowledge, codex, or simulated")
         self.heartbeat = WorkerHeartbeat(settings, self.mode)
+        self.wake = asyncio.Event()
+        self.auth = WorkerAuth(settings.directory, self.wake.set)
 
     def default_mode(self) -> str:
         configured = self.settings.catalog_config.is_file() or TypedCatalogs(self.state).bindings()
@@ -69,7 +72,7 @@ class MessageWorker:
         async with codex_session(self.settings, task, self.state.profile()) as session:
             return await self.run_turn(session, task)
 
-    def drain(self):
+    async def drain(self):
         if (
             not self.configured_mode
             and self.mode == "acknowledge"
@@ -78,14 +81,21 @@ class MessageWorker:
             self.mode = "codex"
             self.heartbeat.report = self.heartbeat.report.model_copy(update={"mode": self.mode})
             self.heartbeat.next_beat = 0
-        while task := self.state.claim():
+        while True:
+            if self.mode == "codex":
+                self.auth.tick()
+            task = self.state.claim(
+                operations_only=self.mode == "codex" and self.auth.status.state != "ready"
+            )
+            if task is None:
+                return
             self.heartbeat.publish(task)
             try:
-                self.run_task(task)
+                await self.run_task(task)
             finally:
                 self.heartbeat.publish()
 
-    def run_task(self, task: str):
+    async def run_task(self, task: str):
         def pause(delay: float):
             self.heartbeat.publish(task)
             time.sleep(delay)
@@ -98,7 +108,10 @@ class MessageWorker:
             )
             return
         try:
-            answer = asyncio.run(self.answer_with_heartbeat(task))
+            answer = await self.answer_with_heartbeat(task)
+        except ModelSignInRequired as error:
+            self.auth.require_reconnect()
+            self.state.fail(task, str(error))
         except ModelError as error:
             self.state.fail(task, str(error))
         except (OSError, TimeoutError, ExceptionGroup) as error:
@@ -120,7 +133,35 @@ class MessageWorker:
                 turn.cancel()
                 await asyncio.gather(turn, return_exceptions=True)
 
+    async def handle_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            command = await asyncio.wait_for(reader.readline(), timeout=1)
+            if not command:
+                self.wake.set()
+                return
+            if self.mode != "codex" or os.geteuid() == 0:
+                return
+            if command == b"auth/connect\n":
+                self.auth.start()
+            elif command == b"auth/cancel\n":
+                self.auth.cancel()
+            elif command != b"auth/status\n":
+                return
+            writer.write(self.auth.status.model_dump_json().encode() + b"\n")
+            await writer.drain()
+        except (OSError, TimeoutError, ValueError):
+            pass
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
     def serve(self):
+        asyncio.run(self.serve_async())
+
+    async def serve_async(self):
         path = self.settings.socket
         with (
             self.settings.service_lock("worker"),
@@ -141,18 +182,19 @@ class MessageWorker:
                 if os.geteuid() == 0:
                     owner = self.settings.directory.stat()
                     os.chown(path, owner.st_uid, owner.st_gid)
-                server.listen()
-                server.settimeout(2)
-                while True:
-                    self.heartbeat.publish()
-                    self.drain()
-                    self.goals.run_due()
-                    try:
-                        connection, _ = server.accept()
-                        connection.close()
-                    except TimeoutError:
-                        continue
+                listener = await asyncio.start_unix_server(
+                    self.handle_connection, sock=server, limit=128
+                )
+                async with listener:
+                    while True:
+                        self.wake.clear()
+                        self.heartbeat.publish()
+                        await self.drain()
+                        self.goals.run_due()
+                        with suppress(TimeoutError):
+                            await asyncio.wait_for(self.wake.wait(), timeout=2)
             finally:
+                await self.auth.close()
                 path.unlink(missing_ok=True)
 
 
