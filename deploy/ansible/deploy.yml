@@ -10,6 +10,10 @@
     release: "/opt/swarm-operator-releases/{{ framework_revision }}"
     toolchain: /opt/swarm-operator-tools
     node_version: "24.18.0"
+    codex_version: "0.166.0"
+    codex_sha256: a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978
+    codex_dir: "{{ toolchain }}/codex-{{ codex_version }}"
+    codex_cli: "{{ codex_dir }}/codex-x86_64-unknown-linux-musl"
     uv_version: "0.12.5"
     operator_home: /var/lib/swarm-operator
     operator_state: "{{ operator_home }}/state"
@@ -67,11 +71,51 @@
         - {path: "{{ release }}", owner: root, mode: '0755'}
         - {path: "{{ toolchain }}", owner: root, mode: '0755'}
 
-    - name: Check Codex sign-in as the unprivileged worker
-      ansible.builtin.command:
-        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /usr/local/bin/codex, login, status]
-      changed_when: false
+    - name: Prepare Codex for the unprivileged worker
       when: operator_worker_mode == 'codex'
+      block:
+        - name: Create the pinned Codex installation directory
+          ansible.builtin.file:
+            path: "{{ codex_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: '0755'
+
+        - name: Download the checksum-pinned Codex release
+          ansible.builtin.get_url:
+            url: "https://github.com/openai/codex/releases/download/rust-v{{ codex_version }}/codex-x86_64-unknown-linux-musl.tar.gz"
+            dest: "{{ codex_cli }}.tar.gz"
+            checksum: "sha256:{{ codex_sha256 }}"
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Unpack the pinned Codex release
+          ansible.builtin.unarchive:
+            src: "{{ codex_cli }}.tar.gz"
+            dest: "{{ codex_dir }}"
+            remote_src: true
+            owner: root
+            group: root
+
+        - name: Check Codex sign-in as the unprivileged worker
+          ansible.builtin.command:
+            argv: [/usr/sbin/runuser, -u, swarm-operator, --, "{{ codex_cli }}", login, status]
+          changed_when: false
+          register: codex_login
+          failed_when: codex_login.rc != 0 and 'Not logged in' not in codex_login.stderr
+
+        - name: Require Codex sign-in before switching the worker
+          ansible.builtin.assert:
+            that: codex_login.rc == 0
+            fail_msg: |-
+              In a root terminal on the VPS, run this command.
+
+              /usr/sbin/runuser -u swarm-operator -- {{ codex_cli }} login --device-auth
+
+              Open the displayed link, enter the one-time code, and rerun this playbook.
+            quiet: true
 
     - name: Inspect release completion marker
       ansible.builtin.stat:
@@ -198,7 +242,10 @@
 
     - name: Install the private loopback settings
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../operator.env.example"
+        content: |
+          {% set settings = lookup('ansible.builtin.file', playbook_dir ~ '/../operator.env.example') %}
+          {{ settings | regex_replace('(?m)^OPERATOR_CODEX=.*$', 'OPERATOR_CODEX=' ~ codex_cli)
+             if operator_worker_mode == 'codex' else settings }}
         dest: /etc/swarm-operator/operator.env
         owner: root
         group: root

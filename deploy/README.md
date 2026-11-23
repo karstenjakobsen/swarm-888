@@ -16,11 +16,20 @@ From the repository root, run the single-host playbook with the pinned framework
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml
 ```
 
-For catalog authoring through the Operator API, select `codex` mode. Install `/usr/local/bin/codex` on the VPS and sign in as `swarm-operator` using the service account setup below. **Inspect → Worker** reports `codex` mode and the unprivileged worker identity after deployment.
+For catalog authoring through the Operator API, select `codex` mode. The playbook installs the pinned Codex CLI and checks sign-in as `swarm-operator` before switching the worker.
 
 ```sh
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e operator_worker_mode=codex
 ```
+
+If the playbook asks for sign-in, enable device code login in your ChatGPT security settings or ask your workspace admin to enable it. Run the command printed by the playbook from a root terminal on the VPS.
+
+```sh
+/usr/sbin/runuser -u swarm-operator -- \
+  /opt/swarm-operator-tools/codex-0.166.0/codex-x86_64-unknown-linux-musl login --device-auth
+```
+
+Open the link printed by Codex, sign in, and enter the one-time code in your browser. Rerun the deployment after sign-in succeeds. **Inspect → Worker** reports `codex` mode and the unprivileged worker identity. [Codex device sign-in](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
 Open the private tunnel from your workstation and visit [the operator UI](http://127.0.0.1:18080). Sign in with the owner key at `/var/lib/swarm-operator/state/owner.key`. Keep the local port at `18080` to match the configured browser origin.
 
@@ -105,7 +114,7 @@ sudo -u swarm-operator -H env \
 sudo -u swarm-operator -H /usr/local/bin/codex login status
 ```
 
-Run the ordinary Codex login flow as `swarm-operator` if the account lacks credentials. Keep the service account's SSH deploy credentials, Codex session, and owner key in its private home.
+Run `sudo -u swarm-operator -H /usr/local/bin/codex login --device-auth` if the service account needs to sign in. Keep the service account's SSH deploy credentials, Codex session, and owner key in its private home.
 
 ## Enable the units and tunnel
 
