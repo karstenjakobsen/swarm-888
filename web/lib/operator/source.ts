@@ -16,7 +16,10 @@ function liveEvent(e: API['Event']): OperatorEvent {
     case 'received': return { ...meta, type: 'task.received', data: { title: e.text, source: 'owner' } }
     case 'owner_message': return { ...meta, type: 'owner.message',
       data: { text: e.text, intent: e.data?.intent === 'steer' ? 'steer' : 'ask' } }
-    case 'started': return { ...meta, type: 'task.step', data: { summary: e.text } }
+    case 'started':
+      if (e.data?.action === 'owner_replied' || e.data?.action === 'answer_review')
+        return { ...meta, type: 'task.resumed', data: { reason: e.text, reviewingAnswer: e.data.action === 'answer_review' } }
+      return { ...meta, type: 'task.step', data: { summary: e.text } }
     case 'answered': return { ...meta, type: 'task.answered', data: { text: e.text } }
     case 'completed': return { ...meta, type: 'task.completed', data: { summary: e.text } }
     case 'failed':
@@ -32,6 +35,10 @@ function liveEvent(e: API['Event']): OperatorEvent {
 function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome'>, event: API['Event']): OperatorEvent {
   const step: OperatorEvent = { ...meta, type: 'task.step', data: { summary: event.text } }
   const data = event.data
+  if (event.kind === 'waiting' && data?.action === 'worker_signin')
+    return { ...meta, type: 'task.waiting', data: { on: 'sign-in', question: event.text } }
+  if (event.kind === 'waiting' && data?.action === 'reply_required')
+    return { ...meta, type: 'task.waiting', data: { on: 'reply', question: event.text } }
   if (typeof data?.goal === 'string') {
     const ref = {...meta.ref, goal: data.goal, incident: typeof data.incident === 'string' ? data.incident : undefined}
     if (data.action === 'goal_created' && typeof data.filename === 'string' && typeof data.expected === 'string') {

@@ -143,7 +143,7 @@ class State:
         self.path = settings.directory / "operator.sqlite3"
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 15:
+            if version > 16:
                 raise ValueError(f"Unsupported state schema {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -189,7 +189,38 @@ class State:
             if version < 15:
                 for statement in DNS_SCHEMA:
                     db.execute(statement)
-                db.execute("PRAGMA user_version=15")
+            if version < 16:
+                self.migrate_model_runs(db)
+                db.execute("PRAGMA user_version=16")
+
+    def migrate_model_runs(self, db: sqlite3.Connection) -> None:
+        db.execute("""CREATE TABLE model_runs(task TEXT PRIMARY KEY REFERENCES tasks(id),
+                   phase TEXT NOT NULL CHECK(phase IN ('active','legacy','waiting','reply')),
+                   turn_id TEXT, instruction TEXT)""")
+        db.execute("""CREATE INDEX IF NOT EXISTS events_task_seq ON events(task,seq)""")
+        db.execute("""INSERT INTO model_runs(task,phase)
+                   SELECT id,'legacy' FROM tasks WHERE checkpoint='running' AND thread_id IS NOT NULL
+                   AND EXISTS (SELECT 1 FROM events WHERE task=tasks.id
+                               AND json_extract(data,'$.mode')='codex')""")
+        # Only reopen a modeled completion whose actual answer is empty or punctuation.
+        rows = db.execute("""SELECT t.id,a.text FROM tasks t JOIN events a ON a.task=t.id
+            WHERE t.checkpoint='completed' AND t.thread_id IS NOT NULL AND a.kind='answered'
+            AND EXISTS (SELECT 1 FROM events WHERE task=t.id AND json_extract(data,'$.mode')='codex')
+            AND json_extract(a.data,'$.modeled')=1 AND EXISTS (
+                SELECT 1 FROM events c WHERE c.task=t.id AND c.seq>a.seq AND c.kind='completed')
+            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task=t.id AND e.seq>a.seq
+                AND e.kind IN ('verified','stopped','unknown','failed','answered'))""").fetchall()
+        for row in rows:
+            if not any(char.isalnum() for char in row["text"]):
+                db.execute("INSERT INTO model_runs(task,phase) VALUES (?,'legacy')", (row["id"],))
+                db.execute("UPDATE tasks SET checkpoint='running' WHERE id=?", (row["id"],))
+                self.append(
+                    db,
+                    row["id"],
+                    "started",
+                    "Checking the saved turn for the missing answer.",
+                    {"action": "answer_review"},
+                )
 
     @contextmanager
     def transaction(self, *, write: bool = False) -> Generator[sqlite3.Connection, None, None]:
@@ -254,7 +285,7 @@ class State:
             ).fetchone()
             return row[0] if row else None
 
-    def claim(self, *, operations_only: bool = False) -> str | None:
+    def claim(self, *, operations_only: bool = False, allow_model_runs: bool = True) -> str | None:
         with self.transaction(write=True) as db:
             row = db.execute(
                 """SELECT id,checkpoint FROM tasks WHERE checkpoint!='completed'
@@ -262,13 +293,24 @@ class State:
                                   AND NOT c.supplied)
                    AND NOT EXISTS(SELECT 1 FROM dns_requests AS d WHERE d.task=tasks.id
                                   AND d.phase='approval')
+                   AND NOT EXISTS(SELECT 1 FROM model_runs r WHERE r.task=tasks.id AND r.phase='waiting')
+                   AND (? OR NOT EXISTS(SELECT 1 FROM model_runs WHERE task=tasks.id))
                    AND (NOT ? OR EXISTS(SELECT 1 FROM operations WHERE task=tasks.id))
                    ORDER BY rowid LIMIT 1""",
-                (operations_only,),
+                (allow_model_runs, operations_only),
             ).fetchone()
             if row is None:
                 return None
             task = row["id"]
+            if db.execute(
+                "SELECT 1 FROM credential_requests WHERE task=? AND supplied AND resume_needed",
+                (task,),
+            ).fetchone():
+                db.execute(
+                    """UPDATE model_runs SET phase='reply',turn_id=NULL,instruction=?
+                           WHERE task=?""",
+                    ("The requested credential was supplied. Continue the pending read.", task),
+                )
             db.execute(
                 "UPDATE credential_requests SET resume_needed=0 WHERE task=? AND supplied",
                 (task,),
@@ -278,8 +320,71 @@ class State:
                 self.append(db, task, "started", "The worker picked up this message.")
             return task
 
+    def reserve_model_turn(self, task: str) -> tuple[str, str | None, str | None]:
+        """Commit dispatch intent before starting a tool-capable turn. Only the worker calls this."""
+        with self.transaction(write=True) as db:
+            run = db.execute(
+                "SELECT phase,turn_id,instruction FROM model_runs WHERE task=?", (task,)
+            ).fetchone()
+            if run and run["phase"] != "reply":
+                if run["phase"] != "waiting":
+                    last = db.execute(
+                        "SELECT kind,data FROM events WHERE task=? ORDER BY seq DESC LIMIT 1",
+                        (task,),
+                    ).fetchone()
+                    if (
+                        json.loads(last["data"]).get("action") != "answer_review"
+                        and last["kind"] != "failed"
+                    ):
+                        self.append(
+                            db,
+                            task,
+                            "started",
+                            "Checking the saved turn for a complete answer.",
+                            {"action": "answer_review"},
+                        )
+                return tuple(run)
+            db.execute(
+                """INSERT INTO model_runs(task,phase) VALUES (?,'active')
+                       ON CONFLICT(task) DO UPDATE SET phase='active',turn_id=NULL""",
+                (task,),
+            )
+            return "start", None, run["instruction"] if run else None
+
+    def wait_for_reply(self, task: str, question: str) -> None:
+        with self.transaction(write=True) as db:
+            if self.continue_steers(db, task):
+                return
+            changed = db.execute(
+                """UPDATE model_runs SET phase='waiting' WHERE task=? AND phase!='waiting'
+                AND EXISTS (SELECT 1 FROM tasks WHERE id=? AND checkpoint='running')
+                AND NOT EXISTS (SELECT 1 FROM credential_requests WHERE task=? AND resume_needed)""",
+                (task, task, task),
+            ).rowcount
+            if changed:
+                self.append(db, task, "waiting", question, {"action": "reply_required"})
+
+    def continue_steers(self, db: sqlite3.Connection, task: str) -> bool:
+        pending = db.execute(
+            """SELECT c.text FROM task_controls c JOIN model_runs r ON r.task=c.task
+                            JOIN tasks t ON t.id=c.task WHERE c.task=? AND c.kind='steer'
+                            AND NOT c.applied AND t.checkpoint='running' ORDER BY c.rowid""",
+            (task,),
+        ).fetchall()
+        if not pending:
+            return False
+        instruction = "\n".join(row["text"] for row in pending)
+        db.execute(
+            "UPDATE model_runs SET phase='reply',turn_id=NULL,instruction=? WHERE task=?",
+            (instruction, task),
+        )
+        db.execute("UPDATE task_controls SET applied=1 WHERE task=? AND kind='steer'", (task,))
+        return True
+
     def finish(self, task: str, answer: str, summary: str, *, modeled: bool = False):
         with self.transaction(write=True) as db:
+            if modeled and self.continue_steers(db, task):
+                return
             changed = db.execute(
                 """UPDATE tasks SET checkpoint='completed' WHERE id=? AND checkpoint='running'
                    AND NOT EXISTS(SELECT 1 FROM credential_requests WHERE task=tasks.id AND resume_needed)""",
@@ -331,6 +436,21 @@ class State:
                 self.append(db, task, "stopped", "The owner stopped this task.")
             else:
                 self.append(db, task, "owner_message", text, {"intent": "steer"})
+                if db.execute(
+                    """UPDATE model_runs SET phase='reply',instruction=(
+                              SELECT 'Your question: ' || text || char(10) || 'Owner reply: ' || ?
+                              FROM events WHERE task=? AND kind='waiting' ORDER BY seq DESC LIMIT 1),
+                              turn_id=NULL WHERE task=? AND phase='waiting'""",
+                    (text, task, task),
+                ).rowcount:
+                    db.execute("UPDATE task_controls SET applied=1 WHERE id=?", (str(request_id),))
+                    self.append(
+                        db,
+                        task,
+                        "started",
+                        "Continuing with your reply.",
+                        {"action": "owner_replied"},
+                    )
 
     def stopped(self, task: str) -> bool:
         with self.transaction() as db:
@@ -360,13 +480,16 @@ class State:
         with self.transaction() as db:
             return db.execute("SELECT thread_id FROM tasks WHERE id=?", (task,)).fetchone()[0]
 
-    def remember_thread(self, task: str, thread_id: str, mode: str) -> None:
+    def remember_thread(
+        self, task: str, thread_id: str, mode: str, turn_id: str | None = None
+    ) -> None:
         with self.transaction(write=True) as db:
             if not db.execute(
                 "SELECT 1 FROM tasks WHERE id=? AND checkpoint='running'", (task,)
             ).fetchone():
                 return
             db.execute("UPDATE tasks SET thread_id=? WHERE id=?", (thread_id, task))
+            db.execute("UPDATE model_runs SET turn_id=? WHERE task=?", (turn_id, task))
             self.append(
                 db, task, "evidence", f"Model mode: {mode}", {"action": "model", "mode": mode}
             )
@@ -397,6 +520,7 @@ class State:
                 # Evidence can arrive after the task has ended, including after verification.
                 if (
                     outcome.key == "working"
+                    and event.data.get("action") != "answer_review"
                     and previous
                     and previous.key not in ("working", "needs-you")
                 ):

@@ -353,7 +353,8 @@ export function apply(p: Projection, e: OperatorEvent): Projection {
   if (!outcome) return next
   return withTask(next, e.ref.task, (t) => {
     const previous = t.recordedOutcome
-    if (outcome.key === 'working' && previous && previous.key !== 'working' && previous.key !== 'needs-you') {
+    if (outcome.key === 'working' && previous && previous.key !== 'working' && previous.key !== 'needs-you'
+      && !(e.type === 'task.resumed' && e.data.reviewingAnswer)) {
       return t
     }
     return { ...t, recordedOutcome: outcome }
@@ -502,9 +503,11 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           title:
             e.data.on === 'credential'
               ? 'Paused: needs a credential'
+              : e.data.on === 'sign-in' ? 'Paused: sign in to the worker'
               : e.data.on === 'decision'
                 ? 'Paused: needs your decision'
                 : 'Paused: waiting for your reply',
+          detail: e.data.question,
           tone: 'attention',
         })(t),
         waiting: { ...e.data, seq: e.seq },
@@ -512,12 +515,14 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
     case 'task.resumed':
       return withTask(p, e.ref.task, (t) => ({
         ...trail<Task>({ ...base, kind: 'resumed', title: 'Resumed', detail: e.data.reason })(t),
+        ...(e.data.reviewingAnswer ? { completed: undefined, answer: undefined } : {}),
         waiting: undefined,
       }))
     case 'task.completed':
       return withTask(p, e.ref.task, (t) => ({
         ...trail<Task>({ ...base, kind: 'completed', title: 'Finished', detail: e.data.summary })(t),
         completed: { ...base, summary: e.data.summary },
+        waiting: undefined,
       }))
     case 'task.stopped':
       return withTask(p, e.ref.task, (t) => ({

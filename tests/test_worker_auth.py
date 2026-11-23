@@ -73,7 +73,7 @@ def test_worker_sign_in_keeps_the_queue_and_recovers_after_rejection(tmp_path):
         queued = submit()
         assert next(t for t in snapshot()["tasks"] if t["id"] == queued)["checkpoint"] == "queued"
         assert any(
-            event["kind"] == "failed" and event["task"] == rejected
+            event["data"].get("action") == "worker_signin" and event["task"] == rejected
             for event in snapshot()["events"]
         )
         assert client.post(connect, headers=headers(settings)).status_code == 200
@@ -87,6 +87,10 @@ def test_worker_sign_in_keeps_the_queue_and_recovers_after_rejection(tmp_path):
         )
 
         # Disconnect drains the current model turn and holds the next task.
+        assert any(
+            event["kind"] == "answered" and event["task"] == rejected
+            for event in snapshot()["events"]
+        )
         assert auth()["can_disconnect"] is True
         hold = tmp_path / "hold-turn"
         hold.touch()

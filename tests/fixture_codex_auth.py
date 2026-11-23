@@ -64,6 +64,8 @@ for line in sys.stdin:
         session.unlink(missing_ok=True)
     elif method == "thread/start":
         result = {"thread": {"id": "thread"}}
+    elif method == "thread/read":
+        result = {"thread": {"turns": []}}
     elif method == "turn/start":
         result = {"turn": {"id": "turn"}}
     send({"id": request["id"], "result": result})
@@ -83,5 +85,21 @@ for line in sys.stdin:
                     },
                 }
             )
-            turn = {"id": "turn", "status": "completed"}
+            turn = {
+                "id": "turn",
+                "status": "completed",
+                "items": [
+                    {
+                        "type": "agentMessage",
+                        "id": "answer",
+                        "phase": "final_answer",
+                        "text": json.dumps(
+                            {
+                                "status": "answered",
+                                "text": "The signed-in worker handled the queued task.",
+                            }
+                        ),
+                    }
+                ],
+            }
         send({"method": "turn/completed", "params": {"threadId": "thread", "turn": turn}})

@@ -114,12 +114,20 @@ class Event(BaseModel):
         if self.kind == "unknown":
             return Outcome(key="unknown", label="Outcome unknown", seq=self.seq, why=self.text)
         if self.kind == "waiting":
+            if self.data.get("action") == "worker_signin":
+                return Outcome(
+                    key="needs-you", label="Sign-in required", seq=self.seq, why=self.text
+                )
+            if self.data.get("action") == "reply_required":
+                return Outcome(
+                    key="needs-you", label="Waiting for you", seq=self.seq, why=self.text
+                )
             if self.data.get("action") == "dns_approval_required":
                 return Outcome(key="needs-you", label="Needs approval", seq=self.seq, why=self.text)
             return Outcome(key="needs-you", label="Needs a credential", seq=self.seq, why=self.text)
         if self.kind == "stopped":
             return Outcome(key="stopped", label="Stopped", seq=self.seq, why=self.text)
-        label = "Answered, awaiting verification" if self.data.get("modeled") else "Acknowledged"
+        label = "Answered" if self.data.get("modeled") else "Acknowledged"
         return Outcome(key="unverified", label=label, seq=self.seq, why=self.text)
 
 

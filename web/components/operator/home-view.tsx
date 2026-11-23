@@ -236,13 +236,13 @@ function NeedsYou({ items }: { items: NeedItem[] }) {
               </>
             ) : (
               <>
-                <Kicker icon={<MessageSquareReply className="size-3.5" aria-hidden="true" />} text="Waiting for your reply" />
-                <p className="text-pretty text-base font-medium leading-snug">{n.task.title}</p>
+                <Kicker icon={<MessageSquareReply className="size-3.5" aria-hidden="true" />} text={n.task.waiting?.on === 'sign-in' ? 'Sign-in required' : 'Waiting for your reply'} />
+                <p className="text-pretty text-base font-medium leading-snug">{n.task.waiting?.question ?? n.task.title}</p>
                 <Link
-                  href={`/work/${n.task.id}`}
+                  href={n.task.waiting?.on === 'sign-in' ? '/inspect?tab=worker' : `/work/${n.task.id}`}
                   className="flex min-h-11 items-center justify-center rounded-lg bg-attention px-4 text-sm font-medium text-attention-foreground hover:opacity-90"
                 >
-                  Open and reply
+                  {n.task.waiting?.on === 'sign-in' ? 'Reconnect worker' : 'Open and reply'}
                 </Link>
               </>
             )}

@@ -29,7 +29,8 @@ export function needsYou(p: Projection): NeedItem[] {
   }
   for (const id of p.taskOrder) {
     const t = p.tasks[id]
-    if (t.waiting?.on === 'reply' && !t.stopped) items.push({ kind: 'reply', id: t.id, task: t, at: t.lastAt })
+    if ((t.waiting?.on === 'reply' || t.waiting?.on === 'sign-in') && !isTaskFinished(t))
+      items.push({ kind: 'reply', id: t.id, task: t, at: t.lastAt })
   }
   return items
 }

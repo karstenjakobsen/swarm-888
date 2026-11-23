@@ -8,15 +8,26 @@ from collections.abc import Coroutine
 from contextlib import closing, suppress
 from typing import Any
 
+from pydantic import ValidationError
+
 from .config import Settings
 from .digitalocean import requested_zone
 from .dns_workflow import DnsWorkflow
 from .goals import StandingGoals
 from .memory_review import MemoryReview
-from .model import ModelError, ModelSession, ModelSignInRequired, codex_session, connect_skills
+from .model import (
+    ModelError,
+    ModelSession,
+    ModelSignInRequired,
+    TaskReply,
+    ThreadUnavailable,
+    codex_session,
+    connect_skills,
+)
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
+from .task_review import recover_reply
 from .typed_catalogs import TypedCatalogs
 from .worker_auth import WorkerAuth
 from .worker_status import HEARTBEAT_INTERVAL, WorkerHeartbeat
@@ -46,11 +57,28 @@ class MessageWorker:
         configured = self.settings.catalog_config.is_file() or TypedCatalogs(self.state).bindings()
         return "codex" if configured else "acknowledge"
 
-    async def run_turn(self, session: ModelSession, task: str) -> str | None:
-        text = self.state.text(task)
+    async def run_turn(
+        self, session: ModelSession, task: str, instruction: str | None = None
+    ) -> str | None:
+        text = instruction or self.state.text(task)
         thread_id = self.state.thread(task)
-        turn = await session.resume(thread_id, text) if thread_id else await session.start(text)
-        self.state.remember_thread(task, turn.thread_id, self.mode)
+        if self.state.stopped(task):
+            return None
+        if thread_id:
+            try:
+                turn = await session.resume(thread_id, text)
+            except ThreadUnavailable:
+                if not instruction:
+                    raise
+                thread_id = None
+        if not thread_id:
+            if instruction:
+                text = (
+                    f"Original request: {self.state.text(task)}\nPrevious work may have succeeded. "
+                    f"Continue only the requested follow-up.\n{instruction}"
+                )
+            turn = await session.start(text)
+        self.state.remember_thread(task, turn.thread_id, self.mode, turn.turn_id)
         result = asyncio.create_task(session.result(turn))
         try:
             while not result.done():
@@ -71,7 +99,7 @@ class MessageWorker:
                 result.cancel()
                 await asyncio.gather(result, return_exceptions=True)
 
-    async def answer(self, task: str) -> str | None:
+    async def answer(self, task: str, instruction: str | None = None) -> str | None:
         if self.mode == "simulated":
             async with connect_skills(self.settings, task) as session:
                 try:
@@ -80,7 +108,57 @@ class MessageWorker:
                     failure = error
             raise failure
         async with codex_session(self.settings, task, self.state.profile()) as session:
-            return await self.run_turn(session, task)
+            return await self.run_turn(session, task, instruction)
+
+    async def check_model_task(self, task: str) -> None:
+        phase, turn_id, instruction = self.state.reserve_model_turn(task)
+        if phase == "waiting":
+            return
+        errors = (ModelError, OSError, TimeoutError, ExceptionGroup, ValidationError)
+        try:
+            if phase == "start":
+                raw = await self.answer(task, instruction)
+                if raw is None:
+                    return
+                reply = TaskReply.model_validate_json(raw)
+            else:
+                reply = await recover_reply(self.state, task, turn_id, legacy=phase == "legacy")
+        except ModelSignInRequired:
+            self.auth.require_reconnect()
+            with self.state.transaction(write=True) as db:
+                if db.execute(
+                    """SELECT 1 FROM tasks WHERE id=? AND checkpoint='running'
+                               AND NOT EXISTS(SELECT 1 FROM credential_requests WHERE task=? AND resume_needed)""",
+                    (task, task),
+                ).fetchone():
+                    self.state.append(
+                        db,
+                        task,
+                        "waiting",
+                        "Reconnect the worker in Inspect → Workers. It will check this task after sign-in.",
+                        {"action": "worker_signin"},
+                    )
+            return
+        except errors:
+            if phase == "start":
+                # The durable dispatch marker makes the next queue scan inspect evidence
+                # instead of sending the owner's original instruction a second time.
+                return
+            self.state.wait_for_reply(
+                task,
+                "I couldn't recover a complete answer from the saved work. "
+                "Which part of the original request would you like me to retry?",
+            )
+            return
+        if reply.status == "needs_input":
+            self.state.wait_for_reply(task, reply.text)
+        else:
+            summary = (
+                "The operator completed the turn."
+                if phase == "start"
+                else "Recovered the answer from the saved work."
+            )
+            self.state.finish(task, reply.text, summary, modeled=True)
 
     async def drain(self):
         if (
@@ -95,7 +173,8 @@ class MessageWorker:
             if self.mode == "codex":
                 self.auth.tick()
             task = self.state.claim(
-                operations_only=self.mode == "codex" and self.auth.status.state != "ready"
+                operations_only=self.mode == "codex" and self.auth.status.state != "ready",
+                allow_model_runs=self.mode == "codex",
             )
             if task is None:
                 await self.review_memory_when_idle()
@@ -123,6 +202,9 @@ class MessageWorker:
         if zone := requested_zone(self.state.text(task)):
             await asyncio.to_thread(self.dns.run, task, zone)
             self.next_memory_review = 0.0
+            return
+        if self.mode == "codex":
+            await self.run_with_heartbeat(task, self.check_model_task(task))
             return
         try:
             answer = await self.run_with_heartbeat(task, self.answer(task))

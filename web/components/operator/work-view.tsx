@@ -35,8 +35,8 @@ export function WorkView({ id }: { id: string }) {
           <p className="text-muted-foreground">Nothing with this id in the operator&apos;s history.</p>
         )}
       </main>
-      {task && !isTaskFinished(task) && task.waiting?.on !== 'credential' && !task.waiting?.approval ? (
-        <Composer taskId={task.id} placeholder={task.waiting?.on === 'reply' ? 'Reply, e.g. "apply"' : 'Steer this task'} />
+      {task && !isTaskFinished(task) && task.waiting?.on !== 'credential' && task.waiting?.on !== 'sign-in' && !task.waiting?.approval ? (
+        <Composer taskId={task.id} placeholder={task.waiting?.on === 'reply' ? 'Reply to the operator' : 'Steer this task'} />
       ) : (
         <Composer />
       )}
@@ -233,6 +233,12 @@ function TaskDetail({ task, state }: { task: Task; state: Projection }) {
   return (
     <article className="flex flex-col gap-7">
       <Head kicker={`${sourceWord} · ${dayClock(task.receivedAt)}`} title={task.title} outcome={outcome} />
+      {task.waiting?.on === 'sign-in' && !isTaskFinished(task) && (
+        <Link href="/inspect?tab=worker" className="underline">Reconnect the worker to resume this task</Link>
+      )}
+      {task.waiting?.on === 'reply' && task.waiting.question && !isTaskFinished(task) && (
+        <Section title="Waiting for your reply"><p>{task.waiting.question}</p></Section>
+      )}
 
       {task.waiting?.approval && !isTaskFinished(task) && <DnsApproval task={task.id} approval={task.waiting.approval} />}
       {task.waiting?.on === 'credential' && cred && !cred.supplied && !isTaskFinished(task) ? (
