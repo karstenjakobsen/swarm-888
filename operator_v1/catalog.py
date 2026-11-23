@@ -17,6 +17,7 @@ from .config import Settings
 SEED_VERSION = 2
 SEED = Path(__file__).parent / "seed" / f"v{SEED_VERSION}"
 AUTHORING_SKILL = "create-skill"
+LEGACY_SEED_FILES = ("SKILL.md", "template.json")
 
 
 class CatalogError(RuntimeError):
@@ -199,7 +200,10 @@ class Catalog:
             if not (checkout / "seed.json").is_file():
                 if set(p.name for p in checkout.iterdir()) != {".git"}:
                     raise CatalogError("Add the foundational seed only to an empty catalog branch")
-                shutil.copytree(SEED / "skills", checkout / "skills")
+                directory = Path("skills") / AUTHORING_SKILL
+                (checkout / directory).mkdir(parents=True)
+                for name in LEGACY_SEED_FILES:
+                    shutil.copyfile(SEED / directory / name, checkout / directory / name)
                 for folder in ("connectors", "projects"):
                     (checkout / folder).mkdir()
                     (checkout / folder / ".gitkeep").touch()
@@ -219,7 +223,7 @@ class Catalog:
             config = CatalogConfig(
                 remote, branch, str(checkout), seed_version, seed_revision, deploy_key
             )
-            catalog.retain(AUTHORING_SKILL, seed_revision, "SKILL.md", "template.json")
+            catalog.retain(AUTHORING_SKILL, seed_revision, *LEGACY_SEED_FILES)
             with tempfile.NamedTemporaryFile(dir=settings.directory, mode="w") as pending:
                 json.dump(asdict(config), pending)
                 pending.flush()

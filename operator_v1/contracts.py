@@ -137,6 +137,7 @@ CatalogKind = Literal["skill", "connector", "project"]
 
 class BuiltinSkillInfo(BaseModel):
     skill: str
+    canonical_id: str
     name: str
     revision: str
     path: str
@@ -149,6 +150,7 @@ class CatalogItemInfo(BaseModel):
     path: str
     revision: str
     active_revision: str | None = None
+    guide: str | None = None
 
 
 class CatalogConnectionInfo(CatalogInfo):

@@ -8,7 +8,7 @@ from pydantic import JsonValue
 
 from .builtin_skills import builtin_guide, builtin_skills
 from .catalog import AUTHORING_SKILL, Catalog, display_remote
-from .catalog_manifest import CatalogItem, SkillManifest
+from .catalog_manifest import CatalogItem, ExecutableSkillManifest
 from .executor import load_dependencies
 from .skill_program import ExecutableProgram, SkillDefinition, SkillError
 from .state import State
@@ -243,8 +243,8 @@ class Skills:
         self, binding: CatalogBranch, item: CatalogItem, revision: str, *, authored: bool = False
     ) -> None:
         manifest, catalog = item.manifest, binding.catalog
-        if not isinstance(manifest, SkillManifest):
-            raise SkillError("Only skill manifests can be tested")
+        if not isinstance(manifest, ExecutableSkillManifest):
+            raise SkillError("Only executable skills can be tested and activated")
         skill = manifest.canonical_id
         parent = Path(item.path).parent
         purpose = manifest.purpose or manifest.name

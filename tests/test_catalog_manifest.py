@@ -115,6 +115,7 @@ def test_shallow_discovery_reads_the_committed_snapshot(catalog_layout):
     observed = json.loads(cli.stdout)
     assert observed["revision"] == revision
     assert [item["manifest"]["canonical_id"] for item in observed["items"]] == [skill_id]
+    assert "skill_type" not in observed["items"][0]["manifest"]
     assert manifest_file.read_text() == "invalid: ["
     manifest_file.write_bytes(original)
 

@@ -11,6 +11,8 @@ from operator_v1.catalog_publish import CatalogPublishing
 from operator_v1.config import Settings
 from operator_v1.contracts import CatalogPublishTips
 from operator_v1.model import connect_skills
+from operator_v1.skill_program import SkillError
+from operator_v1.skills import Skills
 from operator_v1.state import State
 from operator_v1.typed_catalogs import TypedCatalogs
 from operator_v1.worker import MessageWorker
@@ -32,9 +34,11 @@ def test_fresh_owner_connects_three_kinds_at_once(tmp_path, monkeypatch):
                 "connect-catalog",
             }
             authoring = await mcp.call_tool("skill_authoring_guide", {})
-            assert "/seed/" in authoring.structuredContent["path"]
+            assert authoring.structuredContent["path"].endswith("/create-skill/operator.yaml")
+            assert authoring.structuredContent["template"]["definition"]["program"]
             setup = await mcp.call_tool("catalog_connection_guide", {})
             assert "Inspect" in setup.structuredContent["guide"]
+            assert setup.structuredContent["path"].endswith("/connect-catalog/operator.yaml")
 
     asyncio.run(guides())
     payload = {"remote": REPO, "kinds": ["skill", "connector", "project"]}
@@ -46,6 +50,10 @@ def test_fresh_owner_connects_three_kinds_at_once(tmp_path, monkeypatch):
         status = client.get("/api/catalog").json()
         assert status["connections"] == []
         assert [item["skill"] for item in status["builtins"]] == ["create-skill", "connect-catalog"]
+        assert [item["canonical_id"] for item in status["builtins"]] == [
+            "swarm-skill-create-skill",
+            "swarm-skill-connect-catalog",
+        ]
         assert client.post("/api/catalog", json=payload).status_code == 403
         for _ in range(2):
             reply = client.post("/api/catalog", json=payload, headers=headers(settings))
@@ -59,6 +67,47 @@ def test_fresh_owner_connects_three_kinds_at_once(tmp_path, monkeypatch):
     assert len(list((settings.directory / "typed-catalogs").iterdir())) == 1
     assert len(list(settings.directory.glob("catalog-*.lock"))) == 1
     assert run_git("rev-parse", "main", cwd=remote).stdout.strip() == revision
+
+
+def test_catalog_guides_are_discovered_and_published_with_their_assets(tmp_path):
+    remote, _ = typed_remote(tmp_path / "fixture")
+    state = State(Settings(tmp_path / "state"))
+    catalogs = TypedCatalogs(state)
+    binding = catalogs.connect(str(remote), "main", ["skill"], publisher=PUBLISHER)
+    catalog = binding.catalog
+    fields = {"skill_type": "guide", "name": "Fixture guide", "guide": "SKILL.md"}
+    with pytest.raises(CatalogError, match="Invalid guide template"):
+        catalogs.write_item(
+            "skill",
+            "guide",
+            {**fields, "template": "template.json"},
+            files={"SKILL.md": "Read this first.\n", "template.json": "[]"},
+        )
+    assert catalog.git("status", "--porcelain") == ""
+
+    _, item, revision = catalogs.write_item(
+        "skill", "guide", fields, files={"SKILL.md": "Read this first.\n"}
+    )
+    identity = item.manifest.canonical_id
+    guide = next(item for item in catalogs.status()[0].items if item.canonical_id == identity)
+    assert guide.guide == "Read this first.\n"
+    assert guide.active_revision is None
+    with pytest.raises(SkillError, match="Only executable skills"):
+        Skills(None, state).test(identity, revision)
+
+    (catalog.checkout / "guide/SKILL.md").write_text("Read the updated guide.\n")
+    catalog.git("commit", "-am", "Update the guide text")
+    publishing = CatalogPublishing(state)
+    preview = publishing.preview(catalog.branch_id)
+    assert preview.commits[-1].paths == ["guide/SKILL.md"]
+    assert preview.items[0].paths == ["guide/SKILL.md", "guide/operator.yaml"]
+    publishing.publish(
+        catalog.branch_id,
+        CatalogPublishTips(
+            local_revision=preview.local_revision, remote_revision=preview.remote_revision
+        ),
+    )
+    assert run_git("rev-parse", "main", cwd=remote).stdout.strip() == preview.local_revision
 
 
 def test_different_repositories_and_explicit_switch(tmp_path):

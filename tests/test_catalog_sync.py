@@ -117,6 +117,12 @@ def test_seed_empty_main_and_retry_push(tmp_path, monkeypatch):
             Catalog.initialize(settings, str(remote), "main", checkout)
     assert not settings.catalog_config.exists()
     seed = run_git("rev-parse", "HEAD", cwd=checkout).stdout.strip()
+    assert run_git(
+        "ls-tree", "-r", "--name-only", seed, "skills", cwd=checkout
+    ).stdout.splitlines() == [
+        "skills/create-skill/SKILL.md",
+        "skills/create-skill/template.json",
+    ]
     assert run_git("rev-parse", "HEAD^", cwd=checkout).stdout.strip() == initial
     assert run_git("rev-parse", "main", cwd=remote).stdout.strip() == initial
 

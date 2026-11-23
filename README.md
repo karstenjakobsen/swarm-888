@@ -53,7 +53,9 @@ Executable skills commit `skill.json`, `run.lua`, and `tests.json` together. The
 
 For a legacy catalog, use `make catalog-pull` to fast-forward the clean checkout and `make catalog-push` to publish its commits. A divergent remote leaves the local branch and the fetched branch intact for a normal Git merge. Previously activated revisions run from retained contents during an outage. Legacy project definitions live at `projects/<id>.json`.
 
-To inspect typed YAML manifests, run `.venv/bin/python -m operator_v1.catalog_cli discover`. It reads `operator.yaml` at the root and in immediate subfolders of the accepted catalog commit. Use `--revision <full-sha>` to inspect another local commit and `--kind skill` to select a kind. A skill references a sibling Lua file and a sibling JSON self-test file. Discovery reports committed contents and leaves the checkout and active revisions untouched.
+To inspect typed YAML manifests, run `.venv/bin/python -m operator_v1.catalog_cli discover`. It reads `operator.yaml` at the root and in immediate subfolders of the accepted catalog commit. Use `--revision <full-sha>` to inspect another local commit and `--kind skill` to select a kind. Discovery reports committed contents and leaves the checkout and active revisions untouched.
+
+The default `skill_type` is `executable`, which requires a sibling Lua file and a sibling JSON self-test file. A skill with `skill_type: guide` references a sibling Markdown file through `guide` and can reference a sibling JSON object through `template`. The framework loads the bundled `create-skill` and `connect-catalog` guides from the same manifest format before a catalog is connected.
 
 In **Inspect → Catalog**, enter the repository and branch once and select the kinds that share it. **Pull branch** refreshes discovery and keeps active skill revisions pinned. **Preview publish** shows every outgoing commit and path, including connector or project files on a branch connected only for skills. Use **Publish reviewed commits** after reviewing the branch preview.
 

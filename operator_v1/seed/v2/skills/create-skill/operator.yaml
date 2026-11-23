@@ -1,0 +1,8 @@
+schema_version: 1
+kind: skill
+canonical_id: swarm-skill-create-skill
+name: Create a skill
+purpose: Create, test, and activate a reusable executable skill.
+skill_type: guide
+guide: SKILL.md
+template: template.json

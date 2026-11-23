@@ -92,7 +92,13 @@ export function CatalogTab() {
                   {item.name}
                   <p className="break-all font-mono text-xs text-muted-foreground">{item.canonical_id} · {item.path}</p>
                   {item.active_revision && <p className="break-all font-mono text-xs">Active · {item.active_revision}</p>}
-                  {connection.kind === 'skill' && item.active_revision !== item.revision && (
+                  {item.guide != null && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-sm font-medium">Read guide</summary>
+                      <p className="mt-2 whitespace-pre-wrap text-sm">{item.guide}</p>
+                    </details>
+                  )}
+                  {connection.kind === 'skill' && item.guide == null && item.active_revision !== item.revision && (
                     <button className={`${button} mt-1`} disabled={busy} onClick={() => void perform(() => activateCatalogSkill(item.canonical_id, item.revision))}>Test and activate</button>
                   )}
                 </li>

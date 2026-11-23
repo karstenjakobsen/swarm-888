@@ -9,11 +9,14 @@ from .catalog import Catalog, CatalogConfig, CatalogError, display_remote, run_g
 from .catalog_manifest import (
     EXECUTABLE_TESTS,
     MANIFEST,
+    MANIFEST_FILE,
     CatalogItem,
     CatalogSnapshot,
-    SkillManifest,
+    ExecutableSkillManifest,
+    GuideSkillManifest,
     assign_canonical_id,
     discover_catalog,
+    read_guide,
 )
 from .config import Settings
 from .contracts import CatalogConnectionInfo, CatalogItemInfo, CatalogKind
@@ -162,6 +165,7 @@ class TypedCatalogs:
         if binding is None:
             raise CatalogError(f"Connect a {kind} catalog before saving an item")
         catalog = binding.catalog
+        files = files or {}
         with catalog.locked():
             if catalog.git("status", "--porcelain"):
                 raise CatalogError("Catalog checkout has local changes")
@@ -175,7 +179,7 @@ class TypedCatalogs:
             current = items.get(canonical_id)
             if current and current.manifest.kind != kind:
                 raise CatalogError("An existing catalog item has a different kind")
-            relative = Path(current.path) if current else Path(item) / "operator.yaml"
+            relative = Path(current.path) if current else Path(item) / MANIFEST_FILE
             if not current and (catalog.checkout / relative.parent).exists():
                 raise CatalogError(f"Choose an unused item directory for {item}")
             try:
@@ -184,20 +188,22 @@ class TypedCatalogs:
                 )
             except ValidationError as error:
                 raise CatalogError("The catalog item does not match its manifest schema") from error
-            if isinstance(manifest, SkillManifest):
-                if not files or set(files) != {manifest.entrypoint, manifest.tests}:
-                    raise CatalogError(
-                        "Supply the skill executable and tests declared by the manifest"
-                    )
+            guide = None
+            if isinstance(manifest, (ExecutableSkillManifest, GuideSkillManifest)):
+                if set(files) != set(manifest.assets):
+                    raise CatalogError("Supply the skill assets declared by the manifest")
+            elif files:
+                raise CatalogError("Only skill manifests declare assets")
+            if isinstance(manifest, ExecutableSkillManifest):
                 try:
                     EXECUTABLE_TESTS.validate_json(files[manifest.tests])
                 except ValidationError:
                     raise CatalogError("Supply valid executable self-tests") from None
-            elif files:
-                raise CatalogError("Only skill manifests declare executable assets")
+            elif isinstance(manifest, GuideSkillManifest):
+                guide, _ = read_guide(manifest, files.__getitem__, relative.parent.as_posix() + "/")
             contents = {
                 relative: yaml.safe_dump(manifest.model_dump(exclude_none=True), sort_keys=False),
-                **{relative.parent / name: text for name, text in (files or {}).items()},
+                **{relative.parent / name: text for name, text in files.items()},
             }
             paths = [str(path) for path in contents]
             before = {}
@@ -236,7 +242,11 @@ class TypedCatalogs:
                 discover_catalog(catalog, head)
             self.accept(catalog, head)
             revision = catalog.git("log", "-n", "1", "--format=%H", "--", *paths).strip()
-            return binding, CatalogItem(path=relative.as_posix(), manifest=manifest), revision
+            return (
+                binding,
+                CatalogItem(path=relative.as_posix(), manifest=manifest, guide=guide),
+                revision,
+            )
 
     @staticmethod
     def check_bindings(db, kinds: list[CatalogKind], branch_id: str, replace: bool) -> None:
@@ -348,8 +358,9 @@ class TypedCatalogs:
                     path=item.path,
                     revision=snapshot.revision,
                     active_revision=active.get(item.manifest.canonical_id)
-                    if kind == "skill"
+                    if isinstance(item.manifest, ExecutableSkillManifest)
                     else None,
+                    guide=item.guide,
                 )
                 for item in snapshot.items
                 if item.manifest.kind == kind

@@ -2,7 +2,12 @@ from collections import defaultdict
 from pathlib import PurePosixPath
 
 from .catalog import Catalog, CatalogError
-from .catalog_manifest import CatalogItem, SkillManifest, discover_catalog
+from .catalog_manifest import (
+    CatalogItem,
+    ExecutableSkillManifest,
+    GuideSkillManifest,
+    discover_catalog,
+)
 from .contracts import (
     CatalogPendingCommit,
     CatalogPendingItem,
@@ -15,11 +20,9 @@ from .typed_catalogs import TypedCatalogs
 
 def item_paths(item: CatalogItem) -> set[str]:
     paths = {item.path}
-    if isinstance(item.manifest, SkillManifest):
+    if isinstance(item.manifest, (ExecutableSkillManifest, GuideSkillManifest)):
         directory = PurePosixPath(item.path).parent
-        paths.update(
-            str(directory / file) for file in (item.manifest.entrypoint, item.manifest.tests)
-        )
+        paths.update(str(directory / file) for file in item.manifest.assets)
     return paths
 
 
@@ -29,11 +32,11 @@ def snapshot_items(catalog: Catalog, revision: str) -> dict[str, CatalogItem]:
 
 def skill_contents(catalog: Catalog, revision: str, item: CatalogItem) -> tuple:
     manifest = item.manifest
-    assert isinstance(manifest, SkillManifest)
+    assert isinstance(manifest, ExecutableSkillManifest)
     directory = PurePosixPath(item.path).parent
     return manifest, *(
         catalog.git("rev-parse", f"{revision}:{directory / name}").strip()
-        for name in (manifest.entrypoint, manifest.tests)
+        for name in manifest.assets
     )
 
 
@@ -181,13 +184,13 @@ class CatalogPublishing:
         base = snapshot_items(catalog, tips.remote_revision)
         final = snapshot_items(catalog, tips.local_revision)
         for identity, item in final.items():
-            if not isinstance(item.manifest, SkillManifest):
+            if not isinstance(item.manifest, ExecutableSkillManifest):
                 continue
             desired = skill_contents(catalog, tips.local_revision, item)
             old = base.get(identity)
             if (
                 old
-                and isinstance(old.manifest, SkillManifest)
+                and isinstance(old.manifest, ExecutableSkillManifest)
                 and (skill_contents(catalog, tips.remote_revision, old) == desired)
             ):
                 continue
@@ -197,7 +200,7 @@ class CatalogPublishing:
                     pinned = snapshot_items(catalog, active).get(identity)
                     if (
                         pinned
-                        and isinstance(pinned.manifest, SkillManifest)
+                        and isinstance(pinned.manifest, ExecutableSkillManifest)
                         and skill_contents(catalog, active, pinned) == desired
                     ):
                         continue

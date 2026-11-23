@@ -1,13 +1,17 @@
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, Literal, get_args
 
 import yaml
 from pydantic import (
     BaseModel,
+    Discriminator,
     Field,
     JsonValue,
     StringConstraints,
+    Tag,
     TypeAdapter,
     ValidationError,
     field_serializer,
@@ -23,11 +27,13 @@ from .skill_program import ExecutableProgram, ExecutableTest, Revision, SkillId
 from .tool_types import ToolArguments
 
 CATALOG_KINDS = get_args(CatalogKind)
+MANIFEST_FILE = "operator.yaml"
 ID_PART = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 ID_PATTERN = rf"^{ID_PART}-(?:skill|connector|project)-{ID_PART}$"
 CanonicalId = Annotated[str, StringConstraints(pattern=ID_PATTERN)]
 LuaFile = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.lua$")]
-TestFile = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.json$")]
+JsonFile = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.json$")]
+MarkdownFile = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$")]
 
 
 def assign_canonical_id(publisher: str, kind: CatalogKind, slug: str) -> str:
@@ -49,16 +55,35 @@ class ManifestHeader(ToolArguments):
 class SkillManifest(ManifestHeader):
     kind: Literal["skill"]
     purpose: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class ExecutableSkillManifest(SkillManifest):
+    # Use the implicit executable type when writing version 1 manifests.
+    skill_type: Literal["executable"] = Field(default="executable", exclude=True)
     procedure: list[str] = Field(default_factory=list, max_length=20)
     entrypoint: LuaFile
-    tests: TestFile
+    tests: JsonFile
     dependencies: list[SkillId] = Field(default_factory=list, max_length=8)
     input_schema: dict[str, JsonValue]
+
+    @property
+    def assets(self) -> tuple[str, ...]:
+        return self.entrypoint, self.tests
 
     @field_validator("input_schema")
     @classmethod
     def valid_input_schema(cls, schema: dict[str, JsonValue]) -> dict[str, JsonValue]:
         return ExecutableProgram.valid_schema(schema)
+
+
+class GuideSkillManifest(SkillManifest):
+    skill_type: Literal["guide"]
+    guide: MarkdownFile
+    template: JsonFile | None = None
+
+    @property
+    def assets(self) -> tuple[str, ...]:
+        return (self.guide, self.template) if self.template else (self.guide,)
 
 
 class ConnectorManifest(ManifestHeader, ConnectorDefinition):
@@ -73,17 +98,29 @@ class ProjectManifest(ManifestHeader, ProjectDefinition):
         return display_remote(repo)
 
 
-Manifest = Annotated[
-    SkillManifest | ConnectorManifest | ProjectManifest, Field(discriminator="kind")
+def skill_type(value: object) -> str | None:
+    if isinstance(value, dict):
+        tag = value.get("skill_type", "executable")
+        return tag if isinstance(tag, str) else None
+    return getattr(value, "skill_type", None)
+
+
+Skill = Annotated[
+    Annotated[ExecutableSkillManifest, Tag("executable")]
+    | Annotated[GuideSkillManifest, Tag("guide")],
+    Discriminator(skill_type),
 ]
+Manifest = Annotated[Skill | ConnectorManifest | ProjectManifest, Field(discriminator="kind")]
 MANIFEST = TypeAdapter(Manifest)
 EXECUTABLE_TESTS = TypeAdapter(Annotated[list[ExecutableTest], Field(min_length=1, max_length=40)])
+GUIDE_TEMPLATE = TypeAdapter(dict[str, JsonValue])
 COMMIT_SHA = TypeAdapter(Revision)
 
 
 class CatalogItem(BaseModel):
     path: str
     manifest: Manifest
+    guide: str | None = Field(default=None, exclude=True)
 
 
 class CatalogSnapshot(BaseModel):
@@ -138,9 +175,10 @@ def regular_file(entries: dict[str, TreeEntry], filename: str, path: str) -> Tre
     return entry
 
 
-def read_manifest(catalog: Catalog, entry: TreeEntry, path: str) -> Manifest:
+def read_manifest(read_file: Callable[[str], str], prefix: str) -> Manifest:
+    path = prefix + MANIFEST_FILE
     try:
-        data = yaml.load(catalog.git("cat-file", "blob", entry.object_id), Loader=ManifestLoader)
+        data = yaml.load(read_file(MANIFEST_FILE), Loader=ManifestLoader)
     except (yaml.YAMLError, UnicodeError, RecursionError):
         raise CatalogError(f"Invalid YAML manifest at {path}") from None
     try:
@@ -153,6 +191,27 @@ def read_manifest(catalog: Catalog, entry: TreeEntry, path: str) -> Manifest:
             }
         )
         raise CatalogError(f"Invalid manifest at {path} ({', '.join(fields)})") from None
+
+
+def read_guide(
+    manifest: GuideSkillManifest, read_file: Callable[[str], str], prefix: str
+) -> tuple[str, dict[str, JsonValue] | None]:
+    try:
+        guide = read_file(manifest.guide)
+    except UnicodeError:
+        raise CatalogError(f"Invalid Markdown guide at {prefix}{manifest.guide}") from None
+    if manifest.template is None:
+        return guide, None
+    try:
+        template = GUIDE_TEMPLATE.validate_json(read_file(manifest.template))
+    except (ValidationError, UnicodeError):
+        raise CatalogError(f"Invalid guide template at {prefix}{manifest.template}") from None
+    return guide, template
+
+
+def read_blob(catalog: Catalog, entries: dict[str, TreeEntry], prefix: str, name: str) -> str:
+    entry = regular_file(entries, name, prefix + name)
+    return catalog.git("cat-file", "blob", entry.object_id)
 
 
 def discover_catalog(
@@ -174,24 +233,27 @@ def discover_catalog(
     )
     items: dict[str, CatalogItem] = {}
     for prefix, entries in locations:
-        if "operator.yaml" not in entries:
+        if MANIFEST_FILE not in entries:
             continue
-        path = prefix + "operator.yaml"
-        manifest = read_manifest(catalog, regular_file(entries, "operator.yaml", path), path)
+        path = prefix + MANIFEST_FILE
+        read_file = partial(read_blob, catalog, entries, prefix)
+        manifest = read_manifest(read_file, prefix)
         previous = items.get(manifest.canonical_id)
         if previous:
             raise CatalogError(
                 f"Duplicate canonical ID {manifest.canonical_id} in {previous.path} and {path}"
             )
-        if isinstance(manifest, SkillManifest):
+        guide = None
+        if isinstance(manifest, ExecutableSkillManifest):
             regular_file(entries, manifest.entrypoint, prefix + manifest.entrypoint)
             tests_path = prefix + manifest.tests
-            tests = regular_file(entries, manifest.tests, tests_path)
             try:
-                EXECUTABLE_TESTS.validate_json(catalog.git("cat-file", "blob", tests.object_id))
+                EXECUTABLE_TESTS.validate_json(read_file(manifest.tests))
             except (ValidationError, UnicodeError):
                 raise CatalogError(f"Invalid executable self-tests at {tests_path}") from None
-        items[manifest.canonical_id] = CatalogItem(path=path, manifest=manifest)
+        elif isinstance(manifest, GuideSkillManifest):
+            guide, _ = read_guide(manifest, read_file, prefix)
+        items[manifest.canonical_id] = CatalogItem(path=path, manifest=manifest, guide=guide)
 
     return CatalogSnapshot(
         repo=display_remote(catalog.config.remote),

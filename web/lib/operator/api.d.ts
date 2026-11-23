@@ -258,6 +258,8 @@ export interface components {
         BuiltinSkillInfo: {
             /** Skill */
             skill: string;
+            /** Canonical Id */
+            canonical_id: string;
             /** Name */
             name: string;
             /** Revision */
@@ -339,6 +341,8 @@ export interface components {
             revision: string;
             /** Active Revision */
             active_revision?: string | null;
+            /** Guide */
+            guide?: string | null;
         };
         /** CatalogItemWrite */
         CatalogItemWrite: {
