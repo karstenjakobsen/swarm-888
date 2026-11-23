@@ -13,11 +13,19 @@ import type { Goal, Projection, Skill } from '@/lib/operator/project'
 import { cn } from '@/lib/utils'
 
 export function HomeView() {
-  const { state, loaded } = useOperator()
+  const { state, loaded, mode, catalog } = useOperator()
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader />
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 pb-8 pt-5">
+        {loaded && mode === 'live' && !catalog && (
+          <section className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card p-4">
+            <p className="text-sm text-muted-foreground">Connect a Git repository to give the operator a catalog for its skills.</p>
+            <Link className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" href="/inspect?tab=catalog">
+              Connect a catalog
+            </Link>
+          </section>
+        )}
         {loaded ? <Home state={state} /> : <Loading />}
       </main>
       <Composer />

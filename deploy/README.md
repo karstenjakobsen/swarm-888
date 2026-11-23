@@ -18,13 +18,15 @@ ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-21
 
 Open **Inspect → Worker** after signing in to see the worker's heartbeat, active task, queue depth, and runtime details. The tab refreshes about every three seconds. A heartbeat older than 30 seconds is shown as stale.
 
+On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore. The deployed root fixture worker runs in acknowledgment mode.
+
 The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.
 
 ```sh
-ansible-playbook -i server-212, deploy/ansible/deploy.yml -e framework_revision=13f38198f37d320d397e4bec260400bf51924f6a
+ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
 ansible-playbook -i server-212, deploy/ansible/acceptance.yml
 ansible-playbook -i server-212, deploy/ansible/reboot.yml -e '{"operator_reboot_authorized":true}'
-ansible-playbook -i server-212, deploy/ansible/deploy.yml -e framework_revision=13f38198f37d320d397e4bec260400bf51924f6a
+ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
 ansible-playbook -i server-212, deploy/ansible/acceptance.yml -e acceptance_phase=after
 ```
 

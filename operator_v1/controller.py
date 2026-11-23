@@ -4,18 +4,21 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .catalog import Catalog, display_remote
+from .catalog import Catalog, CatalogError, display_remote
+from .catalog_setup import CatalogSetup
 from .config import Settings
 from .contracts import (
     ApiError,
+    CatalogConnection,
     CatalogInfo,
+    CatalogStatus,
     DockerStart,
     OwnerLogin,
     OwnerMessage,
@@ -68,6 +71,10 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_request: Request, _error: RequestValidationError):
         return JSONResponse({"detail": "Invalid request"}, status_code=422)
+
+    @app.exception_handler(CatalogError)
+    async def catalog_error(_request: Request, error: CatalogError):
+        return JSONResponse({"detail": str(error)}, status_code=409)
 
     @app.middleware("http")
     async def private_response(request: Request, call_next):
@@ -145,6 +152,42 @@ def create_app(
                 remote=display_remote(config.remote), branch=config.branch
             )
         return snapshot
+
+    @app.get("/api/catalog", dependencies=[Depends(owner)], responses={401: unauthorized})
+    def catalog_status() -> CatalogStatus:
+        return CatalogSetup(runtime, store).status()
+
+    catalog_mutation = {
+        401: unauthorized,
+        403: forbidden,
+        409: {"model": ApiError, "description": "Catalog setup could not complete"},
+    }
+
+    @app.post(
+        "/api/catalog",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def connect_catalog(body: CatalogConnection) -> CatalogStatus:
+        setup = CatalogSetup(runtime, store)
+        setup.connect(body)
+        wake_worker(runtime.socket)
+        return setup.status()
+
+    @app.post(
+        "/api/catalog/{action}",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def catalog_action(action: Literal["key", "check", "publish"]) -> CatalogStatus:
+        setup = CatalogSetup(runtime, store)
+        if action == "key":
+            setup.generate_key()
+        elif action == "check":
+            setup.check_read()
+        else:
+            setup.publish()
+        return setup.status()
 
     @app.get("/api/worker", dependencies=[Depends(owner)], responses={401: unauthorized})
     def worker_status() -> WorkerStatus:

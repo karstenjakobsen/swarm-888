@@ -132,6 +132,37 @@ class CatalogInfo(BaseModel):
     branch: str
 
 
+class CatalogConnection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    remote: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            max_length=255,
+            pattern=r"^git@github\.com:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+\.git$",
+        ),
+    ]
+    branch: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+    ] = "main"
+    deploy_key: bool = False
+    seed_if_empty: bool = False
+
+
+class CatalogSync(BaseModel):
+    remote_revision: str | None = None
+    read_error: str | None = None
+    published_revision: str | None = None
+    publish_error: str | None = None
+
+
+class CatalogStatus(CatalogSync):
+    catalog: CatalogInfo | None = None
+    local_revision: str | None = None
+    authoring_revision: str | None = None
+    public_key: str | None = None
+
+
 class Snapshot(BaseModel):
     profile: Profile
     cursor: int = Field(ge=0)

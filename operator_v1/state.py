@@ -198,6 +198,13 @@ class State:
         with self.transaction() as db:
             return db.execute("SELECT count(*) FROM tasks WHERE checkpoint='queued'").fetchone()[0]
 
+    def active_skill_revision(self, skill: str) -> str | None:
+        with self.transaction() as db:
+            row = db.execute(
+                "SELECT revision FROM active_skills WHERE skill=?", (skill,)
+            ).fetchone()
+            return row[0] if row else None
+
     def claim(self) -> str | None:
         with self.transaction(write=True) as db:
             row = db.execute(

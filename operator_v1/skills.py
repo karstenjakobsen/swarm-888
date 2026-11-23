@@ -24,15 +24,21 @@ class Skills:
         if self.task:
             self.state.append(db, self.task, "evidence", summary, {"action": action, **fields})
 
-    def install_seed(self) -> None:
+    def install_seed(self, *, replace: bool = False) -> None:
         with self.state.transaction(write=True) as db:
             self.register(
                 db, AUTHORING_SKILL, self.catalog.config.seed_revision, "Learn a reusable skill"
             )
-            db.execute(
-                "INSERT OR IGNORE INTO active_skills VALUES (?,?)",
-                (AUTHORING_SKILL, self.catalog.config.seed_revision),
-            )
+            if replace:
+                db.execute(
+                    "INSERT INTO active_skills VALUES (?,?) ON CONFLICT(skill) DO UPDATE SET revision=excluded.revision",
+                    (AUTHORING_SKILL, self.catalog.config.seed_revision),
+                )
+            else:
+                db.execute(
+                    "INSERT OR IGNORE INTO active_skills VALUES (?,?)",
+                    (AUTHORING_SKILL, self.catalog.config.seed_revision),
+                )
 
     def register(
         self, db, skill: str, revision: str, description: str, source: str = "authoring"

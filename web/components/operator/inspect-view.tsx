@@ -6,12 +6,13 @@ import { KeyRound, Search } from 'lucide-react'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { WorkerTab } from './worker-tab'
+import { CatalogTab } from './catalog-tab'
 import { current, lastUse, memoryKind, Rev, sourceOf } from './inspect-parts'
 import type { Projection } from '@/lib/operator/project'
 import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
-export type InspectTab = 'memory' | 'skills' | 'connectors' | 'projects' | 'worker'
+export type InspectTab = 'memory' | 'skills' | 'connectors' | 'projects' | 'worker' | 'catalog'
 
 const tabs: { id: InspectTab; label: string; count?: (s: Projection) => number }[] = [
   { id: 'memory', label: 'Memory', count: (s) => s.memoryOrder.length },
@@ -19,6 +20,7 @@ const tabs: { id: InspectTab; label: string; count?: (s: Projection) => number }
   { id: 'connectors', label: 'Connectors', count: (s) => s.connectorOrder.length },
   { id: 'projects', label: 'Projects', count: (s) => s.projectOrder.length },
   { id: 'worker', label: 'Worker' },
+  { id: 'catalog', label: 'Catalog' },
 ]
 
 export function InspectView({ tab }: { tab: InspectTab }) {
@@ -30,10 +32,10 @@ export function InspectView({ tab }: { tab: InspectTab }) {
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold">Inspect</h1>
           <p className="text-pretty text-sm leading-relaxed text-muted-foreground">
-            Read-only details about the operator and its worker.
+            Details about the operator, its worker, and its catalog.
           </p>
         </div>
-        {catalog ? (
+        {catalog && tab !== 'catalog' ? (
           <section aria-label="Catalog repository" className="rounded-xl bg-card p-4">
             <h2 className="text-xs font-medium text-muted-foreground">Catalog repository</h2>
             <p className="mt-1 break-all font-mono text-sm">{catalog.remote}</p>
@@ -68,6 +70,8 @@ export function InspectView({ tab }: { tab: InspectTab }) {
           <ConnectorsTab state={state} />
         ) : tab === 'worker' ? (
           <WorkerTab />
+        ) : tab === 'catalog' ? (
+          <CatalogTab />
         ) : (
           <ProjectsTab state={state} />
         )}

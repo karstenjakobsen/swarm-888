@@ -13,6 +13,7 @@
     uv_version: "0.12.5"
     operator_home: /var/lib/swarm-operator
     operator_state: "{{ operator_home }}/state"
+    bootstrap_acceptance_catalog: false
     node_home: "{{ toolchain }}/node-v{{ node_version }}-linux-x64"
     node_archive: "node-v{{ node_version }}-linux-x64.tar.xz"
     unit_names:
@@ -166,19 +167,26 @@
       ansible.builtin.command:
         argv: [/usr/sbin/runuser, -u, swarm-operator, --, /usr/bin/git, init, --bare, --initial-branch=main, "{{ operator_home }}/catalog.git"]
         creates: "{{ operator_home }}/catalog.git/HEAD"
+      when: bootstrap_acceptance_catalog | bool
 
-    - name: Initialize the owner key and catalog as the unprivileged operator account
+    - name: Initialize the owner key as the unprivileged operator account
       ansible.builtin.command:
-        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /opt/swarm-operator/.venv/bin/python, -m, "{{ item.module }}"]
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /opt/swarm-operator/.venv/bin/python, -m, operator_v1.config]
         chdir: /opt/swarm-operator
-        creates: "{{ operator_state }}/{{ item.marker }}"
+        creates: "{{ operator_state }}/owner.key"
+      environment:
+        OPERATOR_STATE_DIR: "{{ operator_state }}"
+
+    - name: Initialize the opt-in host-local acceptance catalog
+      ansible.builtin.command:
+        argv: [/usr/sbin/runuser, -u, swarm-operator, --, /opt/swarm-operator/.venv/bin/python, -m, operator_v1.catalog_cli]
+        chdir: /opt/swarm-operator
+        creates: "{{ operator_state }}/catalog.json"
       environment:
         OPERATOR_STATE_DIR: "{{ operator_state }}"
         OPERATOR_CATALOG_REMOTE: "{{ operator_home }}/catalog.git"
         OPERATOR_CATALOG_CHECKOUT: "{{ operator_home }}/catalog"
-      loop:
-        - {module: operator_v1.config, marker: owner.key}
-        - {module: operator_v1.catalog_cli, marker: catalog.json}
+      when: bootstrap_acceptance_catalog | bool
 
     - name: Install the private loopback settings
       ansible.builtin.copy:

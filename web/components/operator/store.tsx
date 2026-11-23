@@ -26,6 +26,7 @@ type Ctx = {
   mode: OperatorMode
   name: string
   catalog?: components['schemas']['CatalogInfo']
+  setCatalog: (catalog: Ctx['catalog']) => void
   state: Projection
   events: OperatorEvent[]
   loaded: boolean
@@ -166,7 +167,7 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     </main>
   }
   const value: Ctx = {
-    mode, name, catalog, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
+    mode, name, catalog, setCatalog, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
     dismissCatchUp: () => setCatchUp(null),
     simulateDisconnect: (ms = 14_000) => disconnect.current(ms),
     resetScenario: async () => {

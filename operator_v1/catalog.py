@@ -1,12 +1,14 @@
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,7 +23,12 @@ class CatalogError(RuntimeError):
     """A catalog operation could not finish safely."""
 
 
-def run_git(*args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run_git(
+    *args: str, cwd: Path | None = None, check: bool = True, ssh_command: str | None = None
+) -> subprocess.CompletedProcess:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if ssh_command is not None:
+        env["GIT_SSH_COMMAND"] = ssh_command
     return subprocess.run(
         [
             "git",
@@ -40,7 +47,7 @@ def run_git(*args: str, cwd: Path | None = None, check: bool = True) -> subproce
         text=True,
         check=check,
         timeout=30,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env=env,
     )
 
 
@@ -58,6 +65,7 @@ class CatalogConfig:
     checkout: str
     seed_version: int
     seed_revision: str
+    deploy_key: bool = False
 
 
 class Catalog:
@@ -71,8 +79,30 @@ class Catalog:
         return cls(settings, CatalogConfig(**json.loads(settings.catalog_config.read_text())))
 
     def git(self, *args: str) -> str:
+        ssh = None
+        if self.config.deploy_key:
+            directory = self.settings.directory / "catalog-ssh"
+            ssh = shlex.join(
+                [
+                    "ssh",
+                    "-F",
+                    "/dev/null",
+                    "-i",
+                    str(directory / "identity"),
+                    "-o",
+                    "IdentitiesOnly=yes",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    "HostKeyAlgorithms=ssh-ed25519",
+                    "-o",
+                    f"UserKnownHostsFile={directory / 'known_hosts'}",
+                ]
+            )
         try:
-            return run_git(*args, cwd=self.checkout).stdout
+            return run_git(*args, cwd=self.checkout, ssh_command=ssh).stdout
         except (OSError, subprocess.SubprocessError):
             # Git's diagnostics can include credentials embedded in the URL.
             raise CatalogError(f"Git {args[0]} failed for the configured catalog") from None
@@ -84,7 +114,17 @@ class Catalog:
             yield
 
     @classmethod
-    def initialize(cls, settings: Settings, remote: str, branch: str, checkout: Path) -> "Catalog":
+    def initialize(
+        cls,
+        settings: Settings,
+        remote: str,
+        branch: str,
+        checkout: Path,
+        *,
+        deploy_key: bool = False,
+        seed_if_empty: bool = True,
+        replace_from: str | None = None,
+    ) -> "Catalog":
         settings.prepare()
         checkout = checkout.resolve()
         if (
@@ -99,17 +139,28 @@ class Catalog:
         if checkout.is_relative_to(framework) or framework.is_relative_to(checkout):
             raise CatalogError("Use a separate checkout outside the framework repository")
 
-        catalog = cls(settings, CatalogConfig(remote, branch, str(checkout), SEED_VERSION, ""))
+        catalog = cls(
+            settings, CatalogConfig(remote, branch, str(checkout), SEED_VERSION, "", deploy_key)
+        )
         with catalog.locked():
+            previous = None
             if settings.catalog_config.exists():
                 existing = cls.load(settings)
-                if (existing.config.remote, existing.config.branch, existing.checkout) != (
+                if (
+                    existing.config.remote,
+                    existing.config.branch,
+                    existing.checkout,
+                    existing.config.deploy_key,
+                ) == (
                     remote,
                     branch,
                     checkout,
+                    deploy_key,
                 ):
+                    return existing
+                if existing.config.remote != replace_from or checkout == existing.checkout:
                     raise CatalogError("This state directory is already bound to a catalog")
-                return existing
+                previous = settings.catalog_config.read_bytes()
 
             checkout.mkdir(parents=True, exist_ok=True)
             if not any(checkout.iterdir()):
@@ -117,20 +168,30 @@ class Catalog:
                 catalog.git("remote", "add", "origin", remote)
             if not (checkout / ".git").is_dir():
                 raise CatalogError("Choose an empty directory or a catalog Git checkout")
-            if catalog.git("remote", "get-url", "origin").strip() != remote:
+            if catalog.git("config", "--get", "remote.origin.url").strip() != remote:
                 raise CatalogError("The checkout points to a different remote")
             if catalog.git("symbolic-ref", "--short", "HEAD").strip() != branch:
                 raise CatalogError("The checkout is on a different branch")
 
             refs = catalog.git("ls-remote", "--heads", "origin")
             branch_ref = f"refs/heads/{branch}"
-            if any(line.split()[-1] == branch_ref for line in refs.splitlines()):
+            has_branch = any(line.split()[-1] == branch_ref for line in refs.splitlines())
+            remote_seeded = False
+            if has_branch:
                 catalog.pull()
+                remote_seeded = bool(
+                    catalog.git("ls-tree", "--name-only", "FETCH_HEAD", "seed.json")
+                )
             elif refs.strip():
                 raise CatalogError("The requested branch is missing from the nonempty remote")
-            elif not (checkout / "seed.json").is_file():
+
+            if not remote_seeded and not seed_if_empty:
+                raise CatalogError(
+                    "This branch has no catalog seed. Allow publishing the foundational seed to continue."
+                )
+            if not (checkout / "seed.json").is_file():
                 if set(p.name for p in checkout.iterdir()) != {".git"}:
-                    raise CatalogError("The empty remote requires a clean checkout")
+                    raise CatalogError("Add the foundational seed only to an empty catalog branch")
                 shutil.copytree(SEED / "skills", checkout / "skills")
                 for folder in ("connectors", "projects"):
                     (checkout / folder).mkdir()
@@ -146,14 +207,30 @@ class Catalog:
             ).strip()
             if seed_version not in (1, SEED_VERSION) or not seed_revision:
                 raise CatalogError("The catalog lacks a supported foundational seed")
-            if not refs.strip():
+            if not remote_seeded:
                 catalog.push()
-            config = CatalogConfig(remote, branch, str(checkout), seed_version, seed_revision)
+            config = CatalogConfig(
+                remote, branch, str(checkout), seed_version, seed_revision, deploy_key
+            )
             catalog.retain(AUTHORING_SKILL, seed_revision, "SKILL.md", "template.json")
             with tempfile.NamedTemporaryFile(dir=settings.directory, mode="w") as pending:
                 json.dump(asdict(config), pending)
                 pending.flush()
-                os.link(pending.name, settings.catalog_config)
+                if previous is None:
+                    os.link(pending.name, settings.catalog_config)
+                else:
+                    history = settings.directory / "catalog-history"
+                    history.mkdir(mode=0o700, exist_ok=True)
+                    archived = history / (sha256(previous).hexdigest() + ".json")
+                    if not archived.exists():
+                        os.link(settings.catalog_config, archived)
+                    # Keep the temporary filename for its context manager to remove.
+                    replacement = history / (pending.name.rsplit("/", 1)[-1] + ".pending")
+                    os.link(pending.name, replacement)
+                    try:
+                        os.replace(replacement, settings.catalog_config)
+                    finally:
+                        replacement.unlink(missing_ok=True)
             return cls(settings, config)
 
     def pull(self) -> None:
@@ -169,6 +246,14 @@ class Catalog:
 
     def push(self) -> None:
         self.git("push", "origin", f"HEAD:refs/heads/{self.config.branch}")
+
+    def remote_revision(self) -> str | None:
+        branch = f"refs/heads/{self.config.branch}"
+        for ref in self.git("ls-remote", "--heads", "origin", branch).splitlines():
+            revision, name = ref.split()
+            if name == branch:
+                return revision
+        return None
 
     def retain(self, skill: str, revision: str, *files: str) -> Path:
         target = self.settings.directory / "revisions" / revision / skill

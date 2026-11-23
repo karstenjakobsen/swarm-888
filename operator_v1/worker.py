@@ -22,11 +22,14 @@ class MessageWorker:
         self.operations = Operations(self.state)
         self.goals = StandingGoals(settings, self.state)
         self.fixture_engine = ConfiguredFixtureEngine(settings.directory / "fixture-engine.json")
-        default = "codex" if settings.catalog_config.is_file() else "acknowledge"
-        self.mode = os.environ.get("OPERATOR_MODEL", default)
+        self.configured_mode = os.environ.get("OPERATOR_MODEL")
+        self.mode = self.configured_mode or self.default_mode()
         if self.mode not in ("acknowledge", "codex", "simulated"):
             raise ValueError("OPERATOR_MODEL must be acknowledge, codex, or simulated")
         self.heartbeat = WorkerHeartbeat(settings, self.mode)
+
+    def default_mode(self) -> str:
+        return "codex" if self.settings.catalog_config.is_file() else "acknowledge"
 
     async def run_turn(self, session: ModelSession, task: str) -> str | None:
         text = self.state.text(task)
@@ -65,6 +68,14 @@ class MessageWorker:
             return await self.run_turn(session, task)
 
     def drain(self):
+        if (
+            not self.configured_mode
+            and self.mode == "acknowledge"
+            and self.default_mode() == "codex"
+        ):
+            self.mode = "codex"
+            self.heartbeat.report = self.heartbeat.report.model_copy(update={"mode": self.mode})
+            self.heartbeat.next_beat = 0
         while task := self.state.claim():
             self.heartbeat.publish(task)
             try:

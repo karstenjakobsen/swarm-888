@@ -31,12 +31,19 @@ If a submission loses its receipt, retry the same text in the same tab. The brow
 
 ### Initialize the external catalog
 
-Create a separate, empty Git repository with write access and use a separate directory for its checkout. The initializer commits the versioned authoring guide and template, pushes the seed to the configured branch, and activates it in SQLite. Repeating initialization preserves existing revisions and the original configuration. Authenticate Git through SSH or a credential helper.
+In the live UI, sign in and choose **Connect a catalog**. Enter the GitHub SSH URL and branch. Use the SSH identity available to the controller, or generate a dedicated deploy key and register the displayed public key on the repository before connecting. Select the seed option only when you want to initialize an empty branch. **Inspect → Catalog** shows remote read status, the active authoring revision, and the explicit **Publish** action. Publishing checks that changed skills match their active revisions. The first successful push of a new revision verifies publishing.
+
+Use the CLI for another Git host or a local bare remote.
+
+Use a separate Git repository with write access and a separate directory for its checkout. The initializer accepts a repository with no branches or a branch with an empty tree. It commits the versioned authoring guide and template, pushes the seed to the configured branch, and activates it in SQLite. Repeating initialization preserves existing revisions and the original configuration.
+
+Set up Git authentication before initializing the catalog. For local development, reuse your existing GitHub SSH credentials or credential helper. For an unattended VPS, configure repository-scoped access for the service account before running the initializer. Catalog configuration stores the repository URL and branch, while SSH manages the private key. [GitHub SSH setup](https://docs.github.com/en/authentication/connecting-to-github-with-ssh), [GitHub deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)
 
 ```sh
 export OPERATOR_CATALOG_REMOTE='<external catalog URL>'
 export OPERATOR_CATALOG_BRANCH=main
 export OPERATOR_CATALOG_CHECKOUT="$HOME/vps-operator-catalog"
+git ls-remote "$OPERATOR_CATALOG_REMOTE"
 make catalog-init
 ```
 

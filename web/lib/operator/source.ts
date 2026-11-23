@@ -205,6 +205,20 @@ export async function readWorkerStatus(signal: AbortSignal): Promise<API['Worker
   return response.json()
 }
 
+export async function readCatalogStatus(signal: AbortSignal): Promise<API['CatalogStatus']> {
+  const response = await fetch('/api/catalog', { cache: 'no-store', signal })
+  if (!response.ok) throw new AccessError(response.status, 'Could not load catalog status.')
+  return response.json()
+}
+
+export async function connectCatalog(body: API['CatalogConnection']): Promise<API['CatalogStatus']> {
+  return post('/api/catalog', body)
+}
+
+export async function runCatalogAction(action: 'key' | 'check' | 'publish'): Promise<API['CatalogStatus']> {
+  return post(`/api/catalog/${action}`, {})
+}
+
 // Keep the retry ID through an outage or a reload in this tab. Store only a
 // digest of the message. Acknowledgment releases the ID for a new submission.
 async function messageKey(text: string) {
