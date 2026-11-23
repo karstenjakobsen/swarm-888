@@ -34,6 +34,14 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
   const data = event.data
   if (typeof data?.goal === 'string') {
     const ref = {...meta.ref, goal: data.goal, incident: typeof data.incident === 'string' ? data.incident : undefined}
+    if (data.action === 'dns_goal' && typeof data.zone === 'string') {
+      return { ...meta, ref, type: 'goal.standing',
+        data: { text: 'Read DNS records for ' + data.zone + ' on demand', check: 'Read through the approved DigitalOcean connector.' } }
+    }
+    if (data.action === 'dns_goal_checked' && (data.status === 'holding' || data.status === 'blocked')) {
+      return { ...meta, ref, type: 'goal.checked',
+        data: { status: data.status, observed: event.text, command: 'DigitalOcean DNS read', output: event.text } }
+    }
     if (data.action === 'goal_created' && typeof data.filename === 'string' && typeof data.expected === 'string') {
       return { ...meta, ref, type: 'goal.standing',
         data: {text: `Keep ${data.filename} at mode ${data.expected}`, check: 'Read the file permission bits.'} }
@@ -65,11 +73,25 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
       return {...meta, ref, type: 'incident.unknown', data: {summary: event.text}}
     }
   }
+  if (data?.action === 'dns_approval_required' && typeof data.zone === 'string'
+    && typeof data.destination === 'string' && typeof data.scope === 'string') {
+    return { ...meta, type: 'task.waiting',
+      data: { on: 'decision', approval: { zone: data.zone, destination: data.destination, scope: data.scope } } }
+  }
+  if (data?.action === 'dns_approved') {
+    return { ...meta, type: 'task.resumed', data: { reason: event.text } }
+  }
+  if (data?.action === 'dns_verified' && typeof data.zone === 'string') {
+    return { ...meta, type: 'task.verification',
+      data: { result: 'passed', method: 'independent', check: event.text,
+        command: 'GET /v2/domains/' + data.zone + '/records', output: event.text } }
+  }
   if (data?.action === 'credential_requested' && typeof data.request === 'string'
     && typeof data.connector === 'string' && typeof data.destination === 'string') {
     return { ...meta, ref: {...meta.ref, request: data.request}, type: 'credential.requested',
-      data: {label: `Bearer token for ${data.connector}`, why: event.text, destination: data.destination,
-        storage: 'Private operator vault', scope: 'Read-only MCP tool',
+      data: {label: typeof data.label === 'string' ? data.label : `Bearer token for ${data.connector}`,
+        why: event.text, destination: data.destination,
+        storage: 'Private operator vault', scope: typeof data.scope === 'string' ? data.scope : 'Read-only MCP tool',
         fields: [{name: 'value', label: 'Bearer token', secret: true}], pause: true} }
   }
   if (data?.action === 'credential_supplied' && typeof data.request === 'string'
@@ -197,6 +219,10 @@ async function post(path: string, body: unknown) {
 
 export async function signIn(key: string) {
   await post('/api/session', { key } satisfies API['OwnerLogin'])
+}
+
+export async function approveDns(task: string) {
+  await post('/api/tasks/' + encodeURIComponent(task) + '/approve-dns', {})
 }
 
 export async function readWorkerStatus(signal: AbortSignal): Promise<API['WorkerStatus']> {

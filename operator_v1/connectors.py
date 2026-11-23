@@ -8,7 +8,15 @@ from pydantic import Field, JsonValue
 
 from .catalog import Catalog, CatalogError, display_remote
 from .catalog_definitions import ConnectorDefinition
-from .credentials import CredentialError, Credentials, Destination, fingerprint
+from .credentials import (
+    DIGITALOCEAN_ORIGIN,
+    CredentialError,
+    CredentialRequired,
+    Credentials,
+    Destination,
+    fingerprint,
+)
+from .digitalocean import TokenRejected, list_dns_records
 from .skill_program import SkillReference
 from .state import State
 from .tool_types import ToolArguments
@@ -39,7 +47,7 @@ class ConnectorService:
         self.task = task
         self.credentials = Credentials(state.settings, state)
 
-    def read(self, args: ConnectorRead) -> dict:
+    def read(self, args: ConnectorRead, *, expected_destination: Destination | None = None) -> dict:
         if not self.task:
             raise CredentialError("Connector calls require a task")
         catalogs = TypedCatalogs(self.state)
@@ -63,12 +71,17 @@ class ConnectorService:
                 "path": path,
             }
         normal = Destination(endpoint=config.endpoint, secret_ref=config.secret_ref)
+        if expected_destination is not None and normal != expected_destination:
+            raise CredentialError("The catalog connector no longer matches the approved DNS plan")
         secret = self.credentials.require(self.task, args.connector, normal)
         if not secret:
-            raise CredentialError("Waiting for the owner to supply a credential")
+            raise CredentialRequired("Waiting for the owner to supply a credential")
         parameters = {"Authorization": f"Bearer {secret}"}
         try:
             tools, payload = asyncio.run(self.call(config, parameters, args.arguments))
+        except TokenRejected:
+            self.credentials.require(self.task, args.connector, normal, replace=True)
+            raise CredentialRequired("Waiting for a replacement DigitalOcean token") from None
         except TimeoutError:
             with self.state.transaction(write=True) as db:
                 self.state.append(
@@ -116,6 +129,18 @@ class ConnectorService:
         arguments: dict[str, JsonValue],
     ) -> tuple[list[JsonValue], JsonValue]:
         async with asyncio.timeout(config.timeout):
+            if config.endpoint == DIGITALOCEAN_ORIGIN:
+                async with httpx.AsyncClient(
+                    headers=headers, trust_env=False, follow_redirects=False
+                ) as http:
+                    records = await list_dns_records(http, arguments)
+                return [
+                    {
+                        "name": config.tool,
+                        "description": "List all DNS records in one DigitalOcean zone.",
+                        "access": "read",
+                    }
+                ], records
             async with (
                 httpx.AsyncClient(headers=headers, trust_env=False, follow_redirects=False) as http,
                 streamable_http_client(

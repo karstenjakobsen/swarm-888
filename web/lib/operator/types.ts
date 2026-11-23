@@ -77,7 +77,10 @@ type DataMap = {
     output: string
     claims?: VerificationClaim[]
   }
-  'task.waiting': { on: 'credential' | 'decision' | 'reply' }
+  'task.waiting': {
+    on: 'credential' | 'decision' | 'reply'
+    approval?: { zone: string; destination: string; scope: string }
+  }
   'task.resumed': { reason: string }
   'task.completed': { summary: string }
   'task.stopped': { by: 'owner' }

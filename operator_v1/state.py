@@ -123,6 +123,13 @@ CATALOG_MIGRATION_SCHEMA = (
        kind TEXT NOT NULL, legacy_id TEXT NOT NULL, canonical_id TEXT NOT NULL,
        PRIMARY KEY(kind,legacy_id))""",
 )
+DNS_SCHEMA = (
+    """CREATE TABLE dns_requests(
+       task TEXT PRIMARY KEY REFERENCES tasks(id), zone TEXT NOT NULL, connector TEXT,
+       phase TEXT NOT NULL CHECK(phase IN ('preparing','approval','approved')))""",
+    """CREATE TABLE connector_approvals(
+       connector TEXT PRIMARY KEY, endpoint TEXT NOT NULL, secret_ref TEXT NOT NULL)""",
+)
 
 
 class RequestConflict(ValueError):
@@ -136,7 +143,7 @@ class State:
         self.path = settings.directory / "operator.sqlite3"
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 14:
+            if version > 15:
                 raise ValueError(f"Unsupported state schema {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -179,7 +186,10 @@ class State:
             if version < 14:
                 for statement in CATALOG_MIGRATION_SCHEMA:
                     db.execute(statement)
-                db.execute("PRAGMA user_version=14")
+            if version < 15:
+                for statement in DNS_SCHEMA:
+                    db.execute(statement)
+                db.execute("PRAGMA user_version=15")
 
     @contextmanager
     def transaction(self, *, write: bool = False) -> Generator[sqlite3.Connection, None, None]:
@@ -250,6 +260,8 @@ class State:
                 """SELECT id,checkpoint FROM tasks WHERE checkpoint!='completed'
                    AND NOT EXISTS(SELECT 1 FROM credential_requests AS c WHERE c.task=tasks.id
                                   AND NOT c.supplied)
+                   AND NOT EXISTS(SELECT 1 FROM dns_requests AS d WHERE d.task=tasks.id
+                                  AND d.phase='approval')
                    AND (NOT ? OR EXISTS(SELECT 1 FROM operations WHERE task=tasks.id))
                    ORDER BY rowid LIMIT 1""",
                 (operations_only,),

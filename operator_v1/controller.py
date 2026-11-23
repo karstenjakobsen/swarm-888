@@ -35,6 +35,7 @@ from .contracts import (
     WorkerStatus,
 )
 from .credentials import CredentialError, Credentials
+from .dns_workflow import DnsWorkflow
 from .ipc import wake_worker, worker_auth
 from .operations import Operations, OperationUnavailable
 from .skill_program import SkillError, SkillRevision
@@ -330,6 +331,23 @@ def create_app(
             store.control(
                 task, body.request_id, body.kind, body.text if isinstance(body, OwnerSteer) else ""
             )
+        except RequestConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        wake_worker(runtime.socket)
+
+    @app.post(
+        "/api/tasks/{task}/approve-dns",
+        status_code=204,
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses={
+            401: unauthorized,
+            403: forbidden,
+            409: {"model": ApiError, "description": "No pending DigitalOcean approval"},
+        },
+    )
+    def approve_dns(task: Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]):
+        try:
+            DnsWorkflow(store).approve(task)
         except RequestConflict as exc:
             raise HTTPException(409, str(exc)) from exc
         wake_worker(runtime.socket)

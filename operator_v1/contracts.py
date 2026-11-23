@@ -114,6 +114,8 @@ class Event(BaseModel):
         if self.kind == "unknown":
             return Outcome(key="unknown", label="Outcome unknown", seq=self.seq, why=self.text)
         if self.kind == "waiting":
+            if self.data.get("action") == "dns_approval_required":
+                return Outcome(key="needs-you", label="Needs approval", seq=self.seq, why=self.text)
             return Outcome(key="needs-you", label="Needs a credential", seq=self.seq, why=self.text)
         if self.kind == "stopped":
             return Outcome(key="stopped", label="Stopped", seq=self.seq, why=self.text)

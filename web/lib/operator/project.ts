@@ -83,7 +83,7 @@ export type Task = {
   plan: string[]
   answer?: { text: string; seq: number; at: string }
   verification?: Verification
-  waiting?: { on: 'credential' | 'decision' | 'reply'; seq: number }
+  waiting?: OperatorEvent<'task.waiting'>['data'] & { seq: number }
   stopped?: { seq: number; at: string }
   completed?: { seq: number; at: string; summary: string }
   skillUsed?: string
@@ -507,7 +507,7 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
                 : 'Paused: waiting for your reply',
           tone: 'attention',
         })(t),
-        waiting: { on: e.data.on, seq: e.seq },
+        waiting: { ...e.data, seq: e.seq },
       }))
     case 'task.resumed':
       return withTask(p, e.ref.task, (t) => ({

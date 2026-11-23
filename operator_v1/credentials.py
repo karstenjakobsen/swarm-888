@@ -12,9 +12,16 @@ from .skill_program import SkillId
 from .state import State
 from .tool_types import ToolArguments
 
+DIGITALOCEAN_ORIGIN = "https://api.digitalocean.com"
+DIGITALOCEAN_SCOPE = "domain:read"
+
 
 class CredentialError(RuntimeError):
     """A credential request or its destination could not be authorized."""
+
+
+class CredentialRequired(CredentialError):
+    """The task is paused for its approved credential."""
 
 
 def fingerprint(value: str) -> str:
@@ -28,6 +35,8 @@ class Destination(ToolArguments):
     @field_validator("endpoint")
     @classmethod
     def loopback(cls, value: str) -> str:
+        if value == DIGITALOCEAN_ORIGIN:
+            return value
         address = urlsplit(value)
         if (
             address.scheme != "http"
@@ -37,7 +46,7 @@ class Destination(ToolArguments):
             or address.query
             or address.fragment
         ):
-            raise ValueError("Use a literal loopback HTTP origin with a port and MCP path")
+            raise ValueError("Use a loopback MCP URL or the supported DigitalOcean API origin")
         return value
 
 
@@ -47,6 +56,15 @@ class Credentials:
         self.state = state
 
     def authorize(self, connector: str, destination: Destination) -> None:
+        if destination.endpoint == DIGITALOCEAN_ORIGIN:
+            with self.state.transaction() as db:
+                row = db.execute(
+                    "SELECT endpoint,secret_ref FROM connector_approvals WHERE connector=?",
+                    (connector,),
+                ).fetchone()
+            if row and tuple(row) == (destination.endpoint, destination.secret_ref):
+                return
+            raise CredentialError("Approve the DigitalOcean connector destination first")
         try:
             bindings = json.loads((self.settings.directory / "connector-bindings.json").read_text())
             binding = Destination.model_validate(bindings.get(connector))
@@ -55,7 +73,9 @@ class Credentials:
         if binding != destination:
             raise CredentialError("Catalog destination differs from its owner-authorized binding")
 
-    def require(self, task: str, connector: str, destination: Destination) -> str | None:
+    def require(
+        self, task: str, connector: str, destination: Destination, *, replace: bool = False
+    ) -> str | None:
         self.authorize(connector, destination)
         file = self.settings.directory / "secrets" / destination.secret_ref
         with self.state.transaction(write=True) as db:
@@ -67,7 +87,11 @@ class Credentials:
                 destination.secret_ref,
             ):
                 raise CredentialError("This task already has a request for a different destination")
-            if file.is_file() and (not existing or existing["supplied"]):
+            if replace:
+                if existing:
+                    db.execute("DELETE FROM credential_requests WHERE id=?", (existing["id"],))
+                existing = None
+            if not replace and file.is_file() and (not existing or existing["supplied"]):
                 return file.read_text()
             if not existing:
                 request_id = str(uuid4())
@@ -81,9 +105,15 @@ class Credentials:
                     "connector": connector,
                     "destination": destination.endpoint,
                 }
-                self.state.append(
-                    db, task, "waiting", f"Provide a credential for {connector}.", evidence
+                if destination.endpoint == DIGITALOCEAN_ORIGIN:
+                    evidence["scope"] = DIGITALOCEAN_SCOPE
+                    evidence["label"] = "DigitalOcean API token"
+                reason = (
+                    "DigitalOcean rejected the token. Supply a token with domain:read."
+                    if replace
+                    else f"Provide a credential for {connector}."
                 )
+                self.state.append(db, task, "waiting", reason, evidence)
             return None
 
     def supply(self, request_id: UUID, value: str) -> None:

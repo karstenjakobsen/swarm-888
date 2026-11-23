@@ -7,6 +7,8 @@ import time
 from contextlib import closing, suppress
 
 from .config import Settings
+from .digitalocean import requested_zone
+from .dns_workflow import DnsWorkflow
 from .goals import StandingGoals
 from .model import ModelError, ModelSession, ModelSignInRequired, codex_session, connect_skills
 from .operations import ConfiguredFixtureEngine, Operations
@@ -21,6 +23,7 @@ class MessageWorker:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.state = State(settings)
+        self.dns = DnsWorkflow(self.state)
         self.operations = Operations(self.state)
         self.goals = StandingGoals(settings, self.state)
         self.fixture_engine = ConfiguredFixtureEngine(settings.directory / "fixture-engine.json")
@@ -110,6 +113,9 @@ class MessageWorker:
             self.state.finish(
                 task, "I received your message.", "The worker acknowledged the owner’s message."
             )
+            return
+        if zone := requested_zone(self.state.text(task)):
+            await asyncio.to_thread(self.dns.run, task, zone)
             return
         try:
             answer = await self.answer_with_heartbeat(task)

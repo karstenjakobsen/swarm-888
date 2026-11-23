@@ -34,6 +34,8 @@ If the Codex worker shows **Sign-in required**, choose **Connect** or **Reconnec
 
 Choose **Disconnect** to sign the worker out of ChatGPT. The worker finishes its current task before signing out and holds new model tasks until you reconnect.
 
+With Skills and Connectors catalogs connected, ask the operator to list DNS records for a zone using DigitalOcean. The worker saves the on-demand goal and drafts the connector and guide in the local catalog. Review the destination and read-only scope on the task page, then supply a token with `domain:read` in the credential dialog. The task resumes with a live DNS read. Use the catalog publish preview if you want to publish the drafts.
+
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 
 To switch an existing installation, stop the controller and worker and export a state backup first. Run `python -m operator_v1.catalog_cli switch --from-remote <current-remote> --deploy-key` as the unprivileged operator account with the new `OPERATOR_CATALOG_REMOTE`, `OPERATOR_CATALOG_BRANCH`, and a separate `OPERATOR_CATALOG_CHECKOUT` configured in its environment. The switch requires a seeded target and archives the previous binding under `catalog-history` in the state directory. Start the controller and worker and check **Inspect → Catalog**.
