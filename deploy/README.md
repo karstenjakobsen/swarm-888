@@ -4,7 +4,7 @@ The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Us
 
 ## Deploy the pinned VPS release with Ansible
 
-From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `49088ca` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `752e7b0` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
 
 ```sh
 ansible-playbook -i server-212, deploy/ansible/deploy.yml
@@ -33,6 +33,10 @@ sudo -u swarm-operator -H env OPERATOR_STATE_DIR=/var/lib/swarm-operator/state \
 To apply, stop the controller and worker and export a private backup to a new path before running the same command with `--apply`. Restart both services and check a pre-migration task's revision link. Review the branch preview in **Inspect → Catalog** to publish the local migration commit. Before publication, you can recover by restoring the backup into a separate state directory and selecting it in the service environment file.
 
 On 2026-11-23, server-212 switched to `git@github.com:karstenjakobsen/packages-888.git` on `main`. The active authoring seed is `c1bc1e2749ba6379a11b8f62841f13f55e5efefc`, and the private pre-switch backup is `/var/lib/swarm-operator/before-packages-888-20261123.tar.gz`. The operator profile, tasks, memory, fixture skill revisions, and standing goal were checked after the switch. The existing fixture was healthy at mode `0600` and triggered zero additional repairs. The VPS catalog displayed **Read verified** and **Publish unverified**.
+
+Later on 2026-11-23, server-212 migrated that checkout to one shared typed branch for Skills, Connectors, and Projects. The private pre-upgrade backup is `/var/lib/swarm-operator/before-typed-catalog-752e7b0.tar.gz`. The migration was repeatable and left one local commit, `32d514689d50a2025b9d6db326c37c60afcd40ab`, pending owner review in **Inspect → Catalog**. Its preview covers the three legacy seed files. The two built-in skills are available from the framework release. The GitHub branch remained at `c1bc1e2749ba6379a11b8f62841f13f55e5efefc`.
+
+Chromium opened the original task `2875c102c148464c87ec80af96f15a5d` and its pinned file-mode revision `8d30307c79553c65c1035d77ecc5e1ffbc3f7f84`. A state comparison confirmed the same operator profile, tasks, memory, active skill SHAs, and standing goal. The worker performed a fresh healthy check at mode `0600` with zero additional repairs. The API and web ran under their unprivileged accounts and the worker ran as root.
 
 The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.
 
