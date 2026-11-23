@@ -27,8 +27,8 @@
       ansible.builtin.assert:
         that:
           - ansible_play_hosts_all | length == 1
-          - ansible_service_mgr == "systemd"
-          - ansible_architecture == "x86_64"
+          - ansible_facts['service_mgr'] == "systemd"
+          - ansible_facts['architecture'] == "x86_64"
           - framework_revision is match('^[a-f0-9]{40}$')
         quiet: true
 
