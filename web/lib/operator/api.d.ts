@@ -377,6 +377,8 @@ export interface components {
             active_revision?: string | null;
             /** Guide */
             guide?: string | null;
+            /** Instructions */
+            instructions?: string | null;
         };
         /** CatalogItemWrite */
         CatalogItemWrite: {

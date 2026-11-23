@@ -13,6 +13,10 @@ class ConnectorDefinition(Destination):
     auth: Literal["bearer"]
     tool: ToolName
     timeout: float = Field(default=3, ge=0.1, le=20)
+    instructions: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def digitalocean_tool(self):

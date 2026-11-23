@@ -12,6 +12,7 @@ from .catalog_manifest import (
     MANIFEST_FILE,
     CatalogItem,
     CatalogSnapshot,
+    ConnectorManifest,
     ExecutableSkillManifest,
     GuideSkillManifest,
     assign_canonical_id,
@@ -361,6 +362,9 @@ class TypedCatalogs:
                     if isinstance(item.manifest, ExecutableSkillManifest)
                     else None,
                     guide=item.guide,
+                    instructions=item.manifest.instructions
+                    if isinstance(item.manifest, ConnectorManifest)
+                    else None,
                 )
                 for item in snapshot.items
                 if item.manifest.kind == kind

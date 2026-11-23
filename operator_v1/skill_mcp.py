@@ -12,7 +12,7 @@ from pydantic import Field, JsonValue, ValidationError
 from .builtin_skills import CONNECT_CATALOG, builtin_guide
 from .catalog import Catalog, CatalogError
 from .config import Settings
-from .connectors import ConnectorRead, ConnectorService
+from .connectors import ConnectorRead, ConnectorReference, ConnectorService
 from .credentials import CredentialError
 from .goals import ChangeGoal, CreateGoal, GoalError, StandingGoals
 from .memory import (
@@ -83,6 +83,11 @@ TOOLS = {
     ),
     "memory_revise": (ReviseMemory, "Update the specified memory revision and preserve history."),
     "memory_remove": (RemoveMemory, "Remove a memory from active use while preserving provenance."),
+    "connector_discover": (Discover, "Find configured connectors by name, ID, or tool."),
+    "connector_instructions": (
+        ConnectorReference,
+        "Read usage instructions from the connector's accepted catalog definition.",
+    ),
     "connector_read": (ConnectorRead, "Use the configured read-only MCP tool for a connector."),
     "goal_list": (ToolArguments, "List standing fixture-file goals and their status."),
     "goal_create": (
@@ -194,6 +199,14 @@ def build_server(skills: Skills, *, memory_review: bool = False) -> Server:
                 return memory.revise(ReviseMemory.model_validate(arguments))
             case "memory_remove":
                 return memory.remove(RemoveMemory.model_validate(arguments))
+            case "connector_discover":
+                return ConnectorService(skills.catalog, skills.state, skills.task).discover(
+                    Discover.model_validate(arguments).query
+                )
+            case "connector_instructions":
+                return ConnectorService(skills.catalog, skills.state, skills.task).instructions(
+                    ConnectorReference.model_validate(arguments)
+                )
             case "connector_read":
                 return ConnectorService(skills.catalog, skills.state, skills.task).read(
                     ConnectorRead.model_validate(arguments)

@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import type { components } from '@/lib/operator/api'
 import { activateCatalogSkill, connectCatalog, previewCatalogPublish, publishCatalogBranch, pullCatalogBranch, readCatalogStatus, runCatalogAction } from '@/lib/operator/source'
@@ -89,7 +90,11 @@ export function CatalogTab() {
             <ul className="mt-2 divide-y divide-border">
               {connection.items.map(item => (
                 <li key={item.canonical_id} className="py-2 text-sm">
-                  {item.name}
+                  {connection.kind === 'connector' ? (
+                    <Link className="underline underline-offset-4" href={'/inspect/connectors/' + encodeURIComponent(item.canonical_id)}>
+                      {item.name}
+                    </Link>
+                  ) : item.name}
                   <p className="break-all font-mono text-xs text-muted-foreground">{item.canonical_id} · {item.path}</p>
                   {item.active_revision && <p className="break-all font-mono text-xs">Active · {item.active_revision}</p>}
                   {item.guide != null && (

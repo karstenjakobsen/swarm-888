@@ -8,6 +8,7 @@ from test_message import controller, headers, login
 from operator_v1.catalog import run_git
 from operator_v1.config import Settings
 from operator_v1.digitalocean import TokenRejected, list_dns_records
+from operator_v1.model import connect_skills
 from operator_v1.state import State
 from operator_v1.typed_catalogs import TypedCatalogs
 from operator_v1.worker import MessageWorker
@@ -44,7 +45,7 @@ def test_dns_goal_approval_credential_and_verified_read_resume_same_task(tmp_pat
     state = State(settings)
     remote, original_revision = typed_remote(tmp_path / "fixture")
     catalogs = TypedCatalogs(state)
-    catalogs.connect(str(remote), "main", ["connector", "skill"], publisher=PUBLISHER)
+    catalogs.connect(str(remote), "main", ["connector"], publisher=PUBLISHER)
     monkeypatch.setenv("OPERATOR_MODEL", "simulated")
     token = "fixture-token-" + uuid4().hex
     rejected = "fixture-rejected-token"
@@ -91,6 +92,43 @@ def test_dns_goal_approval_credential_and_verified_read_resume_same_task(tmp_pat
         asyncio.run(worker.drain())
         assert events(task) == first
 
+        binding = catalogs.for_kind("connector")
+        created = next(
+            item
+            for item in binding.snapshot("connector").items
+            if item.manifest.canonical_id.endswith("-connector-digitalocean-dns")
+        )
+        path = binding.catalog.checkout / created.path
+        original = path.read_bytes()
+        path.write_text("instructions: uncommitted change\n")
+
+        async def read_instructions():
+            async with connect_skills(settings, task) as mcp:
+                found = await mcp.call_tool("connector_discover", {"query": "DigitalOcean DNS"})
+                assert found.structuredContent["connectors"] == [
+                    {
+                        "connector": created.manifest.canonical_id,
+                        "name": "DigitalOcean DNS",
+                        "tool": "list_dns_records",
+                        "has_instructions": True,
+                    }
+                ]
+                return await mcp.call_tool(
+                    "connector_instructions", {"connector": created.manifest.canonical_id}
+                )
+
+        try:
+            instructions = asyncio.run(read_instructions()).structuredContent
+        finally:
+            path.write_bytes(original)
+        assert instructions["instructions"] == created.manifest.instructions
+        assert '"zone": "example.com"' in instructions["instructions"]
+        assert instructions["revision"] == binding.revision
+        assert instructions["catalog"]["path"] == created.path
+        assert "secret_ref" not in instructions
+        assert "secret" not in instructions
+        assert all(event.data.get("action") != "credential_requested" for event in events(task))
+
         approve = f"/api/tasks/{task}/approve-dns"
         assert client.post(approve).status_code == 403
         assert client.post(approve, headers=action).status_code == 204
@@ -131,6 +169,4 @@ def test_dns_goal_approval_credential_and_verified_read_resume_same_task(tmp_pat
         assert zones == ["example.com", "example.com"]
         assert all(event.kind != "waiting" for event in events(again))
     assert run_git("rev-parse", "main", cwd=remote).stdout.strip() == original_revision
-    assert (
-        catalogs.for_kind("skill").catalog.checkout / "list-digitalocean-dns-records/SKILL.md"
-    ).is_file()
+    assert not (binding.catalog.checkout / "list-digitalocean-dns-records").exists()

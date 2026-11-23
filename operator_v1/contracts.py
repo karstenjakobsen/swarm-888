@@ -153,6 +153,7 @@ class CatalogItemInfo(BaseModel):
     revision: str
     active_revision: str | None = None
     guide: str | None = None
+    instructions: str | None = None
 
 
 class CatalogConnectionInfo(CatalogInfo):

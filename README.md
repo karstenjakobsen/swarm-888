@@ -57,6 +57,8 @@ To inspect typed YAML manifests, run `.venv/bin/python -m operator_v1.catalog_cl
 
 The default `skill_type` is `executable`, which requires a sibling Lua file and a sibling JSON self-test file. A skill with `skill_type: guide` references a sibling Markdown file through `guide` and can reference a sibling JSON object through `template`. The framework loads the bundled `create-skill` and `connect-catalog` guides from the same manifest format before a catalog is connected.
 
+A connector can include an inline `instructions` field in its `operator.yaml`. Describe the operation, expected arguments, and how to handle a credential prompt. The operator finds connectors with `connector_discover` and reads the accepted manifest through `connector_instructions`. Owners can see the same text under **How to use** on the connector page.
+
 In **Inspect → Catalog**, enter the repository and branch once and select the kinds that share it. **Pull branch** refreshes discovery and keeps active skill revisions pinned. **Preview publish** shows every outgoing commit and path, including connector or project files on a branch connected only for skills. Use **Publish reviewed commits** after reviewing the branch preview.
 
 ### Migrate an existing catalog

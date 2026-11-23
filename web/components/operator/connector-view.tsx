@@ -1,7 +1,10 @@
 'use client'
 
 import Link from 'next/link'
+import { useEffect, useState } from 'react'
 import { KeyRound, Lock } from 'lucide-react'
+import type { components } from '@/lib/operator/api'
+import { readCatalogStatus } from '@/lib/operator/source'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
 import { connectorSource, Meta, SourceLink } from './inspect-parts'
@@ -10,16 +13,40 @@ import { dayClock } from '@/lib/operator/format'
 import { cn } from '@/lib/utils'
 
 export function ConnectorView({ id }: { id: string }) {
-  const { state, loaded } = useOperator()
+  const { state, loaded, mode } = useOperator()
   const connector = recordById(state.connectors, id)
+  const [items, setItems] = useState<components['schemas']['CatalogItemInfo'][]>()
+  const item = items?.find((item) => item.canonical_id === id)
+
+  useEffect(() => {
+    if (mode !== 'live') return
+    const abort = new AbortController()
+    void readCatalogStatus(AbortSignal.any([abort.signal, AbortSignal.timeout(5000)])).then(
+      (status) => {
+        if (!abort.signal.aborted) {
+          setItems(status.connections?.find((connection) => connection.kind === 'connector')?.items ?? [])
+        }
+      },
+      () => {
+        if (!abort.signal.aborted) setItems([])
+      },
+    )
+    return () => abort.abort()
+  }, [mode])
+
   return (
     <div className="flex min-h-dvh flex-col">
       <AppHeader back={{ href: '/inspect?tab=connectors', label: 'Back to connectors' }} />
       <main className="mx-auto w-full max-w-3xl flex-1 px-4 pb-12 pt-5">
-        {!loaded ? (
+        {!loaded || (!connector && mode === 'live' && !items) ? (
           <div className="h-40 animate-pulse rounded-xl bg-card" aria-busy="true" />
         ) : connector ? (
-          <Detail c={connector} state={state} />
+          <Detail c={connector} state={state} instructions={item?.instructions} />
+        ) : item ? (
+          <article className="flex flex-col gap-7">
+            <h1 className="text-2xl font-semibold">{item.name}</h1>
+            {item.instructions && <Instructions text={item.instructions} />}
+          </article>
         ) : (
           <p className="text-muted-foreground">No connector with this id.</p>
         )}
@@ -37,7 +64,16 @@ function TaskLink({ state, id }: { state: Projection; id: string }) {
   )
 }
 
-function Detail({ c, state }: { c: Connector; state: Projection }) {
+function Instructions({ text }: { text: string }) {
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-sm font-medium">How to use</h2>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed">{text}</p>
+    </section>
+  )
+}
+
+function Detail({ c, state, instructions }: { c: Connector; state: Projection; instructions?: string | null }) {
   const uses = [...c.uses].reverse()
   const lastChange = uses.find((u) => u.record)
   const stored = c.credential.status === 'stored'
@@ -50,6 +86,8 @@ function Detail({ c, state }: { c: Connector; state: Projection }) {
         <h1 className="text-2xl font-semibold leading-tight">{c.name}</h1>
         <p className="text-sm text-muted-foreground">{c.provider}</p>
       </div>
+
+      {instructions && <Instructions text={instructions} />}
 
       {c.manages ? (
         <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">

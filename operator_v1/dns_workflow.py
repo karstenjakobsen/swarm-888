@@ -1,5 +1,5 @@
 from .catalog import CatalogError
-from .catalog_manifest import assign_canonical_id
+from .catalog_manifest import ConnectorManifest, assign_canonical_id
 from .connectors import ConnectorRead, ConnectorService
 from .credentials import (
     DIGITALOCEAN_ORIGIN,
@@ -12,8 +12,17 @@ from .state import RequestConflict, State
 from .typed_catalogs import TypedCatalogs
 
 CONNECTOR = "digitalocean-dns"
-SKILL = "list-digitalocean-dns-records"
 TOOL = "list_dns_records"
+INSTRUCTIONS = """Read all DNS records for one DigitalOcean zone.
+
+Call connector_read with this connector's ID and arguments containing one
+zone, for example {"zone": "example.com"}. The zone is the domain managed in
+DigitalOcean, such as example.com. Use the returned records to answer the request.
+
+DigitalOcean requires an owner-approved token with domain:read. If the
+credential dialog opens, wait for the owner to enter the token there, then
+retry the read with the same zone.
+"""
 DEFINITION = {
     "name": "DigitalOcean DNS",
     "endpoint": DIGITALOCEAN_ORIGIN,
@@ -22,18 +31,6 @@ DEFINITION = {
     "secret_ref": CONNECTOR,
     "timeout": 15,
 }
-GUIDE_FIELDS = {
-    "name": "List DigitalOcean DNS records",
-    "purpose": "Read the DNS records for one DigitalOcean zone.",
-    "skill_type": "guide",
-    "guide": "SKILL.md",
-}
-GUIDE = """# List DigitalOcean DNS records
-
-Use the approved DigitalOcean DNS connector and pass the requested zone to
-its read-only list_dns_records tool. If the credential dialog opens, wait for
-the owner. Verify success against the returned DigitalOcean records.
-"""
 
 
 class DnsWorkflow:
@@ -41,17 +38,22 @@ class DnsWorkflow:
         self.state = state
         self.catalogs = TypedCatalogs(state)
 
-    def save_catalog_item(self, kind, slug, fields, *, files=None):
-        binding = self.catalogs.for_kind(kind)
+    def ensure_connector(self) -> str:
+        binding = self.catalogs.for_kind("connector")
         if binding is None:
-            raise CatalogError(f"Connect a {kind} catalog to set up DigitalOcean DNS")
-        canonical_id = assign_canonical_id(binding.publisher, kind, slug)
-        for item in binding.snapshot(kind).items:
-            if item.manifest.canonical_id == canonical_id:
-                if any(getattr(item.manifest, field) != value for field, value in fields.items()):
-                    raise CatalogError(f"Review the existing {canonical_id} catalog definition")
-                return canonical_id
-        self.catalogs.write_item(kind, slug, fields, files=files)
+            raise CatalogError("Connect a connector catalog to set up DigitalOcean DNS")
+        canonical_id = assign_canonical_id(binding.publisher, "connector", CONNECTOR)
+        for item in binding.snapshot("connector").items:
+            manifest = item.manifest
+            if manifest.canonical_id != canonical_id:
+                continue
+            assert isinstance(manifest, ConnectorManifest)
+            if any(getattr(manifest, field) != value for field, value in DEFINITION.items()):
+                raise CatalogError(f"Review the existing {canonical_id} catalog definition")
+            return canonical_id
+        self.catalogs.write_item(
+            "connector", CONNECTOR, {**DEFINITION, "instructions": INSTRUCTIONS}
+        )
         return canonical_id
 
     def prepare(self, task: str, zone: str) -> str | None:
@@ -71,8 +73,7 @@ class DnsWorkflow:
                     {"action": "dns_task_objective", "zone": zone},
                 )
 
-        connector = self.save_catalog_item("connector", CONNECTOR, DEFINITION)
-        skill = self.save_catalog_item("skill", SKILL, GUIDE_FIELDS, files={"SKILL.md": GUIDE})
+        connector = self.ensure_connector()
         with self.state.transaction(write=True) as db:
             active = db.execute(
                 "SELECT 1 FROM tasks WHERE id=? AND checkpoint='running'", (task,)
@@ -83,8 +84,8 @@ class DnsWorkflow:
                 db,
                 task,
                 "evidence",
-                "Validated the local DigitalOcean connector and reusable DNS guide.",
-                {"action": "dns_prepared", "connector": connector, "skill": skill},
+                "Validated the local DigitalOcean connector.",
+                {"action": "dns_prepared", "connector": connector},
             )
             approved = db.execute(
                 "SELECT 1 FROM connector_approvals WHERE connector=? AND endpoint=? AND secret_ref=?",

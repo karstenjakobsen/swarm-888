@@ -1,13 +1,15 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, ValidationError
 
 from .catalog import Catalog, CatalogError, display_remote
 from .catalog_definitions import ConnectorDefinition
+from .catalog_manifest import ConnectorManifest
 from .credentials import (
     DIGITALOCEAN_ORIGIN,
     CredentialError,
@@ -23,9 +25,20 @@ from .tool_types import ToolArguments
 from .typed_catalogs import TypedCatalogs
 
 
-class ConnectorRead(ToolArguments):
+class ConnectorReference(ToolArguments):
     connector: SkillReference
+
+
+class ConnectorRead(ConnectorReference):
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Connector:
+    id: str
+    definition: ConnectorDefinition
+    revision: str
+    source: dict[str, str]
 
 
 def redact(value: JsonValue, secret: str) -> JsonValue:
@@ -47,29 +60,116 @@ class ConnectorService:
         self.task = task
         self.credentials = Credentials(state.settings, state)
 
-    def read(self, args: ConnectorRead, *, expected_destination: Destination | None = None) -> dict:
-        if not self.task:
-            raise CredentialError("Connector calls require a task")
+    def connector(self, reference: str) -> Connector:
         catalogs = TypedCatalogs(self.state)
         binding = catalogs.for_kind("connector")
         if binding:
-            item = binding.item("connector", catalogs.canonical_id("connector", args.connector))
-            config = item.manifest
-            source = binding.source(item)
-            revision = binding.revision
-        else:
-            if self.catalog is None:
-                raise CatalogError("Connect a connectors catalog first")
-            path = f"connectors/{args.connector}.json"
-            revision = self.catalog.git("rev-parse", "HEAD").strip()
-            config = ConnectorDefinition.model_validate_json(
+            item = binding.item("connector", catalogs.canonical_id("connector", reference))
+            assert isinstance(item.manifest, ConnectorManifest)
+            return Connector(
+                item.manifest.canonical_id, item.manifest, binding.revision, binding.source(item)
+            )
+        if self.catalog is None:
+            raise CatalogError("Connect a connectors catalog first")
+        revision = self.catalog.git("rev-parse", "HEAD").strip()
+        return self.legacy_connector(reference, revision)
+
+    def legacy_connector(self, reference: str, revision: str) -> Connector:
+        assert self.catalog is not None
+        path = f"connectors/{reference}.json"
+        try:
+            definition = ConnectorDefinition.model_validate_json(
                 self.catalog.git("show", f"{revision}:{path}")
             )
-            source = {
+        except ValidationError:
+            raise CatalogError(f"Invalid connector definition at {path}") from None
+        return Connector(
+            reference,
+            definition,
+            revision,
+            {
                 "repo": display_remote(self.catalog.config.remote),
                 "branch": self.catalog.config.branch,
                 "path": path,
-            }
+            },
+        )
+
+    def discover(self, query: str) -> dict:
+        binding = TypedCatalogs(self.state).for_kind("connector")
+        if binding:
+            connectors = [
+                Connector(
+                    item.manifest.canonical_id,
+                    item.manifest,
+                    binding.revision,
+                    binding.source(item),
+                )
+                for item in binding.snapshot("connector").items
+                if isinstance(item.manifest, ConnectorManifest)
+            ]
+        elif self.catalog:
+            revision = self.catalog.git("rev-parse", "HEAD").strip()
+            paths = self.catalog.git(
+                "ls-tree", "-r", "--name-only", "-z", revision, "--", "connectors/"
+            )
+            connectors = [
+                self.legacy_connector(
+                    path.removeprefix("connectors/").removesuffix(".json"), revision
+                )
+                for path in paths.split("\0")
+                if path.endswith(".json") and path.count("/") == 1
+            ]
+        else:
+            connectors = []
+        words = query.casefold().split()
+        return {
+            "connectors": [
+                {
+                    "connector": item.id,
+                    "name": item.definition.name,
+                    "tool": item.definition.tool,
+                    "has_instructions": item.definition.instructions is not None,
+                }
+                for item in connectors
+                if all(
+                    word in f"{item.id} {item.definition.name} {item.definition.tool}".casefold()
+                    for word in words
+                )
+            ]
+        }
+
+    def instructions(self, args: ConnectorReference) -> dict:
+        connector = self.connector(args.connector)
+        result = {
+            "connector": connector.id,
+            "name": connector.definition.name,
+            "tool": connector.definition.tool,
+            "instructions": connector.definition.instructions,
+            "catalog": connector.source,
+            "revision": connector.revision,
+        }
+        if self.task:
+            with self.state.transaction(write=True) as db:
+                self.state.append(
+                    db,
+                    self.task,
+                    "system",
+                    f"Looked up usage instructions for {connector.definition.name}.",
+                    {
+                        "action": "connector_instructions_read",
+                        "connector": connector.id,
+                        "catalog": connector.source,
+                        "revision": connector.revision,
+                        "instructions_available": connector.definition.instructions is not None,
+                    },
+                )
+        return result
+
+    def read(self, args: ConnectorRead, *, expected_destination: Destination | None = None) -> dict:
+        if not self.task:
+            raise CredentialError("Connector calls require a task")
+        connector = self.connector(args.connector)
+        config = connector.definition
         normal = Destination(endpoint=config.endpoint, secret_ref=config.secret_ref)
         if expected_destination is not None and normal != expected_destination:
             raise CredentialError("The catalog connector no longer matches the approved DNS plan")
@@ -101,8 +201,8 @@ class ConnectorService:
             "name": config.name,
             "tools": redact(tools, secret),
             "fingerprint": fingerprint(secret),
-            "catalog": source,
-            "revision": revision,
+            "catalog": connector.source,
+            "revision": connector.revision,
         }
         with self.state.transaction(write=True) as db:
             self.state.append(
