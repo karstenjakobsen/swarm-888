@@ -606,7 +606,7 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "checking" | "ready" | "required" | "starting" | "waiting" | "unavailable";
+            state: "checking" | "ready" | "required" | "starting" | "waiting" | "disconnecting" | "unavailable";
             login?: components["schemas"]["WorkerLoginChallenge"] | null;
             /** Message */
             message?: string | null;
@@ -615,6 +615,11 @@ export interface components {
              * @default false
              */
             reconnect: boolean;
+            /**
+             * Can Disconnect
+             * @default false
+             */
+            can_disconnect: boolean;
         };
         /** WorkerLoginChallenge */
         WorkerLoginChallenge: {
@@ -1348,7 +1353,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                action: "connect" | "cancel";
+                action: "connect" | "cancel" | "disconnect";
             };
             cookie?: never;
         };

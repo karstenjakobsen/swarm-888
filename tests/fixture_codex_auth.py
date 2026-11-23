@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 directory = Path(os.environ["OPERATOR_TEST_CODEX_AUTH_STATE"])
@@ -59,12 +60,16 @@ for line in sys.stdin:
         assert pending is not None
         pending.set()
         result = {"status": "canceled"}
+    elif method == "account/logout":
+        session.unlink(missing_ok=True)
     elif method == "thread/start":
         result = {"thread": {"id": "thread"}}
     elif method == "turn/start":
         result = {"turn": {"id": "turn"}}
     send({"id": request["id"], "result": result})
     if method == "turn/start":
+        while (directory / "hold-turn").exists():
+            time.sleep(0.04)
         turn = {"id": "turn", "status": "failed", "error": {"codexErrorInfo": "unauthorized"}}
         if session.exists():
             send(

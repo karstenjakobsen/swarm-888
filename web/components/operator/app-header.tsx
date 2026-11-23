@@ -17,7 +17,7 @@ const connLabel: Record<Connection, string> = {
 }
 
 export function AppHeader({ back }: { back?: { href: string; label: string } }) {
-  const { mode, name, connection, state, events, simulateDisconnect, resetScenario } = useOperator()
+  const { mode, name, revision, connection, state, events, simulateDisconnect, resetScenario } = useOperator()
   const [open, setOpen] = useState(false)
   const consistent = open && verdictDigest(state) === verdictDigest(replay(events))
   const inspecting = usePathname().startsWith('/inspect')
@@ -51,7 +51,10 @@ export function AppHeader({ back }: { back?: { href: string; label: string } }) 
         ) : null}
         <Link href="/" className="flex min-w-0 flex-col leading-tight">
           <span className="text-sm font-semibold">Operator</span>
-          <span className="truncate font-mono text-xs text-muted-foreground">{name || (mode === 'demo' ? 'vps-fra-1 · kj.dev' : 'Private operator')}</span>
+          <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground">
+            <span className="truncate">{name || (mode === 'demo' ? 'vps-fra-1 · kj.dev' : 'Private operator')}</span>
+            {revision && <code className="shrink-0" title={revision} aria-label={'Deployed revision ' + revision.slice(0, 7)}>{revision.slice(0, 7)}</code>}
+          </span>
         </Link>
         <div className="ml-auto flex items-center gap-1">
           <Link

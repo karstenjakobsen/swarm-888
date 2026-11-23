@@ -30,7 +30,9 @@ class MessageWorker:
             raise ValueError("OPERATOR_MODEL must be acknowledge, codex, or simulated")
         self.heartbeat = WorkerHeartbeat(settings, self.mode)
         self.wake = asyncio.Event()
-        self.auth = WorkerAuth(settings.directory, self.wake.set)
+        self.idle = asyncio.Event()
+        self.idle.set()
+        self.auth = WorkerAuth(settings.directory, self.wake.set, self.idle.wait)
 
     def default_mode(self) -> str:
         configured = self.settings.catalog_config.is_file() or TypedCatalogs(self.state).bindings()
@@ -89,10 +91,12 @@ class MessageWorker:
             )
             if task is None:
                 return
+            self.idle.clear()
             self.heartbeat.publish(task)
             try:
                 await self.run_task(task)
             finally:
+                self.idle.set()
                 self.heartbeat.publish()
 
     async def run_task(self, task: str):
@@ -147,6 +151,8 @@ class MessageWorker:
                 self.auth.start()
             elif command == b"auth/cancel\n":
                 self.auth.cancel()
+            elif command == b"auth/disconnect\n":
+                self.auth.disconnect()
             elif command != b"auth/status\n":
                 return
             writer.write(self.auth.status.model_dump_json().encode() + b"\n")

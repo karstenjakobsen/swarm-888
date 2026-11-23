@@ -25,6 +25,7 @@ function storeReducer(s: State, a: Action): State {
 type Ctx = {
   mode: OperatorMode
   name: string
+  revision?: string
   catalog?: components['schemas']['CatalogInfo']
   setCatalog: (catalog: Ctx['catalog']) => void
   state: Projection
@@ -41,7 +42,7 @@ type Ctx = {
 
 const OperatorContext = createContext<Ctx | null>(null)
 
-export function OperatorProvider({ mode, children }: { mode: OperatorMode; children: React.ReactNode }) {
+export function OperatorProvider({ mode, revision, children }: { mode: OperatorMode; revision?: string; children: React.ReactNode }) {
   const source = useMemo(() => operatorSource(mode), [mode])
   const [store, dispatch] = useReducer(storeReducer, { events: [], live: emptyProjection, loaded: false })
   const [connection, setConnection] = useState<Connection>('connecting')
@@ -167,7 +168,7 @@ export function OperatorProvider({ mode, children }: { mode: OperatorMode; child
     </main>
   }
   const value: Ctx = {
-    mode, name, catalog, setCatalog, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
+    mode, name, revision, catalog, setCatalog, state: store.live, events: store.events, loaded: store.loaded, connection, catchUp,
     dismissCatchUp: () => setCatchUp(null),
     simulateDisconnect: (ms = 14_000) => disconnect.current(ms),
     resetScenario: async () => {

@@ -284,7 +284,9 @@ def create_app(
             503: {"model": ApiError, "description": "Worker unavailable"},
         },
     )
-    async def change_worker_auth(action: Literal["connect", "cancel"]) -> WorkerAuthStatus:
+    async def change_worker_auth(
+        action: Literal["connect", "cancel", "disconnect"],
+    ) -> WorkerAuthStatus:
         report = read_worker_report(runtime)
         if report and (report.mode != "codex" or report.uid == 0):
             raise HTTPException(409, "ChatGPT sign-in requires an unprivileged Codex worker")

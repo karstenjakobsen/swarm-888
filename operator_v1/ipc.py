@@ -22,7 +22,7 @@ def wake_worker(path: Path) -> None:
 
 
 async def worker_auth(
-    path: Path, action: Literal["connect", "cancel", "status"]
+    path: Path, action: Literal["connect", "cancel", "disconnect", "status"]
 ) -> WorkerAuthStatus:
     async with asyncio.timeout(2):
         reader, writer = await asyncio.open_unix_connection(str(path), limit=4096)

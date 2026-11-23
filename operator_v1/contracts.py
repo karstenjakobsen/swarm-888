@@ -260,10 +260,13 @@ class WorkerLoginChallenge(BaseModel):
 
 
 class WorkerAuthStatus(BaseModel):
-    state: Literal["checking", "ready", "required", "starting", "waiting", "unavailable"]
+    state: Literal[
+        "checking", "ready", "required", "starting", "waiting", "disconnecting", "unavailable"
+    ]
     login: WorkerLoginChallenge | None = None
     message: str | None = None
     reconnect: bool = False
+    can_disconnect: bool = False
 
 
 class WorkerStatus(BaseModel):

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { Analytics } from '@vercel/analytics/next'
 import type { Metadata, Viewport } from 'next'
 import '@fontsource/ibm-plex-sans/latin-400.css'
@@ -41,12 +43,22 @@ export const viewport: Viewport = {
   ],
 }
 
+function deployedRevision() {
+  try {
+    const revision = readFileSync(resolve('..', '.framework-revision'), 'utf8').trim()
+    return /^[0-9a-f]{40}$/.test(revision) ? revision : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const mode = operatorMode()
+  const revision = mode === 'live' ? deployedRevision() : undefined
   return (
     <html lang="en" className="bg-background">
       <body className="min-h-dvh antialiased">
-        <OperatorProvider mode={mode}>{children}</OperatorProvider>
+        <OperatorProvider mode={mode} revision={revision}>{children}</OperatorProvider>
         {mode === 'demo' && process.env.NODE_ENV === 'production' && <Analytics />}
       </body>
     </html>

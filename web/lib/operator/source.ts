@@ -205,7 +205,7 @@ export async function readWorkerStatus(signal: AbortSignal): Promise<API['Worker
   return response.json()
 }
 
-export async function changeWorkerAuth(action: 'connect' | 'cancel'): Promise<API['WorkerAuthStatus']> {
+export async function changeWorkerAuth(action: 'connect' | 'cancel' | 'disconnect'): Promise<API['WorkerAuthStatus']> {
   return post('/api/worker/auth/' + action, {})
 }
 

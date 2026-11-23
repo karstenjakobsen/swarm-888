@@ -32,6 +32,8 @@ Open **Inspect → Workers** after signing in to see the worker's heartbeat, Lin
 
 If the Codex worker shows **Sign-in required**, choose **Connect** or **Reconnect**. Open the verification page and enter the displayed code. Device code login must be enabled in your ChatGPT security settings or by your workspace admin. When the worker shows **Ready**, it resumes queued model tasks automatically. [Codex device sign-in](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)
 
+Choose **Disconnect** to sign the worker out of ChatGPT. The worker finishes its current task before signing out and holds new model tasks until you reconnect.
+
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 
 To switch an existing installation, stop the controller and worker and export a state backup first. Run `python -m operator_v1.catalog_cli switch --from-remote <current-remote> --deploy-key` as the unprivileged operator account with the new `OPERATOR_CATALOG_REMOTE`, `OPERATOR_CATALOG_BRANCH`, and a separate `OPERATOR_CATALOG_CHECKOUT` configured in its environment. The switch requires a seeded target and archives the previous binding under `catalog-history` in the state directory. Start the controller and worker and check **Inspect → Catalog**.

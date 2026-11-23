@@ -22,6 +22,7 @@ const authLabels = {
   required: 'Sign-in required',
   starting: 'Requesting a code…',
   waiting: 'Waiting for ChatGPT sign-in',
+  disconnecting: 'Disconnecting…',
   unavailable: 'Sign-in status unavailable',
 }
 
@@ -41,6 +42,7 @@ export function WorkerTab() {
   const [acting, setActing] = useState(false)
   const [error, setError] = useState('')
   const actionVersion = useRef(0)
+  const disconnectDialog = useRef<HTMLDialogElement>(null)
 
   useEffect(() => {
     if (mode !== 'live') return
@@ -80,7 +82,7 @@ export function WorkerTab() {
     : 'No worker heartbeat yet'
   const task = online ? report?.active_task : null
 
-  async function updateAuth(action: 'connect' | 'cancel') {
+  async function updateAuth(action: 'connect' | 'cancel' | 'disconnect') {
     actionVersion.current += 1
     setActing(true)
     setError('')
@@ -120,6 +122,28 @@ export function WorkerTab() {
             )}
             {(auth.state === 'starting' || auth.state === 'waiting') && (
               <Button variant="outline" onClick={() => void updateAuth('cancel')} disabled={acting}>Cancel sign-in</Button>
+            )}
+            {auth.state === 'ready' && auth.can_disconnect && (
+              <>
+                <Button variant="outline" onClick={() => disconnectDialog.current?.showModal()} disabled={acting}>Disconnect</Button>
+                <dialog
+                  ref={disconnectDialog}
+                  aria-labelledby="disconnect-worker-title"
+                  className="m-auto w-[calc(100%-2rem)] max-w-sm rounded-xl border border-border bg-card p-5 text-card-foreground backdrop:bg-black/50"
+                >
+                  <form method="dialog" className="flex flex-col gap-4">
+                    <h4 id="disconnect-worker-title" className="font-semibold">Disconnect this worker?</h4>
+                    <p className="text-sm text-muted-foreground">The current task can finish. The worker will sign out of ChatGPT and hold new model tasks until you reconnect.</p>
+                    <div className="flex justify-end gap-2">
+                      <Button type="submit" variant="outline" autoFocus>Cancel</Button>
+                      <Button type="button" variant="destructive" onClick={() => {
+                        disconnectDialog.current?.close()
+                        void updateAuth('disconnect')
+                      }}>Disconnect</Button>
+                    </div>
+                  </form>
+                </dialog>
+              </>
             )}
           </div>
           {auth.login ? (
@@ -166,8 +190,8 @@ export function WorkerTab() {
               <WorkerField label="Started">
                 <time dateTime={report.started_at}>{new Date(report.started_at).toLocaleString()}</time>
               </WorkerField>
-              <WorkerField label="Framework revision">
-                {report.revision ? <code className="break-all">{report.revision}</code> : 'Unavailable'}
+              <WorkerField label="Worker revision">
+                {report.revision ? <code title={report.revision}>{report.revision.slice(0, 7)}</code> : 'Unavailable'}
               </WorkerField>
             </>
           )}

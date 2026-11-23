@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -13,9 +13,15 @@ LOGIN_TIMEOUT = 15 * 60
 class WorkerAuth:
     """Run device sign-in in the same environment as model turns."""
 
-    def __init__(self, directory: Path, wake: Callable[[], None]):
+    def __init__(
+        self,
+        directory: Path,
+        wake: Callable[[], None],
+        wait_until_idle: Callable[[], Awaitable[bool]],
+    ):
         self.directory = directory
         self.wake = wake
+        self.wait_until_idle = wait_until_idle
         self.status = WorkerAuthStatus(state="checking")
         self.activity: asyncio.Task[None] | None = None
         self.next_check = 0.0
@@ -35,39 +41,44 @@ class WorkerAuth:
         *,
         login: WorkerLoginChallenge | None = None,
         message: str | None = None,
+        can_disconnect: bool = False,
     ) -> None:
         status = WorkerAuthStatus(
             state=state,
             login=login,
             message=message,
             reconnect=self.status.reconnect or state == "ready",
+            can_disconnect=can_disconnect,
         )
         if status != self.status:
             self.status = status
             self.wake()
 
     @staticmethod
-    async def has_account(rpc: CodexRpc) -> bool:
-        account = await rpc.request("account/read", {"refreshToken": False})
-        return account["account"] is not None or account["requiresOpenaiAuth"] is False
+    async def read_account(rpc: CodexRpc) -> tuple[bool, bool]:
+        result = await rpc.request("account/read", {"refreshToken": False})
+        account = result["account"]
+        ready = account is not None or result["requiresOpenaiAuth"] is False
+        return ready, account is not None and account.get("type") == "chatgpt"
 
     async def check(self, current: WorkerAuthStatus) -> None:
         try:
             async with asyncio.timeout(8), app_server(self.directory, lambda *_: None) as rpc:
-                ready = await self.has_account(rpc)
+                ready, chatgpt = await self.read_account(rpc)
         except (ModelError, OSError, TimeoutError, ValueError, KeyError):
             if self.status is current:
                 self.publish("unavailable", message="Could not check the worker’s Codex session.")
         else:
             if self.status is current:
-                self.publish("ready" if ready else "required")
+                self.publish("ready" if ready else "required", can_disconnect=chatgpt)
         finally:
             self.next_check = time.monotonic() + (60 if self.status.state == "ready" else 15)
 
     def require_reconnect(self) -> None:
         # A local account read can still see the credential that the provider rejected.
         self.rejected = True
-        self.publish("required", message="Codex rejected the worker’s saved session.")
+        if self.status.state != "disconnecting":
+            self.publish("required", message="Codex rejected the worker’s saved session.")
 
     def start(self) -> None:
         if self.status.state not in ("required", "unavailable"):
@@ -81,6 +92,37 @@ class WorkerAuth:
             self.next_check = time.monotonic() + 15
             self.publish("required", message="Sign-in canceled.")
             self.activity.cancel()
+
+    def disconnect(self) -> None:
+        if self.status.state != "ready" or not self.status.can_disconnect:
+            return
+        previous = self.activity if self.busy() else None
+        self.publish("disconnecting")
+        self.activity = asyncio.create_task(self.sign_out(previous))
+
+    async def sign_out(self, previous: asyncio.Task[None] | None) -> None:
+        try:
+            if previous:
+                await asyncio.shield(asyncio.gather(previous, return_exceptions=True))
+            await self.wait_until_idle()
+            async with asyncio.timeout(15), app_server(self.directory, lambda *_: None) as rpc:
+                # Recheck the account in case its credentials changed since the last probe.
+                ready, chatgpt = await self.read_account(rpc)
+                if chatgpt:
+                    await rpc.request("account/logout", {})
+                    ready, chatgpt = await self.read_account(rpc)
+                if chatgpt:
+                    raise ModelError("Codex still reports a ChatGPT session")
+        except (ModelError, OSError, TimeoutError, ValueError, KeyError):
+            self.publish(
+                "required" if self.rejected else "unavailable",
+                message="Could not confirm that Codex signed out.",
+            )
+        else:
+            self.rejected = False
+            self.publish("ready" if ready else "required")
+        finally:
+            self.next_check = time.monotonic() + (60 if self.status.state == "ready" else 15)
 
     async def close(self) -> None:
         if self.busy() and self.activity:
@@ -117,8 +159,11 @@ class WorkerAuth:
                             if notice.get("loginId") == login_id:
                                 break
                     async with asyncio.timeout(8):
-                        if not notice.get("success") or not await self.has_account(rpc):
+                        if not notice.get("success"):
                             raise ModelError("Codex did not verify sign-in")
+                        _, chatgpt = await self.read_account(rpc)
+                        if not chatgpt:
+                            raise ModelError("Codex did not verify the ChatGPT account")
                 except (asyncio.CancelledError, TimeoutError):
                     with suppress(ModelError, OSError, TimeoutError):
                         async with asyncio.timeout(2):
@@ -130,6 +175,6 @@ class WorkerAuth:
             self.publish("required", message="ChatGPT sign-in did not complete. Try again.")
         else:
             self.rejected = False
-            self.publish("ready")
+            self.publish("ready", can_disconnect=True)
         finally:
             self.next_check = time.monotonic() + (60 if self.status.state == "ready" else 15)

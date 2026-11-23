@@ -23,11 +23,14 @@ def test_worker_sign_in_keeps_the_queue_and_recovers_after_rejection(tmp_path):
     with controller(settings) as client, process(["operator_v1.worker"], env):
         connect = "/api/worker/auth/connect"
         cancel = "/api/worker/auth/cancel"
+        disconnect = "/api/worker/auth/disconnect"
         assert client.get("/api/worker").status_code == 401
         assert client.post(connect, headers=headers(settings)).status_code == 401
+        assert client.post(disconnect, headers=headers(settings)).status_code == 401
         login(client, settings)
         assert client.post(connect).status_code == 403
         assert client.post(cancel).status_code == 403
+        assert client.post(disconnect).status_code == 403
 
         def auth():
             return client.get("/api/worker").json()["auth"] or {}
@@ -79,6 +82,38 @@ def test_worker_sign_in_keeps_the_queue_and_recovers_after_rejection(tmp_path):
         wait_until(
             lambda: any(
                 event["kind"] == "answered" and event["task"] == queued
+                for event in snapshot()["events"]
+            )
+        )
+
+        # Disconnect drains the current model turn and holds the next task.
+        assert auth()["can_disconnect"] is True
+        hold = tmp_path / "hold-turn"
+        hold.touch()
+        running = submit()
+        wait_until(lambda: client.get("/api/worker").json()["report"]["active_task"] == running)
+        assert client.post(disconnect, headers=headers(settings)).json()["state"] == "disconnecting"
+        assert client.post(disconnect, headers=headers(settings)).json()["state"] == "disconnecting"
+        held = submit()
+        assert (tmp_path / "codex-session").is_file()
+        hold.unlink()
+
+        wait_until(lambda: auth()["state"] == "required")
+        assert auth()["can_disconnect"] is False
+        assert not (tmp_path / "codex-session").exists()
+        worker = client.get("/api/worker").json()
+        assert worker["health"] == "online"
+        assert worker["queued_tasks"] == 1
+        assert any(
+            event["kind"] == "answered" and event["task"] == running
+            for event in snapshot()["events"]
+        )
+        assert client.post(connect, headers=headers(settings)).json()["state"] == "starting"
+        wait_until(lambda: auth().get("state") == "waiting")
+        (tmp_path / "approve").touch()
+        wait_until(
+            lambda: any(
+                event["kind"] == "answered" and event["task"] == held
                 for event in snapshot()["events"]
             )
         )
