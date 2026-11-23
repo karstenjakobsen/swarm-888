@@ -11,9 +11,13 @@
     toolchain: /opt/swarm-operator-tools
     node_version: "24.18.0"
     codex_version: "0.166.0"
-    codex_sha256: a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978
     codex_dir: "{{ toolchain }}/codex-{{ codex_version }}"
     codex_cli: "{{ codex_dir }}/codex-x86_64-unknown-linux-musl"
+    codex_assets:
+      - name: codex-x86_64-unknown-linux-musl.tar.gz
+        sha256: a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978
+      - name: codex-code-mode-host-x86_64-unknown-linux-musl.tar.gz
+        sha256: 7588334fd47bc4003d970b70dfd4d1e4578491b1e9baa72976a4c2d7e97590da
     uv_version: "0.12.5"
     operator_home: /var/lib/swarm-operator
     operator_state: "{{ operator_home }}/state"
@@ -82,20 +86,34 @@
             group: root
             mode: '0755'
 
-        - name: Download the checksum-pinned Codex release
+        - name: Download the checksum-pinned Codex CLI and code-mode host
           ansible.builtin.get_url:
-            url: "https://github.com/openai/codex/releases/download/rust-v{{ codex_version }}/codex-x86_64-unknown-linux-musl.tar.gz"
-            dest: "{{ codex_cli }}.tar.gz"
-            checksum: "sha256:{{ codex_sha256 }}"
+            url: "https://github.com/openai/codex/releases/download/rust-v{{ codex_version }}/{{ item.name }}"
+            dest: "{{ codex_dir }}/{{ item.name }}"
+            checksum: "sha256:{{ item.sha256 }}"
             owner: root
             group: root
             mode: '0644'
+          loop: "{{ codex_assets }}"
+          loop_control:
+            label: "{{ item.name }}"
 
-        - name: Unpack the pinned Codex release
+        - name: Unpack the pinned Codex CLI and code-mode host
           ansible.builtin.unarchive:
-            src: "{{ codex_cli }}.tar.gz"
+            src: "{{ codex_dir }}/{{ item.name }}"
             dest: "{{ codex_dir }}"
             remote_src: true
+            owner: root
+            group: root
+          loop: "{{ codex_assets }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: Link the code-mode host beside the Codex CLI
+          ansible.builtin.file:
+            src: codex-code-mode-host-x86_64-unknown-linux-musl
+            path: "{{ codex_dir }}/codex-code-mode-host"
+            state: link
             owner: root
             group: root
 

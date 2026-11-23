@@ -16,7 +16,7 @@ From the repository root, run the single-host playbook with the pinned framework
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml
 ```
 
-For catalog authoring through the Operator API, select `codex` mode. The playbook installs the pinned Codex CLI and checks sign-in as `swarm-operator` before switching the worker.
+For catalog authoring through the Operator API, select `codex` mode. The playbook installs the Codex CLI and its code-mode host from the same pinned release, then checks sign-in as `swarm-operator` before switching the worker.
 
 ```sh
 uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e operator_worker_mode=codex
