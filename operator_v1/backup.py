@@ -1,15 +1,17 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import tarfile
 import tempfile
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from pathlib import Path
 
 from .catalog import Catalog, run_git
 from .config import Settings
 from .state import State
+from .typed_catalogs import TypedCatalogs, branch_checkout, catalog_branch_id
 
 STATE_FILES = (
     "owner.key",
@@ -18,9 +20,10 @@ STATE_FILES = (
     "skill-dependencies.json",
     "fixture-engine.json",
 )
-STATE_DIRECTORIES = ("revisions", "workspaces", "secrets", "defense")
+STATE_DIRECTORIES = ("revisions", "workspaces", "secrets", "defense", "catalog-history")
 DATABASE = "operator.sqlite3"
 BUNDLE = "catalog.bundle"
+TYPED_BUNDLES = "typed-catalog-bundles"
 
 
 def safe_entry(entry: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -40,9 +43,35 @@ def export(settings: Settings, destination: Path) -> None:
         settings.service_lock("worker"),
         settings.service_lock("controller"),
         catalog.locked() if catalog else nullcontext(),
+        ExitStack() as locks,
         tempfile.TemporaryDirectory(dir=destination.parent) as staging,
     ):
         work = Path(staging)
+        with closing(
+            sqlite3.connect((settings.directory / DATABASE).as_uri() + "?mode=ro", uri=True)
+        ) as source:
+            source.row_factory = sqlite3.Row
+            has_branches = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_branches'"
+            ).fetchone()
+            branches = (
+                [
+                    branch_checkout(settings, row)
+                    for row in source.execute("SELECT * FROM catalog_branches ORDER BY id")
+                ]
+                if has_branches
+                else []
+            )
+        bundle_dir = work / TYPED_BUNDLES
+        if branches:
+            bundle_dir.mkdir()
+        for checkout in branches:
+            locks.enter_context(checkout.locked())
+            if checkout.git("status", "--porcelain"):
+                raise ValueError("Commit or stash catalog edits before exporting")
+            checkout.git(
+                "bundle", "create", str(bundle_dir / f"{checkout.branch_id}.bundle"), "--all"
+            )
         with (
             closing(sqlite3.connect(settings.directory / DATABASE)) as source,
             closing(sqlite3.connect(work / DATABASE)) as snapshot,
@@ -54,8 +83,8 @@ def export(settings: Settings, destination: Path) -> None:
             catalog.git("bundle", "create", str(work / BUNDLE), "--all")
         archive_path = work / "operator.tar.gz"
         with tarfile.open(archive_path, mode="w:gz") as archive:
-            for name in (DATABASE, BUNDLE):
-                if (work / name).is_file():
+            for name in (DATABASE, BUNDLE, TYPED_BUNDLES):
+                if (work / name).exists():
                     archive.add(work / name, arcname=name, filter=safe_entry)
             for name in (*STATE_FILES, *STATE_DIRECTORIES):
                 if (settings.directory / name).exists():
@@ -65,7 +94,7 @@ def export(settings: Settings, destination: Path) -> None:
 
 
 def extract(archive: tarfile.TarFile, directory: Path) -> None:
-    names = {DATABASE, BUNDLE, *STATE_FILES, *STATE_DIRECTORIES}
+    names = {DATABASE, BUNDLE, TYPED_BUNDLES, *STATE_FILES, *STATE_DIRECTORIES}
     seen = set()
     for entry in archive:
         parts = Path(entry.name).parts
@@ -74,7 +103,14 @@ def extract(archive: tarfile.TarFile, directory: Path) -> None:
             or parts[0] not in names
             or ".." in parts
             or entry.name in seen
-            or (parts[0] not in STATE_DIRECTORIES and len(parts) != 1)
+            or (parts[0] not in (*STATE_DIRECTORIES, TYPED_BUNDLES) and len(parts) != 1)
+            or (
+                parts[0] == TYPED_BUNDLES
+                and (
+                    len(parts) > 2
+                    or (len(parts) == 2 and not re.fullmatch(r"[0-9a-f]{24}\.bundle", parts[1]))
+                )
+            )
         ):
             raise ValueError(f"Unexpected backup entry: {entry.name}")
         seen.add(entry.name)
@@ -114,6 +150,46 @@ def restore(settings: Settings, source: Path, checkout: Path | None = None) -> N
             config = json.loads(staged.catalog_config.read_text())
             config["checkout"] = str(checkout.resolve())
             staged.catalog_config.write_text(json.dumps(config))
+        branches = TypedCatalogs(state).branches()
+        for binding in branches:
+            config = binding.catalog.config
+            identity = binding.catalog.branch_id
+            typed_checkout = work / "typed-catalogs" / identity
+            typed_checkout.parent.mkdir(mode=0o700, exist_ok=True)
+            run_git(
+                "clone",
+                "--branch",
+                config.branch,
+                str(work / TYPED_BUNDLES / f"{identity}.bundle"),
+                str(typed_checkout),
+            )
+            run_git("remote", "set-url", "origin", config.remote, cwd=typed_checkout)
+            with state.transaction(write=True) as db:
+                db.execute(
+                    "UPDATE catalog_branches SET checkout=? WHERE id=?",
+                    (
+                        str(target / "typed-catalogs" / identity),
+                        identity,
+                    ),
+                )
+        with state.transaction(write=True) as db:
+            migration = db.execute(
+                "SELECT config,completed FROM catalog_migration WHERE id=1"
+            ).fetchone()
+            if migration:
+                original = json.loads(migration["config"])
+                if migration["completed"]:
+                    identity = catalog_branch_id(original["remote"], original["branch"])
+                    original["checkout"] = str(target / "typed-catalogs" / identity)
+                elif checkout:
+                    original["checkout"] = str(checkout.resolve())
+                db.execute(
+                    "UPDATE catalog_migration SET config=? WHERE id=1", (json.dumps(original),)
+                )
+        if (work / TYPED_BUNDLES).is_dir():
+            for typed_bundle in (work / TYPED_BUNDLES).iterdir():
+                typed_bundle.unlink()
+            (work / TYPED_BUNDLES).rmdir()
         bundle.unlink(missing_ok=True)
         work.rename(target)
 

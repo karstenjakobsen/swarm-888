@@ -12,12 +12,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .catalog import Catalog, CatalogError, display_remote
+from .catalog_publish import CatalogPublishing
 from .catalog_setup import CatalogSetup
 from .config import Settings
 from .contracts import (
     ApiError,
     CatalogConnection,
     CatalogInfo,
+    CatalogItemWrite,
+    CatalogPublishPreview,
+    CatalogPublishTips,
     CatalogStatus,
     DockerStart,
     OwnerLogin,
@@ -32,7 +36,10 @@ from .contracts import (
 from .credentials import CredentialError, Credentials
 from .ipc import wake_worker
 from .operations import Operations, OperationUnavailable
+from .skill_program import SkillError, SkillRevision
+from .skills import Skills
 from .state import RequestConflict, State
+from .typed_catalogs import TypedCatalogs
 from .worker_status import HEARTBEAT_MAX_AGE, read_worker_report
 
 COOKIE = "operator_session"
@@ -151,6 +158,13 @@ def create_app(
             snapshot.catalog = CatalogInfo(
                 remote=display_remote(config.remote), branch=config.branch
             )
+        else:
+            bindings = TypedCatalogs(store).bindings()
+            if bindings:
+                config = bindings[0][1].catalog.config
+                snapshot.catalog = CatalogInfo(
+                    remote=display_remote(config.remote), branch=config.branch
+                )
         return snapshot
 
     @app.get("/api/catalog", dependencies=[Depends(owner)], responses={401: unauthorized})
@@ -173,6 +187,55 @@ def create_app(
         setup.connect(body)
         wake_worker(runtime.socket)
         return setup.status()
+
+    @app.post(
+        "/api/catalog/items",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def write_catalog_item(body: CatalogItemWrite) -> CatalogStatus:
+        TypedCatalogs(store).write_item(body.kind, body.item, body.definition)
+        return CatalogSetup(runtime, store).status()
+
+    @app.post(
+        "/api/catalog/branches/{branch_id}/pull",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def pull_catalog_branch(branch_id: str) -> CatalogStatus:
+        TypedCatalogs(store).pull(branch_id)
+        return CatalogSetup(runtime, store).status()
+
+    @app.get(
+        "/api/catalog/branches/{branch_id}/publish",
+        dependencies=[Depends(owner)],
+        responses={401: unauthorized, 409: catalog_mutation[409]},
+    )
+    def preview_catalog_publish(branch_id: str) -> CatalogPublishPreview:
+        return CatalogPublishing(store).preview(branch_id)
+
+    @app.post(
+        "/api/catalog/branches/{branch_id}/publish",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def publish_catalog_branch(branch_id: str, body: CatalogPublishTips) -> CatalogStatus:
+        CatalogPublishing(store).publish(branch_id, body)
+        return CatalogSetup(runtime, store).status()
+
+    @app.post(
+        "/api/catalog/skills/activate",
+        dependencies=[Depends(owner), Depends(same_origin)],
+        responses=catalog_mutation,
+    )
+    def activate_catalog_skill(body: SkillRevision) -> CatalogStatus:
+        skills = Skills(None, store)
+        try:
+            skills.test(body.skill, body.revision)
+            skills.activate(body.skill, body.revision, owner=True)
+        except SkillError as error:
+            raise HTTPException(409, str(error)) from None
+        return CatalogSetup(runtime, store).status()
 
     @app.post(
         "/api/catalog/{action}",

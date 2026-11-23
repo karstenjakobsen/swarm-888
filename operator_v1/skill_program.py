@@ -6,6 +6,9 @@ from pydantic import Field, JsonValue, StringConstraints, field_validator
 from .tool_types import ToolArguments
 
 SkillId = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,47}$")]
+SkillReference = Annotated[
+    str, StringConstraints(pattern=r"^(?:[a-z][a-z0-9-]{0,47}|[a-z0-9]+(?:-[a-z0-9]+)*)$")
+]
 Revision = Annotated[str, StringConstraints(pattern=r"^([a-f0-9]{40}|[a-f0-9]{64})$")]
 Row = dict[str, JsonValue]
 FileMode = Annotated[str, StringConstraints(pattern=r"^[0-7]{3}$")]
@@ -13,6 +16,11 @@ FileMode = Annotated[str, StringConstraints(pattern=r"^[0-7]{3}$")]
 
 class SkillError(RuntimeError):
     """A skill could not be built or used."""
+
+
+class SkillRevision(ToolArguments):
+    skill: SkillReference
+    revision: Revision
 
 
 class ExecutableProgram(ToolArguments):

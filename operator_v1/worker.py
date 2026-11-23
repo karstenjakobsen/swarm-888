@@ -12,6 +12,7 @@ from .model import ModelError, ModelSession, codex_session, connect_skills
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
+from .typed_catalogs import TypedCatalogs
 from .worker_status import HEARTBEAT_INTERVAL, WorkerHeartbeat
 
 
@@ -29,7 +30,8 @@ class MessageWorker:
         self.heartbeat = WorkerHeartbeat(settings, self.mode)
 
     def default_mode(self) -> str:
-        return "codex" if self.settings.catalog_config.is_file() else "acknowledge"
+        configured = self.settings.catalog_config.is_file() or TypedCatalogs(self.state).bindings()
+        return "codex" if configured else "acknowledge"
 
     async def run_turn(self, session: ModelSession, task: str) -> str | None:
         text = self.state.text(task)

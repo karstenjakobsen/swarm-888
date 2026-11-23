@@ -5,11 +5,13 @@ import tempfile
 from hashlib import sha256
 from pathlib import Path
 
+from .builtin_skills import builtin_skills
 from .catalog import AUTHORING_SKILL, Catalog, CatalogError, display_remote
 from .config import Settings
 from .contracts import CatalogConnection, CatalogInfo, CatalogStatus, CatalogSync
 from .skills import Skills
 from .state import State
+from .typed_catalogs import TypedCatalogs
 
 # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 GITHUB_HOST_KEY = (
@@ -93,9 +95,13 @@ class CatalogSetup:
                 Path(record.name).unlink(missing_ok=True)
 
     def status(self) -> CatalogStatus:
-        key = self.public_key()
+        setup = {
+            "public_key": self.public_key(),
+            "builtins": builtin_skills(),
+            "connections": TypedCatalogs(self.state).status(),
+        }
         if not self.settings.catalog_config.exists():
-            return CatalogStatus(public_key=key)
+            return CatalogStatus(**setup)
         catalog = Catalog.load(self.settings)
         return CatalogStatus(
             **self.sync(catalog).model_dump(),
@@ -104,12 +110,22 @@ class CatalogSetup:
             ),
             local_revision=catalog.git("rev-parse", "HEAD").strip(),
             authoring_revision=self.state.active_skill_revision(AUTHORING_SKILL),
-            public_key=key,
+            **setup,
         )
 
     def connect(self, request: CatalogConnection) -> None:
         if request.deploy_key and not self.public_key():
             raise CatalogError("Generate and register the deploy key before connecting.")
+        if request.kinds is not None:
+            TypedCatalogs(self.state).connect(
+                request.remote,
+                request.branch,
+                request.kinds,
+                publisher=request.publisher,
+                deploy_key=request.deploy_key,
+                replace=request.replace,
+            )
+            return
         identity = sha256(f"{request.remote}\n{request.branch}".encode()).hexdigest()[:24]
         checkout = self.settings.directory / "catalog-checkouts" / identity
         if self.settings.catalog_config.exists():

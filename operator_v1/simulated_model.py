@@ -114,6 +114,7 @@ class SimulatedModel:
         else:
             await self.call("skill_authoring_guide")
             candidate = await self.call("skill_scaffold", skill=skill, **fixture)
+            skill = candidate["skill"]
             await self.call("skill_test", **candidate)
             await self.call("skill_activate", **candidate)
         name = "run_" + skill

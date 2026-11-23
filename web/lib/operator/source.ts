@@ -219,6 +219,27 @@ export async function runCatalogAction(action: 'key' | 'check' | 'publish'): Pro
   return post(`/api/catalog/${action}`, {})
 }
 
+export async function pullCatalogBranch(branch: string): Promise<API['CatalogStatus']> {
+  return post(`/api/catalog/branches/${encodeURIComponent(branch)}/pull`, {})
+}
+
+export async function previewCatalogPublish(branch: string): Promise<API['CatalogPublishPreview']> {
+  const response = await fetch(`/api/catalog/branches/${encodeURIComponent(branch)}/publish`, { cache: 'no-store' })
+  if (!response.ok) {
+    const error = await response.json().catch(() => null)
+    throw new AccessError(response.status, error?.detail ?? 'Could not preview publishing.')
+  }
+  return response.json()
+}
+
+export async function publishCatalogBranch(branch: string, tips: API['CatalogPublishTips']): Promise<API['CatalogStatus']> {
+  return post(`/api/catalog/branches/${encodeURIComponent(branch)}/publish`, tips)
+}
+
+export async function activateCatalogSkill(skill: string, revision: string): Promise<API['CatalogStatus']> {
+  return post('/api/catalog/skills/activate', { skill, revision })
+}
+
 // Keep the retry ID through an outage or a reload in this tab. Store only a
 // digest of the message. Acknowledgment releases the ID for a new submission.
 async function messageKey(text: string) {

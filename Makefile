@@ -4,9 +4,10 @@ PNPM := corepack pnpm
 WEB_PORT ?= 3000
 CONTROLLER_PORT ?= 8000
 CADDY ?= caddy
+NEXT_BUILD_FLAGS ?=
 export NEXT_TELEMETRY_DISABLED := 1
 
-.PHONY: setup lint format test check web controller worker owner-key gateway api-types check-types build test-live-ui catalog-init acceptance-docker acceptance-recovery
+.PHONY: setup lint format test check web controller worker owner-key gateway api-types check-types build test-live-ui catalog-init acceptance-docker acceptance-recovery acceptance-catalog
 setup:
 	uv sync --locked
 	cd web && $(PNPM) install --frozen-lockfile
@@ -29,7 +30,7 @@ check-types:
 	$(PY) -m operator_v1.generate_types --check
 
 build:
-	cd web && $(PNPM) run build
+	cd web && $(PNPM) run build $(NEXT_BUILD_FLAGS)
 
 check: lint test check-types build
 
@@ -66,6 +67,9 @@ acceptance-docker: build
 
 acceptance-recovery:
 	OPERATOR_ACCEPTANCE_DOCKER=1 $(PY) -m pytest -q -s tests/test_operations.py
+
+acceptance-catalog: build
+	cd web && CADDY="$(CADDY)" $(PNPM) exec playwright test tests/catalog.spec.ts --workers=1
 
 .PHONY: backup restore
 backup:

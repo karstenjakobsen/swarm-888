@@ -9,6 +9,7 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from pydantic import Field, JsonValue, ValidationError
 
+from .builtin_skills import CONNECT_CATALOG, builtin_guide
 from .catalog import Catalog, CatalogError
 from .config import Settings
 from .connectors import ConnectorRead, ConnectorService
@@ -25,10 +26,10 @@ from .memory import (
 )
 from .projects import ReadProject, read_project
 from .skill_program import (
-    Revision,
     SkillDefinition,
     SkillError,
-    SkillId,
+    SkillReference,
+    SkillRevision,
 )
 from .skills import Skills
 from .state import State
@@ -42,18 +43,13 @@ class Discover(ToolArguments):
 
 
 class Scaffold(ToolArguments):
-    skill: SkillId
+    skill: SkillReference
     definition: SkillDefinition
     entrypoint: str | None = Field(default=None, max_length=32_768)
 
 
-class SkillRevision(ToolArguments):
-    skill: SkillId
-    revision: Revision
-
-
 class Invoke(ToolArguments):
-    skill: SkillId
+    skill: SkillReference
     arguments: dict[str, JsonValue]
 
 
@@ -66,6 +62,7 @@ TOOLS = {
         ToolArguments,
         "Read the foundational skill and the definition template.",
     ),
+    "catalog_connection_guide": (ToolArguments, "Read the bundled owner catalog setup guide."),
     "skill_dependencies": (
         ToolArguments,
         "List owner-approved external commands and argument rules.",
@@ -113,8 +110,7 @@ LOCAL_WRITE_TOOLS = frozenset(
 def build_server(skills: Skills) -> Server:
     server = Server("operator-skills")
     memory = MemoryStore(skills.state, skills.task)
-    connectors = ConnectorService(skills.catalog, skills.state, skills.task)
-    goals = StandingGoals(skills.catalog.settings, skills.state)
+    goals = StandingGoals(skills.state.settings, skills.state)
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -151,6 +147,9 @@ def build_server(skills: Skills) -> Server:
             case "skill_authoring_guide":
                 ToolArguments.model_validate(arguments)
                 return skills.authoring_guide()
+            case "catalog_connection_guide":
+                ToolArguments.model_validate(arguments)
+                return builtin_guide(CONNECT_CATALOG)
             case "skill_dependencies":
                 ToolArguments.model_validate(arguments)
                 return skills.dependencies()
@@ -179,7 +178,9 @@ def build_server(skills: Skills) -> Server:
             case "memory_remove":
                 return memory.remove(RemoveMemory.model_validate(arguments))
             case "connector_read":
-                return connectors.read(ConnectorRead.model_validate(arguments))
+                return ConnectorService(skills.catalog, skills.state, skills.task).read(
+                    ConnectorRead.model_validate(arguments)
+                )
             case "goal_list":
                 ToolArguments.model_validate(arguments)
                 return goals.goals()
@@ -222,7 +223,8 @@ def build_server(skills: Skills) -> Server:
 
 async def serve(task: str | None) -> None:
     settings = Settings.load()
-    server = build_server(Skills(Catalog.load(settings), State(settings), task))
+    catalog = Catalog.load(settings) if settings.catalog_config.is_file() else None
+    server = build_server(Skills(catalog, State(settings), task))
     options = server.create_initialization_options(NotificationOptions(tools_changed=True))
     async with stdio_server() as (read, write):
         await server.run(read, write, options)

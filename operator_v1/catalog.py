@@ -24,11 +24,18 @@ class CatalogError(RuntimeError):
 
 
 def run_git(
-    *args: str, cwd: Path | None = None, check: bool = True, ssh_command: str | None = None
+    *args: str,
+    cwd: Path | None = None,
+    check: bool = True,
+    ssh_command: str | None = None,
+    input_text: str | None = None,
+    index: Path | None = None,
 ) -> subprocess.CompletedProcess:
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if ssh_command is not None:
         env["GIT_SSH_COMMAND"] = ssh_command
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     return subprocess.run(
         [
             "git",
@@ -44,6 +51,7 @@ def run_git(
         ],
         cwd=cwd,
         capture_output=True,
+        input=input_text,
         text=True,
         check=check,
         timeout=30,
@@ -69,16 +77,17 @@ class CatalogConfig:
 
 
 class Catalog:
-    def __init__(self, settings: Settings, config: CatalogConfig):
+    def __init__(self, settings: Settings, config: CatalogConfig, *, branch_id: str | None = None):
         self.settings = settings
         self.config = config
         self.checkout = Path(config.checkout)
+        self.branch_id = branch_id
 
     @classmethod
     def load(cls, settings: Settings) -> "Catalog":
         return cls(settings, CatalogConfig(**json.loads(settings.catalog_config.read_text())))
 
-    def git(self, *args: str) -> str:
+    def git(self, *args: str, input_text: str | None = None, index: Path | None = None) -> str:
         ssh = None
         if self.config.deploy_key:
             directory = self.settings.directory / "catalog-ssh"
@@ -102,14 +111,21 @@ class Catalog:
                 ]
             )
         try:
-            return run_git(*args, cwd=self.checkout, ssh_command=ssh).stdout
+            return run_git(
+                *args,
+                cwd=self.checkout,
+                ssh_command=ssh,
+                input_text=input_text,
+                index=index,
+            ).stdout
         except (OSError, subprocess.SubprocessError):
             # Git's diagnostics can include credentials embedded in the URL.
             raise CatalogError(f"Git {args[0]} failed for the configured catalog") from None
 
     @contextmanager
     def locked(self) -> Generator[None, None, None]:
-        with (self.settings.directory / "catalog.lock").open("a") as lock:
+        name = f"catalog-{self.branch_id}.lock" if self.branch_id else "catalog.lock"
+        with (self.settings.directory / name).open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
 
@@ -162,16 +178,7 @@ class Catalog:
                     raise CatalogError("This state directory is already bound to a catalog")
                 previous = settings.catalog_config.read_bytes()
 
-            checkout.mkdir(parents=True, exist_ok=True)
-            if not any(checkout.iterdir()):
-                catalog.git("init", "--initial-branch", branch)
-                catalog.git("remote", "add", "origin", remote)
-            if not (checkout / ".git").is_dir():
-                raise CatalogError("Choose an empty directory or a catalog Git checkout")
-            if catalog.git("config", "--get", "remote.origin.url").strip() != remote:
-                raise CatalogError("The checkout points to a different remote")
-            if catalog.git("symbolic-ref", "--short", "HEAD").strip() != branch:
-                raise CatalogError("The checkout is on a different branch")
+            catalog.prepare_checkout()
 
             refs = catalog.git("ls-remote", "--heads", "origin")
             branch_ref = f"refs/heads/{branch}"
@@ -233,10 +240,26 @@ class Catalog:
                         replacement.unlink(missing_ok=True)
             return cls(settings, config)
 
-    def pull(self) -> None:
+    def prepare_checkout(self) -> None:
+        self.checkout.mkdir(parents=True, exist_ok=True)
+        if not any(self.checkout.iterdir()):
+            self.git("init", "--initial-branch", self.config.branch)
+            self.git("remote", "add", "origin", self.config.remote)
+        if not (self.checkout / ".git").is_dir():
+            raise CatalogError("Choose an empty directory or a catalog Git checkout")
+        if self.git("config", "--get", "remote.origin.url").strip() != self.config.remote:
+            raise CatalogError("The checkout points to a different remote")
+        if self.git("symbolic-ref", "--short", "HEAD").strip() != self.config.branch:
+            raise CatalogError("The checkout is on a different branch")
+
+    def fetch(self) -> str:
         if self.git("status", "--porcelain"):
             raise CatalogError("Catalog checkout has local changes")
         self.git("fetch", "origin", f"refs/heads/{self.config.branch}")
+        return self.git("rev-parse", "FETCH_HEAD").strip()
+
+    def pull(self) -> None:
+        self.fetch()
         try:
             self.git("merge", "--ff-only", "FETCH_HEAD")
         except CatalogError:
@@ -259,11 +282,20 @@ class Catalog:
         target = self.settings.directory / "revisions" / revision / skill
         if target.is_dir():
             return target
+        return self.retain_files(
+            skill,
+            revision,
+            {name: self.git("show", f"{revision}:skills/{skill}/{name}") for name in files},
+        )
+
+    def retain_files(self, skill: str, revision: str, files: dict[str, str]) -> Path:
+        target = self.settings.directory / "revisions" / revision / skill
+        if target.is_dir():
+            return target
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(dir=target.parent))
         try:
-            for filename in files:
-                content = self.git("show", f"{revision}:skills/{skill}/{filename}")
+            for filename, content in files.items():
                 (temporary / filename).write_text(content)
             temporary.rename(target)
         finally:

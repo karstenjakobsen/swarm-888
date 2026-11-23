@@ -74,6 +74,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/catalog/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Write Catalog Item */
+        post: operations["write_catalog_item_api_catalog_items_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalog/branches/{branch_id}/pull": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pull Catalog Branch */
+        post: operations["pull_catalog_branch_api_catalog_branches__branch_id__pull_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalog/branches/{branch_id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Preview Catalog Publish */
+        get: operations["preview_catalog_publish_api_catalog_branches__branch_id__publish_get"];
+        put?: never;
+        /** Publish Catalog Branch */
+        post: operations["publish_catalog_branch_api_catalog_branches__branch_id__publish_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/catalog/skills/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Activate Catalog Skill */
+        post: operations["activate_catalog_skill_api_catalog_skills_activate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/catalog/{action}": {
         parameters: {
             query?: never;
@@ -185,6 +254,19 @@ export interface components {
             /** Detail */
             detail: string;
         };
+        /** BuiltinSkillInfo */
+        BuiltinSkillInfo: {
+            /** Skill */
+            skill: string;
+            /** Name */
+            name: string;
+            /** Revision */
+            revision: string;
+            /** Path */
+            path: string;
+            /** Guide */
+            guide: string;
+        };
         /** CatalogConnection */
         CatalogConnection: {
             /** Remote */
@@ -204,6 +286,39 @@ export interface components {
              * @default false
              */
             seed_if_empty: boolean;
+            /** Kinds */
+            kinds?: ("skill" | "connector" | "project")[] | null;
+            /** Publisher */
+            publisher?: string | null;
+            /**
+             * Replace
+             * @default false
+             */
+            replace: boolean;
+        };
+        /** CatalogConnectionInfo */
+        CatalogConnectionInfo: {
+            /** Remote */
+            remote: string;
+            /** Branch */
+            branch: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "skill" | "connector" | "project";
+            /** Branch Id */
+            branch_id: string;
+            /** Revision */
+            revision: string;
+            /** Items */
+            items: components["schemas"]["CatalogItemInfo"][];
+            /** Remote Revision */
+            remote_revision?: string | null;
+            /** Published Revision */
+            published_revision?: string | null;
+            /** Publish Error */
+            publish_error?: string | null;
         };
         /** CatalogInfo */
         CatalogInfo: {
@@ -211,6 +326,79 @@ export interface components {
             remote: string;
             /** Branch */
             branch: string;
+        };
+        /** CatalogItemInfo */
+        CatalogItemInfo: {
+            /** Canonical Id */
+            canonical_id: string;
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string;
+            /** Active Revision */
+            active_revision?: string | null;
+        };
+        /** CatalogItemWrite */
+        CatalogItemWrite: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "connector" | "project";
+            /** Item */
+            item: string;
+            /** Definition */
+            definition: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
+        };
+        /** CatalogPendingCommit */
+        CatalogPendingCommit: {
+            /** Revision */
+            revision: string;
+            /** Subject */
+            subject: string;
+            /** Paths */
+            paths: string[];
+        };
+        /** CatalogPendingItem */
+        CatalogPendingItem: {
+            /** Canonical Id */
+            canonical_id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "skill" | "connector" | "project";
+            /** Path */
+            path: string;
+            /** Paths */
+            paths: string[];
+            /**
+             * Change
+             * @enum {string}
+             */
+            change: "added" | "changed" | "moved" | "removed";
+        };
+        /** CatalogPublishPreview */
+        CatalogPublishPreview: {
+            /** Remote Revision */
+            remote_revision: string;
+            /** Local Revision */
+            local_revision: string;
+            /** Commits */
+            commits: components["schemas"]["CatalogPendingCommit"][];
+            /** Items */
+            items: components["schemas"]["CatalogPendingItem"][];
+        };
+        /** CatalogPublishTips */
+        CatalogPublishTips: {
+            /** Remote Revision */
+            remote_revision: string;
+            /** Local Revision */
+            local_revision: string;
         };
         /** CatalogStatus */
         CatalogStatus: {
@@ -229,6 +417,10 @@ export interface components {
             authoring_revision?: string | null;
             /** Public Key */
             public_key?: string | null;
+            /** Connections */
+            connections?: components["schemas"]["CatalogConnectionInfo"][];
+            /** Builtins */
+            builtins?: components["schemas"]["BuiltinSkillInfo"][];
         };
         /** DockerStart */
         DockerStart: {
@@ -344,6 +536,13 @@ export interface components {
         Receipt: {
             /** Taskid */
             taskId: string;
+        };
+        /** SkillRevision */
+        SkillRevision: {
+            /** Skill */
+            skill: string;
+            /** Revision */
+            revision: string;
         };
         /** Snapshot */
         Snapshot: {
@@ -659,6 +858,295 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CatalogConnection"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Catalog setup could not complete */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    write_catalog_item_api_catalog_items_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogItemWrite"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Catalog setup could not complete */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    pull_catalog_branch_api_catalog_branches__branch_id__pull_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                branch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Catalog setup could not complete */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    preview_catalog_publish_api_catalog_branches__branch_id__publish_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                branch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogPublishPreview"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Catalog setup could not complete */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    publish_catalog_branch_api_catalog_branches__branch_id__publish_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                branch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogPublishTips"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogStatus"];
+                };
+            };
+            /** @description Owner authentication required */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Same-origin owner action required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Catalog setup could not complete */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Invalid request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    activate_catalog_skill_api_catalog_skills_activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillRevision"];
             };
         };
         responses: {

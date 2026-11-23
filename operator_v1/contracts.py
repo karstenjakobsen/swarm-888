@@ -132,6 +132,60 @@ class CatalogInfo(BaseModel):
     branch: str
 
 
+CatalogKind = Literal["skill", "connector", "project"]
+
+
+class BuiltinSkillInfo(BaseModel):
+    skill: str
+    name: str
+    revision: str
+    path: str
+    guide: str
+
+
+class CatalogItemInfo(BaseModel):
+    canonical_id: str
+    name: str
+    path: str
+    revision: str
+    active_revision: str | None = None
+
+
+class CatalogConnectionInfo(CatalogInfo):
+    kind: CatalogKind
+    branch_id: str
+    revision: str
+    items: list[CatalogItemInfo]
+    remote_revision: str | None = None
+    published_revision: str | None = None
+    publish_error: str | None = None
+
+
+class CatalogPublishTips(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    remote_revision: str
+    local_revision: str
+
+
+class CatalogPendingCommit(BaseModel):
+    revision: str
+    subject: str
+    paths: list[str]
+
+
+class CatalogPendingItem(BaseModel):
+    canonical_id: str
+    kind: CatalogKind
+    path: str
+    paths: list[str]
+    change: Literal["added", "changed", "moved", "removed"]
+
+
+class CatalogPublishPreview(CatalogPublishTips):
+    commits: list[CatalogPendingCommit]
+    items: list[CatalogPendingItem]
+
+
 class CatalogConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     remote: Annotated[
@@ -147,6 +201,11 @@ class CatalogConnection(BaseModel):
     ] = "main"
     deploy_key: bool = False
     seed_if_empty: bool = False
+    kinds: list[CatalogKind] | None = Field(default=None, min_length=1, max_length=3)
+    publisher: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")] | None = (
+        None
+    )
+    replace: bool = False
 
 
 class CatalogSync(BaseModel):
@@ -161,6 +220,15 @@ class CatalogStatus(CatalogSync):
     local_revision: str | None = None
     authoring_revision: str | None = None
     public_key: str | None = None
+    connections: list[CatalogConnectionInfo] = Field(default_factory=list)
+    builtins: list[BuiltinSkillInfo] = Field(default_factory=list)
+
+
+class CatalogItemWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["connector", "project"]
+    item: Annotated[str, StringConstraints(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+    definition: dict[str, JsonValue]
 
 
 class Snapshot(BaseModel):

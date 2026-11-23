@@ -95,6 +95,34 @@ INCIDENT_LIMIT_SCHEMA = (
     "ALTER TABLE incidents ADD COLUMN attempt_limit INTEGER NOT NULL DEFAULT 3",
     "ALTER TABLE incidents ADD COLUMN observation_limit INTEGER NOT NULL DEFAULT 8",
 )
+CATALOG_SCHEMA = (
+    """CREATE TABLE catalog_branches(
+        id TEXT PRIMARY KEY, remote TEXT NOT NULL, branch TEXT NOT NULL,
+        checkout TEXT NOT NULL UNIQUE, publisher TEXT NOT NULL, deploy_key INTEGER NOT NULL,
+        revision TEXT NOT NULL, UNIQUE(remote,branch))""",
+    """CREATE TABLE catalog_connections(
+        kind TEXT PRIMARY KEY CHECK(kind IN ('skill','connector','project')),
+        branch_id TEXT NOT NULL REFERENCES catalog_branches(id))""",
+)
+CATALOG_SKILL_SCHEMA = """CREATE TABLE catalog_skill_revisions(
+    skill TEXT NOT NULL, revision TEXT NOT NULL, branch_id TEXT NOT NULL REFERENCES catalog_branches(id),
+    path TEXT NOT NULL, PRIMARY KEY(skill,revision),
+    FOREIGN KEY(skill,revision) REFERENCES skill_revisions(skill,revision))"""
+CATALOG_PUBLISH_SCHEMA = (
+    "ALTER TABLE catalog_branches ADD COLUMN remote_revision TEXT",
+    "UPDATE catalog_branches SET remote_revision=revision",
+    "ALTER TABLE catalog_branches ADD COLUMN published_revision TEXT",
+    "ALTER TABLE catalog_branches ADD COLUMN publish_error TEXT",
+)
+CATALOG_MIGRATION_SCHEMA = (
+    """CREATE TABLE catalog_migration(
+       id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL, publisher TEXT NOT NULL,
+       base_revision TEXT NOT NULL, revision TEXT NOT NULL, aliases TEXT NOT NULL,
+       completed INTEGER NOT NULL DEFAULT 0)""",
+    """CREATE TABLE catalog_legacy_ids(
+       kind TEXT NOT NULL, legacy_id TEXT NOT NULL, canonical_id TEXT NOT NULL,
+       PRIMARY KEY(kind,legacy_id))""",
+)
 
 
 class RequestConflict(ValueError):
@@ -108,7 +136,7 @@ class State:
         self.path = settings.directory / "operator.sqlite3"
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 10:
+            if version > 14:
                 raise ValueError(f"Unsupported state schema {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -140,7 +168,18 @@ class State:
             if version < 10:
                 for statement in INCIDENT_LIMIT_SCHEMA:
                     db.execute(statement)
-                db.execute("PRAGMA user_version=10")
+            if version < 11:
+                for statement in CATALOG_SCHEMA:
+                    db.execute(statement)
+            if version < 12:
+                db.execute(CATALOG_SKILL_SCHEMA)
+            if version < 13:
+                for statement in CATALOG_PUBLISH_SCHEMA:
+                    db.execute(statement)
+            if version < 14:
+                for statement in CATALOG_MIGRATION_SCHEMA:
+                    db.execute(statement)
+                db.execute("PRAGMA user_version=14")
 
     @contextmanager
     def transaction(self, *, write: bool = False) -> Generator[sqlite3.Connection, None, None]:

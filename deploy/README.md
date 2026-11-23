@@ -22,6 +22,16 @@ On a fresh install, open **Connect a catalog** and use **Generate deploy key** t
 
 To switch an existing installation, stop the controller and worker and export a state backup first. Run `python -m operator_v1.catalog_cli switch --from-remote <current-remote> --deploy-key` as the unprivileged operator account with the new `OPERATOR_CATALOG_REMOTE`, `OPERATOR_CATALOG_BRANCH`, and a separate `OPERATOR_CATALOG_CHECKOUT` configured in its environment. The switch requires a seeded target and archives the previous binding under `catalog-history` in the state directory. Start the controller and worker and check **Inspect → Catalog**.
 
+With the typed catalog release installed, preview a migration of the existing `packages-888/main` checkout from the VPS using the operator account.
+
+```sh
+cd /opt/swarm-operator
+sudo -u swarm-operator -H env OPERATOR_STATE_DIR=/var/lib/swarm-operator/state \
+  .venv/bin/python -m operator_v1.catalog_cli migrate --publisher karstenjakobsen
+```
+
+To apply, stop the controller and worker and export a private backup to a new path before running the same command with `--apply`. Restart both services and check a pre-migration task's revision link. Review the branch preview in **Inspect → Catalog** to publish the local migration commit. Before publication, you can recover by restoring the backup into a separate state directory and selecting it in the service environment file.
+
 On 2026-11-23, server-212 switched to `git@github.com:karstenjakobsen/packages-888.git` on `main`. The active authoring seed is `c1bc1e2749ba6379a11b8f62841f13f55e5efefc`, and the private pre-switch backup is `/var/lib/swarm-operator/before-packages-888-20261123.tar.gz`. The operator profile, tasks, memory, fixture skill revisions, and standing goal were checked after the switch. The existing fixture was healthy at mode `0600` and triggered zero additional repairs. The VPS catalog displayed **Read verified** and **Publish unverified**.
 
 The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.

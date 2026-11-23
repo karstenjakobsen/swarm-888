@@ -51,7 +51,28 @@ Run `codex login status` as the account running the worker. Restart the worker a
 
 Executable skills commit `skill.json`, `run.lua`, and `tests.json` together. The generic executor runs the retained entry point from the selected revision in a separate process. Self-tests supply mock command outputs. Live calls use dependency names and argument rules approved in `skill-dependencies.json` in the owner-controlled state directory. The acceptance runner supplies this file for its Docker fixtures. Catalog data can declare dependencies and can only call arguments permitted by that policy.
 
-Use `make catalog-pull` to fast-forward the clean catalog checkout and `make catalog-push` to publish its commits. A divergent remote leaves the local branch and the fetched branch intact for a normal Git merge. Previously activated revisions run from retained contents during an outage. Define a project in `projects/<id>.json` with `name`, `description`, and its separate `repo` URL. The operator's `project_read` tool links that definition to the current task.
+For a legacy catalog, use `make catalog-pull` to fast-forward the clean checkout and `make catalog-push` to publish its commits. A divergent remote leaves the local branch and the fetched branch intact for a normal Git merge. Previously activated revisions run from retained contents during an outage. Legacy project definitions live at `projects/<id>.json`.
+
+To inspect typed YAML manifests, run `.venv/bin/python -m operator_v1.catalog_cli discover`. It reads `operator.yaml` at the root and in immediate subfolders of the accepted catalog commit. Use `--revision <full-sha>` to inspect another local commit and `--kind skill` to select a kind. A skill references a sibling Lua file and a sibling JSON self-test file. Discovery reports committed contents and leaves the checkout and active revisions untouched.
+
+In **Inspect → Catalog**, enter the repository and branch once and select the kinds that share it. **Pull branch** refreshes discovery and keeps active skill revisions pinned. **Preview publish** shows every outgoing commit and path, including connector or project files on a branch connected only for skills. Use **Publish reviewed commits** after reviewing the branch preview.
+
+### Migrate an existing catalog
+
+Run the migration as the operator service account with the existing state directory and legacy catalog checkout. For `packages-888/main`, use the publisher `karstenjakobsen`. The dry run shows the proposed bindings, canonical IDs, and file changes.
+
+```sh
+.venv/bin/python -m operator_v1.catalog_cli migrate --publisher karstenjakobsen
+```
+
+Stop the controller and worker, then back up and apply. Use a new private backup path outside the state directory.
+
+```sh
+make backup OPERATOR_BACKUP=/path/to/operator-before-typed-catalog.tar.gz
+.venv/bin/python -m operator_v1.catalog_cli migrate --publisher karstenjakobsen --apply
+```
+
+Repeat the apply command after an interruption. It resumes the recorded commit and completes the bindings. The migration creates a local commit for owner review. Start the controller and worker, open an original task and its revision link, and review the migrated branch in **Inspect → Catalog**. Review and test any newly converted skill before approving publication. To recover before publication, restore the backup into a separate state directory and point the services at that restored state.
 
 Ask the operator to remember an entry or open Inspect → Memory and select **Ask the operator to correct this**. Corrections record a new revision with its task and retain the previous text. Reads record the exact revision and the reading task.
 
@@ -71,6 +92,8 @@ To run the public fixture UI locally, use `cd web && OPERATOR_MODE=demo corepack
 - `make test-live-ui` runs Playwright against the production UI, a real loopback Caddy origin, FastAPI and a separate worker using disposable state. Install the test browser once with `cd web && corepack pnpm exec playwright install chromium`. The browser check covers owner sign-in, task submission, unauthorized and cross-origin requests, a controller outage during a queued task, stream catch-up and reload.
 - `make acceptance-docker` creates a fresh external catalog and starts a temporary live stack. It creates uniquely labeled Docker fixtures, submits two tasks through the phone-width browser, compares tool output with independent Docker observations, and verifies revision reuse after a worker restart. The runner removes its containers and retains the private state path and `evidence.json` so the task pages can be reopened.
 - `make acceptance-recovery` interrupts a disposable worker after one authorized start of a stopped fixture. It checks the recovered SQLite checkpoint, the independent Docker state, and the absence of a second dispatch. The separate unreadable-target test verifies a bounded unknown outcome.
+- `make acceptance-catalog` runs the typed catalog and copied-state migration browser scenarios against temporary bare repositories. Set `OPERATOR_CATALOG_ACCEPTANCE_DIR` to a private directory outside the checkout to retain the state and `evidence.json` files. Pass `NEXT_BUILD_FLAGS=--webpack` when local restrictions prevent Turbopack from binding its build socket.
+- To rehearse with saved Docker acceptance state, set `OPERATOR_CATALOG_MIGRATION_SOURCE` to its retained directory containing `state/` and `evidence.json`. The walkthrough copies the state, uses a temporary bare remote, opens the original task and revision, and independently checks the recorded empty-selection case against Docker.
 
 The recovery fixture uses an owner-installed engine command in `fixture-engine.json`. The acceptance test writes that configuration for its temporary state. The worker keeps authorization and journaling in the framework and invokes the configured command for observation and dispatch.
 

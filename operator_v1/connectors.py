@@ -1,30 +1,22 @@
 import asyncio
 from datetime import timedelta
-from typing import Annotated, Literal
 
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import Field, JsonValue, StringConstraints
+from pydantic import Field, JsonValue
 
-from .catalog import Catalog, display_remote
+from .catalog import Catalog, CatalogError, display_remote
+from .catalog_definitions import ConnectorDefinition
 from .credentials import CredentialError, Credentials, Destination, fingerprint
-from .skill_program import SkillId
+from .skill_program import SkillReference
 from .state import State
 from .tool_types import ToolArguments
-
-ToolName = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_.-]{1,80}$")]
-
-
-class ConnectorDefinition(Destination):
-    name: str = Field(min_length=1, max_length=100)
-    auth: Literal["bearer"]
-    tool: ToolName
-    timeout: float = Field(default=3, ge=0.1, le=20)
+from .typed_catalogs import TypedCatalogs
 
 
 class ConnectorRead(ToolArguments):
-    connector: SkillId
+    connector: SkillReference
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -41,17 +33,35 @@ def redact(value: JsonValue, secret: str) -> JsonValue:
 
 
 class ConnectorService:
-    def __init__(self, catalog: Catalog, state: State, task: str | None):
+    def __init__(self, catalog: Catalog | None, state: State, task: str | None):
         self.catalog = catalog
         self.state = state
         self.task = task
-        self.credentials = Credentials(catalog.settings, state)
+        self.credentials = Credentials(state.settings, state)
 
     def read(self, args: ConnectorRead) -> dict:
         if not self.task:
             raise CredentialError("Connector calls require a task")
-        path = f"connectors/{args.connector}.json"
-        config = ConnectorDefinition.model_validate_json(self.catalog.git("show", f"HEAD:{path}"))
+        catalogs = TypedCatalogs(self.state)
+        binding = catalogs.for_kind("connector")
+        if binding:
+            item = binding.item("connector", catalogs.canonical_id("connector", args.connector))
+            config = item.manifest
+            source = binding.source(item)
+            revision = binding.revision
+        else:
+            if self.catalog is None:
+                raise CatalogError("Connect a connectors catalog first")
+            path = f"connectors/{args.connector}.json"
+            revision = self.catalog.git("rev-parse", "HEAD").strip()
+            config = ConnectorDefinition.model_validate_json(
+                self.catalog.git("show", f"{revision}:{path}")
+            )
+            source = {
+                "repo": display_remote(self.catalog.config.remote),
+                "branch": self.catalog.config.branch,
+                "path": path,
+            }
         normal = Destination(endpoint=config.endpoint, secret_ref=config.secret_ref)
         secret = self.credentials.require(self.task, args.connector, normal)
         if not secret:
@@ -78,11 +88,8 @@ class ConnectorService:
             "name": config.name,
             "tools": redact(tools, secret),
             "fingerprint": fingerprint(secret),
-            "catalog": {
-                "repo": display_remote(self.catalog.config.remote),
-                "branch": self.catalog.config.branch,
-                "path": path,
-            },
+            "catalog": source,
+            "revision": revision,
         }
         with self.state.transaction(write=True) as db:
             self.state.append(
