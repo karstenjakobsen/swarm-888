@@ -4,7 +4,7 @@ The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Us
 
 ## Deploy the pinned VPS release with Ansible
 
-From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `8a406c8` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and private Git catalog live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `49088ca` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
 
 ```sh
 ansible-playbook -i server-212, deploy/ansible/deploy.yml
@@ -19,6 +19,10 @@ ssh -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:127.0.0.1:18080 server-21
 Open **Inspect → Worker** after signing in to see the worker's heartbeat, active task, queue depth, and runtime details. The tab refreshes about every three seconds. A heartbeat older than 30 seconds is shown as stale.
 
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore. The deployed root fixture worker runs in acknowledgment mode.
+
+To switch an existing installation, stop the controller and worker and export a state backup first. Run `python -m operator_v1.catalog_cli switch --from-remote <current-remote> --deploy-key` as the unprivileged operator account with the new `OPERATOR_CATALOG_REMOTE`, `OPERATOR_CATALOG_BRANCH`, and a separate `OPERATOR_CATALOG_CHECKOUT` configured in its environment. The switch requires a seeded target and archives the previous binding under `catalog-history` in the state directory. Start the controller and worker and check **Inspect → Catalog**.
+
+On 2026-11-23, server-212 switched to `git@github.com:karstenjakobsen/packages-888.git` on `main`. The active authoring seed is `c1bc1e2749ba6379a11b8f62841f13f55e5efefc`, and the private pre-switch backup is `/var/lib/swarm-operator/before-packages-888-20261123.tar.gz`. The operator profile, tasks, memory, fixture skill revisions, and standing goal were checked after the switch. The existing fixture was healthy at mode `0600` and triggered zero additional repairs. The VPS catalog displayed **Read verified** and **Publish unverified**.
 
 The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.
 
