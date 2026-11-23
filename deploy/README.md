@@ -4,10 +4,16 @@ The local SSH configuration resolves `server-212` to `root@212.132.68.43:22`. Us
 
 ## Deploy the pinned VPS release with Ansible
 
-From the repository root, run the single-host playbook with Ansible Core 2.19 and the pinned framework commit `752e7b0` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+Sync the project environment from the repository root to install Ansible Core 2.20.
 
 ```sh
-ansible-playbook -i server-212, deploy/ansible/deploy.yml
+uv sync --locked
+```
+
+From the repository root, run the single-host playbook with the pinned framework commit `752e7b0` available in the local Git checkout. The host needs systemd, x86-64 Linux, Python with `venv`, Git, and Caddy. The playbook archives the pinned commit, builds it with a private Node 24 runtime, and starts the operator on loopback ports. The owner state and catalog checkout live under `/var/lib/swarm-operator`. The worker runs as root in acknowledgment mode and processes the standing-goal queue.
+
+```sh
+uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml
 ```
 
 Open the private tunnel from your workstation and visit [the operator UI](http://127.0.0.1:18080). Sign in with the owner key at `/var/lib/swarm-operator/state/owner.key`. Keep the local port at `18080` to match the configured browser origin.
@@ -41,11 +47,11 @@ Chromium opened the original task `2875c102c148464c87ec80af96f15a5d` and its pin
 The commands below record the original reboot acceptance with framework revision `13f3819`. That acceptance playbook creates a baseline once, using a command dispatch probe and one permissions fixture in the operator state directory. The reboot playbook reboots the entire VPS and requires an authorized maintenance window.
 
 ```sh
-ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
-ansible-playbook -i server-212, deploy/ansible/acceptance.yml
-ansible-playbook -i server-212, deploy/ansible/reboot.yml -e '{"operator_reboot_authorized":true}'
-ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
-ansible-playbook -i server-212, deploy/ansible/acceptance.yml -e acceptance_phase=after
+uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
+uv run --locked ansible-playbook -i server-212, deploy/ansible/acceptance.yml
+uv run --locked ansible-playbook -i server-212, deploy/ansible/reboot.yml -e '{"operator_reboot_authorized":true}'
+uv run --locked ansible-playbook -i server-212, deploy/ansible/deploy.yml -e '{"framework_revision":"13f38198f37d320d397e4bec260400bf51924f6a","bootstrap_acceptance_catalog":true}'
+uv run --locked ansible-playbook -i server-212, deploy/ansible/acceptance.yml -e acceptance_phase=after
 ```
 
 ### Server-212 acceptance on 2026-11-22
