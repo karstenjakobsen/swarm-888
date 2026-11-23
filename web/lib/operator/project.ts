@@ -471,7 +471,10 @@ function reduce(p: Projection, e: OperatorEvent): Projection {
           command: e.data.command,
           output: e.data.output,
           routine: e.data.routine,
-          link: e.data.skill ? skillLink(e.data.skill.id, e.data.skill.revision) : undefined,
+          link: e.data.skill ? skillLink(e.data.skill.id, e.data.skill.revision) : e.data.package ? {
+            href: `/inspect/${e.data.package.kind}s/${encodeURIComponent(e.data.package.id)}`,
+            label: `${e.data.package.id} @ ${e.data.package.revision.slice(0, 12)}`,
+          } : undefined,
         }),
       )
     case 'task.answered':

@@ -17,8 +17,9 @@ class MemoryReview:
         with self.state.transaction() as db:
             row = db.execute(
                 """SELECT verified.task
-                   FROM dns_requests AS request JOIN events AS verified ON verified.task=request.task
-                   WHERE verified.kind='verified'
+                   FROM events AS verified JOIN tasks ON tasks.id=verified.task
+                   WHERE tasks.checkpoint='completed' AND (verified.kind='verified' OR
+                     (verified.kind='completed' AND json_type(verified.data,'$.proof')='array'))
                      AND NOT EXISTS (
                         SELECT 1 FROM events AS review WHERE review.task=verified.task
                         AND review.kind='system' AND json_extract(review.data,'$.action')='memory_reviewed')

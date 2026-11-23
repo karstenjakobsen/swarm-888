@@ -9,10 +9,11 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from pydantic import Field, JsonValue, ValidationError
 
+from .admin import HostCall, broker, invoke_host
 from .builtin_skills import CONNECT_CATALOG, builtin_guide
 from .catalog import Catalog, CatalogError
 from .config import Settings
-from .connectors import ConnectorRead, ConnectorReference, ConnectorService
+from .connectors import ConnectorInvoke, ConnectorRead, ConnectorReference, ConnectorService
 from .credentials import CredentialError
 from .goals import ChangeGoal, CreateGoal, GoalError, StandingGoals
 from .memory import (
@@ -24,6 +25,7 @@ from .memory import (
     SearchMemory,
     WriteMemory,
 )
+from .packages import SaveConnector, SaveProject, discover_projects, save_package
 from .projects import ReadProject, read_project
 from .skill_program import (
     SkillDefinition,
@@ -89,6 +91,27 @@ TOOLS = {
         "Read usage instructions from the connector's accepted catalog definition.",
     ),
     "connector_read": (ConnectorRead, "Use the configured read-only MCP tool for a connector."),
+    "host_operations": (
+        ToolArguments,
+        "List the machine administrator’s delegated host operations and permitted arguments.",
+    ),
+    "host_invoke": (
+        HostCall,
+        "Execute a delegated host operation for this task and record its observation.",
+    ),
+    "connector_save": (
+        SaveConnector,
+        "Test HTTP operation fixtures, commit and activate the connector locally. To extend, read connector_instructions, preserve existing operations and pass its revision as base_revision.",
+    ),
+    "connector_invoke": (
+        ConnectorInvoke,
+        "Invoke a named operation. Writes require owner intent for the actual change and verify via a readback.",
+    ),
+    "project_discover": (Discover, "Find catalog projects by name or ID."),
+    "project_save": (
+        SaveProject,
+        "Validate references, commit and activate a project. For edits pass the revision from project_read.",
+    ),
     "goal_list": (ToolArguments, "List standing fixture-file goals and their status."),
     "goal_create": (
         CreateGoal,
@@ -102,6 +125,11 @@ TOOLS = {
 }
 LOCAL_WRITE_TOOLS = frozenset(
     {
+        "connector_invoke",
+        "host_invoke",
+        "skill_invoke",
+        "connector_save",
+        "project_save",
         "skill_scaffold",
         "skill_test",
         "skill_activate",
@@ -130,9 +158,11 @@ def build_server(skills: Skills, *, memory_review: bool = False) -> Server:
                 description=description,
                 inputSchema=model.model_json_schema(),
                 annotations=types.ToolAnnotations(
-                    readOnlyHint=name not in LOCAL_WRITE_TOOLS,
-                    destructiveHint=False,
-                    openWorldHint=False,
+                    readOnlyHint=name not in LOCAL_WRITE_TOOLS
+                    and name not in ("connector_invoke", "skill_invoke", "host_invoke"),
+                    destructiveHint=name in ("connector_invoke", "skill_invoke", "host_invoke"),
+                    openWorldHint=name
+                    in ("connector_invoke", "connector_read", "skill_invoke", "host_invoke"),
                 ),
             )
             for name, (model, description) in TOOLS.items()
@@ -142,7 +172,7 @@ def build_server(skills: Skills, *, memory_review: bool = False) -> Server:
                 name=NAMED_PREFIX + item["skill"],
                 description=item["description"],
                 inputSchema=skills.input_schema(item["skill"], item["revision"]),
-                annotations=types.ToolAnnotations(readOnlyHint=True, openWorldHint=False),
+                annotations=types.ToolAnnotations(readOnlyHint=False, openWorldHint=True),
             )
             for item in active
             if item["source"] == "executable"
@@ -211,6 +241,20 @@ def build_server(skills: Skills, *, memory_review: bool = False) -> Server:
                 return ConnectorService(skills.catalog, skills.state, skills.task).read(
                     ConnectorRead.model_validate(arguments)
                 )
+            case "host_operations":
+                return broker({"list": True})
+            case "host_invoke":
+                return invoke_host(skills.state, skills.task, HostCall.model_validate(arguments))
+            case "connector_save" | "project_save":
+                schema = SaveConnector if name == "connector_save" else SaveProject
+                return save_package(skills.state, skills.task, schema.model_validate(arguments))
+            case "connector_invoke":
+                call = ConnectorInvoke.model_validate(arguments)
+                return ConnectorService(skills.catalog, skills.state, skills.task).read(
+                    call, operation=call.operation
+                )
+            case "project_discover":
+                return discover_projects(skills.state, Discover.model_validate(arguments).query)
             case "goal_list":
                 ToolArguments.model_validate(arguments)
                 return goals.goals()

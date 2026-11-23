@@ -12,9 +12,6 @@ from .skill_program import SkillId
 from .state import State
 from .tool_types import ToolArguments
 
-DIGITALOCEAN_ORIGIN = "https://api.digitalocean.com"
-DIGITALOCEAN_SCOPE = "domain:read"
-
 
 class CredentialError(RuntimeError):
     """A credential request or its destination could not be authorized."""
@@ -34,19 +31,24 @@ class Destination(ToolArguments):
 
     @field_validator("endpoint")
     @classmethod
-    def loopback(cls, value: str) -> str:
-        if value == DIGITALOCEAN_ORIGIN:
-            return value
+    def valid_destination(cls, value: str) -> str:
         address = urlsplit(value)
         if (
-            address.scheme != "http"
-            or address.hostname not in ("127.0.0.1", "::1")
-            or address.port is None
+            not address.hostname
+            or not (
+                address.scheme == "https"
+                or (
+                    address.scheme == "http"
+                    and address.hostname in ("127.0.0.1", "::1")
+                    and address.port is not None
+                )
+            )
+            or any(c in value for c in ("\\", "\r", "\n"))
             or address.username is not None
             or address.query
             or address.fragment
         ):
-            raise ValueError("Use a loopback MCP URL or the supported DigitalOcean API origin")
+            raise ValueError("Use an HTTPS endpoint or a literal loopback HTTP endpoint")
         return value
 
 
@@ -56,15 +58,6 @@ class Credentials:
         self.state = state
 
     def authorize(self, connector: str, destination: Destination) -> None:
-        if destination.endpoint == DIGITALOCEAN_ORIGIN:
-            with self.state.transaction() as db:
-                row = db.execute(
-                    "SELECT endpoint,secret_ref FROM connector_approvals WHERE connector=?",
-                    (connector,),
-                ).fetchone()
-            if row and tuple(row) == (destination.endpoint, destination.secret_ref):
-                return
-            raise CredentialError("Approve the DigitalOcean connector destination first")
         try:
             bindings = json.loads((self.settings.directory / "connector-bindings.json").read_text())
             binding = Destination.model_validate(bindings.get(connector))
@@ -74,13 +67,22 @@ class Credentials:
             raise CredentialError("Catalog destination differs from its owner-authorized binding")
 
     def require(
-        self, task: str, connector: str, destination: Destination, *, replace: bool = False
+        self,
+        task: str,
+        connector: str,
+        destination: Destination,
+        *,
+        replace: bool = False,
+        operation: str = "",
+        scope: str = "",
     ) -> str | None:
-        self.authorize(connector, destination)
+        if not operation:
+            self.authorize(connector, destination)
         file = self.settings.directory / "secrets" / destination.secret_ref
         with self.state.transaction(write=True) as db:
             existing = db.execute(
-                "SELECT * FROM credential_requests WHERE task=? AND connector=?", (task, connector)
+                "SELECT * FROM credential_requests WHERE task=? AND connector=? AND secret_ref=?",
+                (task, connector, destination.secret_ref),
             ).fetchone()
             if existing and (existing["endpoint"], existing["secret_ref"]) != (
                 destination.endpoint,
@@ -94,10 +96,21 @@ class Credentials:
             if not replace and file.is_file() and (not existing or existing["supplied"]):
                 return file.read_text()
             if not existing:
+                if db.execute(
+                    "SELECT 1 FROM credential_requests WHERE task=? AND supplied=0", (task,)
+                ).fetchone():
+                    return None
                 request_id = str(uuid4())
                 db.execute(
-                    "INSERT INTO credential_requests(id,task,connector,endpoint,secret_ref) VALUES (?,?,?,?,?)",
-                    (request_id, task, connector, destination.endpoint, destination.secret_ref),
+                    "INSERT INTO credential_requests(id,task,connector,endpoint,secret_ref,operation) VALUES (?,?,?,?,?,?)",
+                    (
+                        request_id,
+                        task,
+                        connector,
+                        destination.endpoint,
+                        destination.secret_ref,
+                        operation,
+                    ),
                 )
                 evidence = {
                     "action": "credential_requested",
@@ -105,13 +118,14 @@ class Credentials:
                     "connector": connector,
                     "destination": destination.endpoint,
                 }
-                if destination.endpoint == DIGITALOCEAN_ORIGIN:
-                    evidence["scope"] = DIGITALOCEAN_SCOPE
-                    evidence["label"] = "DigitalOcean API token"
+                if operation:
+                    evidence.update(
+                        operation=operation, scope=scope, label=f"Token for {operation}"
+                    )
                 reason = (
-                    "DigitalOcean rejected the token. Supply a token with domain:read."
-                    if replace
-                    else f"Provide a credential for {connector}."
+                    f"Supply a credential for {operation or connector} at {destination.endpoint}."
+                    if not replace
+                    else "The provider rejected this credential. Supply a replacement."
                 )
                 self.state.append(db, task, "waiting", reason, evidence)
             return None
@@ -129,7 +143,8 @@ class Credentials:
                 destination = Destination(endpoint=row["endpoint"], secret_ref=row["secret_ref"])
             except ValidationError:
                 raise CredentialError("Stored credential destination is invalid") from None
-            self.authorize(row["connector"], destination)
+            if not row["operation"]:
+                self.authorize(row["connector"], destination)
             directory = self.settings.directory / "secrets"
             target = directory / destination.secret_ref
             if row["supplied"]:

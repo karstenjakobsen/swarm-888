@@ -94,7 +94,9 @@ for line in sys.stdin:
                         "id": "answer",
                         "phase": "final_answer",
                         "text": json.dumps(
-                            {
+                            {"objectives": []}
+                            if "objectives" in request["params"]["outputSchema"]["properties"]
+                            else {
                                 "status": "answered",
                                 "text": "The signed-in worker handled the queued task.",
                             }

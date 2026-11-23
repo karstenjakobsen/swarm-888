@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { ChevronDown } from 'lucide-react'
 import type { TrailItem } from '@/lib/operator/project'
 import { clock } from '@/lib/operator/format'
@@ -109,6 +110,7 @@ function Row({ item, highlight, dot }: { item: TrailItem; highlight: boolean; do
       ) : (
         <div className="flex flex-col gap-1">{body}</div>
       )}
+      {item.link && <Link href={item.link.href} className="text-sm underline underline-offset-4">{item.link.label}</Link>}
     </div>
   )
 }

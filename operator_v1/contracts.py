@@ -122,11 +122,11 @@ class Event(BaseModel):
                 return Outcome(
                     key="needs-you", label="Waiting for you", seq=self.seq, why=self.text
                 )
-            if self.data.get("action") == "dns_approval_required":
-                return Outcome(key="needs-you", label="Needs approval", seq=self.seq, why=self.text)
             return Outcome(key="needs-you", label="Needs a credential", seq=self.seq, why=self.text)
         if self.kind == "stopped":
             return Outcome(key="stopped", label="Stopped", seq=self.seq, why=self.text)
+        if self.kind == "completed" and self.data.get("proof"):
+            return Outcome(key="verified", label="Verified", seq=self.seq, why=self.text)
         label = "Answered" if self.data.get("modeled") else "Acknowledged"
         return Outcome(key="unverified", label=label, seq=self.seq, why=self.text)
 
@@ -154,6 +154,12 @@ class BuiltinSkillInfo(BaseModel):
     guide: str
 
 
+class ConnectorToolInfo(BaseModel):
+    name: str
+    description: str
+    access: Literal["read", "write"]
+
+
 class CatalogItemInfo(BaseModel):
     canonical_id: str
     name: str
@@ -162,6 +168,7 @@ class CatalogItemInfo(BaseModel):
     active_revision: str | None = None
     guide: str | None = None
     instructions: str | None = None
+    operations: list[ConnectorToolInfo] = Field(default_factory=list)
 
 
 class CatalogConnectionInfo(CatalogInfo):

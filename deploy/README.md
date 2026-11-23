@@ -34,7 +34,24 @@ If the Codex worker shows **Sign-in required**, choose **Connect** or **Reconnec
 
 Choose **Disconnect** to sign the worker out of ChatGPT. The worker finishes its current task before signing out and holds new model tasks until you reconnect.
 
-With a Connectors catalog connected, ask the operator to list DNS records for a zone using DigitalOcean. The worker saves the task and drafts the connector with its usage instructions in the local catalog. Review the destination and read-only scope on the task page, then supply a token with `domain:read` in the credential dialog. The task resumes with a live DNS read. After verification it appears in **Completed work**, and the operator reviews the evidence to decide what to keep in **Inspect → Memory**. Use the catalog publish preview if you want to publish the connector.
+Connect the external Connectors catalog and pull the branch containing the HTTP operation manifests. The DigitalOcean connector in `packages-888/digitalocean-dns/operator.yaml` owns both DNS listing and record creation. Asking the operator to add a capability runs fixtures locally. Asking it to create a specific record makes a provider call and reads the record back. The first live use of each operation prompts for its credential.
+
+The Codex worker runs as the operator service account. For host administration, set `operator_admin_operations` in the Ansible inventory. The playbook installs it as root-owned `/etc/swarm-operator/admin-operations.json`. The `swarm-operator-admin.socket` service executes only delegated commands and permitted argument lists as root. The default inventory delegates zero host commands. For example, this inventory entry delegates restart and verification of one owned service.
+
+```yaml
+operator_admin_operations:
+  restart-example:
+    description: Restart the example service and verify that it is active.
+    access: write
+    command:
+      executable: /usr/bin/systemctl
+      commands:
+        - prefix: [restart, example.service]
+    observe: [/usr/bin/systemctl, is-active, example.service]
+    expected: active
+```
+
+The model discovers these operations with `host_operations` and can use them directly or from a tested catalog skill. The worker journals the dispatch before execution.
 
 On a fresh install, open **Connect a catalog** and use **Generate deploy key** to provision the SSH identity as the unprivileged controller account. Register the displayed public key on the GitHub repository before connecting. The private key stays in the VPS state directory and is provisioned separately after a restore.
 

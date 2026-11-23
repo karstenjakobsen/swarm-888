@@ -17,7 +17,11 @@ def read_project(catalog: Catalog | None, state: State, task: str | None, projec
     binding = catalogs.for_kind("project")
     if binding:
         item = binding.item("project", catalogs.canonical_id("project", project))
-        revision, definition, source = binding.revision, item.manifest, binding.source(item)
+        revision, definition, source = (
+            binding.item_revision(item),
+            item.manifest,
+            binding.source(item),
+        )
     else:
         if catalog is None:
             raise CatalogError("Connect a projects catalog first")

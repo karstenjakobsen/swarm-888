@@ -41,11 +41,12 @@ export function ConnectorView({ id }: { id: string }) {
         {!loaded || (!connector && mode === 'live' && !items) ? (
           <div className="h-40 animate-pulse rounded-xl bg-card" aria-busy="true" />
         ) : connector ? (
-          <Detail c={connector} state={state} instructions={item?.instructions} />
+          <Detail c={item?.operations?.length ? { ...connector, tools: item.operations, provider: 'HTTP', scope: 'See the access listed for each operation.' } : connector} state={state} instructions={item?.instructions} />
         ) : item ? (
           <article className="flex flex-col gap-7">
             <h1 className="text-2xl font-semibold">{item.name}</h1>
             {item.instructions && <Instructions text={item.instructions} />}
+            {item.operations?.length ? <Operations tools={item.operations} /> : null}
           </article>
         ) : (
           <p className="text-muted-foreground">No connector with this id.</p>
@@ -154,27 +155,7 @@ function Detail({ c, state, instructions }: { c: Connector; state: Projection; i
         </div>
       </section>
 
-      <section className="flex flex-col gap-2">
-        <h2 className="text-xs font-medium text-muted-foreground">Tools it exposes</h2>
-        <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
-          {c.tools.map((t) => (
-            <li key={t.name} className="flex items-start gap-3 px-4 py-3">
-              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="break-all font-mono text-sm">{t.name}</span>
-                <span className="text-pretty text-xs leading-relaxed text-muted-foreground">{t.description}</span>
-              </span>
-              <span
-                className={cn(
-                  'shrink-0 rounded px-1.5 py-0.5 font-mono text-xs',
-                  t.access === 'write' ? 'bg-attention/15 text-attention' : 'bg-secondary text-muted-foreground',
-                )}
-              >
-                {t.access}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </section>
+      <Operations tools={c.tools} />
 
       <section className="flex flex-col gap-2">
         <h2 className="text-xs font-medium text-muted-foreground">Successful uses</h2>
@@ -197,5 +178,31 @@ function Detail({ c, state, instructions }: { c: Connector; state: Projection; i
         )}
       </section>
     </article>
+  )
+}
+
+function Operations({ tools }: { tools: Connector['tools'] }) {
+  return (
+  <section className="flex flex-col gap-2">
+    <h2 className="text-xs font-medium text-muted-foreground">Tools it exposes</h2>
+    <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+      {tools.map((t) => (
+        <li key={t.name} className="flex items-start gap-3 px-4 py-3">
+          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="break-all font-mono text-sm">{t.name}</span>
+            <span className="text-pretty text-xs leading-relaxed text-muted-foreground">{t.description}</span>
+          </span>
+          <span
+            className={cn(
+              'shrink-0 rounded px-1.5 py-0.5 font-mono text-xs',
+              t.access === 'write' ? 'bg-attention/15 text-attention' : 'bg-secondary text-muted-foreground',
+            )}
+          >
+            {t.access}
+          </span>
+        </li>
+      ))}
+    </ul>
+  </section>
   )
 }

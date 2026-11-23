@@ -72,18 +72,13 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
       return {...meta, ref, type: 'incident.unknown', data: {summary: event.text}}
     }
   }
-  if (data?.action === 'dns_approval_required' && typeof data.zone === 'string'
-    && typeof data.destination === 'string' && typeof data.scope === 'string') {
-    return { ...meta, type: 'task.waiting',
-      data: { on: 'decision', approval: { zone: data.zone, destination: data.destination, scope: data.scope } } }
-  }
-  if (data?.action === 'dns_approved') {
-    return { ...meta, type: 'task.resumed', data: { reason: event.text } }
-  }
-  if (data?.action === 'dns_verified' && typeof data.zone === 'string') {
-    return { ...meta, type: 'task.verification',
-      data: { result: 'passed', method: 'independent', check: event.text,
-        command: 'GET /v2/domains/' + data.zone + '/records', output: event.text } }
+  if (data?.action === 'package_activated' && typeof data.revision === 'string' && Array.isArray(data.tests)) {
+    const project = typeof data.project === 'string'
+    const id = project ? data.project : data.connector
+    if (typeof id === 'string') return { ...meta, type: 'task.step', data: {
+      summary: event.text, output: data.tests.join('\n'),
+      package: { id, kind: project ? 'project' : 'connector', revision: data.revision },
+    }}
   }
   if (data?.action === 'credential_requested' && typeof data.request === 'string'
     && typeof data.connector === 'string' && typeof data.destination === 'string') {
@@ -105,10 +100,10 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
       const tools = data.tools.flatMap(tool => {
         if (!tool || typeof tool !== 'object' || Array.isArray(tool)
           || typeof tool.name !== 'string' || typeof tool.description !== 'string') return []
-        return [{name: tool.name, description: tool.description, access: 'read' as const}]
+        return [{name: tool.name, description: tool.description, access: tool.access === 'write' ? 'write' as const : 'read' as const}]
       })
       return { ...meta, ref, type: 'connector.configured',
-        data: { name: data.name, provider: 'MCP', tools, scope: 'Read-only MCP',
+        data: { name: data.name, provider: typeof data.provider === 'string' ? data.provider : 'MCP', tools, scope: typeof data.scope === 'string' ? data.scope : 'Read-only MCP',
           credential: {label: 'Bearer token', storage: 'Private operator vault', fingerprint: data.fingerprint},
           catalog: data.catalog } }
     }
@@ -117,7 +112,7 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
         data: {task: event.task, tool: data.tool, summary: event.text, output: JSON.stringify(data.result, null, 2)} }
     }
   }
-  if (data?.action === 'project_read' && typeof data.project === 'string'
+  if ((data?.action === 'project_read' || data?.action === 'project_registered') && typeof data.project === 'string'
     && typeof data.name === 'string' && typeof data.description === 'string'
     && typeof data.hostname === 'string' && typeof data.repo === 'string'
     && typeof data.upstream === 'string' && readSource(data.catalog)) {
@@ -125,7 +120,7 @@ function evidenceEvent(meta: Pick<OperatorEvent, 'seq' | 'at' | 'ref' | 'outcome
       data: {name: data.name, description: data.description, hostname: data.hostname,
         repo: data.repo, upstream: data.upstream, catalog: data.catalog} }
   }
-  if (data?.action === 'docker_grade' && typeof data.command === 'string' && typeof data.output === 'string') {
+  if (event.kind === 'verified' && !data?.skill && typeof data?.command === 'string' && typeof data.output === 'string') {
     return { ...meta, type: 'task.verification',
       data: { result: 'passed', method: 'independent', check: event.text, command: data.command, output: data.output } }
   }
@@ -218,10 +213,6 @@ async function post(path: string, body: unknown) {
 
 export async function signIn(key: string) {
   await post('/api/session', { key } satisfies API['OwnerLogin'])
-}
-
-export async function approveDns(task: string) {
-  await post('/api/tasks/' + encodeURIComponent(task) + '/approve-dns', {})
 }
 
 export async function readWorkerStatus(signal: AbortSignal): Promise<API['WorkerStatus']> {

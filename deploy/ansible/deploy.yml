@@ -22,10 +22,13 @@
     operator_home: /var/lib/swarm-operator
     operator_state: "{{ operator_home }}/state"
     operator_worker_mode: acknowledge
+    operator_admin_operations: {}
     bootstrap_acceptance_catalog: false
     node_home: "{{ toolchain }}/node-v{{ node_version }}-linux-x64"
     node_archive: "node-v{{ node_version }}-linux-x64.tar.xz"
     unit_names:
+      - swarm-operator-admin.socket
+      - swarm-operator-admin@.service
       - swarm-operator-controller.service
       - swarm-operator-worker.service
       - swarm-operator-web.service
@@ -251,6 +254,14 @@
         group: root
         mode: '0600'
       notify: Restart the operator target
+
+    - name: Install owner-delegated host operations
+      ansible.builtin.copy:
+        content: "{{ operator_admin_operations | to_nice_json }}\n"
+        dest: /etc/swarm-operator/admin-operations.json
+        owner: root
+        group: root
+        mode: '0600'
 
     - name: Install the operator systemd units
       ansible.builtin.copy:

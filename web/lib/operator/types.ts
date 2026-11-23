@@ -67,7 +67,7 @@ type DataMap = {
   }
   'task.received': { title: string; source: 'owner' | 'schedule' | 'incident'; request?: string }
   'task.understood': { interpretation: string; plan: string[] }
-  'task.step': { summary: string; command?: string; output?: string; routine?: boolean; skill?: SkillRef }
+  'task.step': { summary: string; command?: string; output?: string; routine?: boolean; package?: {id: string; kind: 'project' | 'connector'; revision: string}; skill?: SkillRef }
   'task.answered': { text: string }
   'task.verification': {
     result: 'passed' | 'failed'
@@ -80,7 +80,6 @@ type DataMap = {
   'task.waiting': {
     on: 'credential' | 'decision' | 'reply' | 'sign-in'
     question?: string
-    approval?: { zone: string; destination: string; scope: string }
   }
   'task.resumed': { reason: string; reviewingAnswer?: boolean }
   'task.completed': { summary: string }

@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -8,19 +10,20 @@ from mcp.client.streamable_http import streamable_http_client
 from pydantic import Field, JsonValue, ValidationError
 
 from .catalog import Catalog, CatalogError, display_remote
-from .catalog_definitions import ConnectorDefinition
+from .catalog_definitions import ConnectorDefinition, ToolName
 from .catalog_manifest import ConnectorManifest
 from .credentials import (
-    DIGITALOCEAN_ORIGIN,
     CredentialError,
     CredentialRequired,
     Credentials,
     Destination,
     fingerprint,
 )
-from .digitalocean import TokenRejected, list_dns_records
+from .effects import Dispatch
+from .http_operations import TokenRejected, execute_http
 from .skill_program import SkillReference
 from .state import State
+from .task_objectives import allow_write
 from .tool_types import ToolArguments
 from .typed_catalogs import TypedCatalogs
 
@@ -31,6 +34,10 @@ class ConnectorReference(ToolArguments):
 
 class ConnectorRead(ConnectorReference):
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ConnectorInvoke(ConnectorRead):
+    operation: ToolName
 
 
 @dataclass(frozen=True)
@@ -67,7 +74,10 @@ class ConnectorService:
             item = binding.item("connector", catalogs.canonical_id("connector", reference))
             assert isinstance(item.manifest, ConnectorManifest)
             return Connector(
-                item.manifest.canonical_id, item.manifest, binding.revision, binding.source(item)
+                item.manifest.canonical_id,
+                item.manifest,
+                binding.item_revision(item),
+                binding.source(item),
             )
         if self.catalog is None:
             raise CatalogError("Connect a connectors catalog first")
@@ -132,7 +142,8 @@ class ConnectorService:
                 }
                 for item in connectors
                 if all(
-                    word in f"{item.id} {item.definition.name} {item.definition.tool}".casefold()
+                    word
+                    in f"{item.id} {item.definition.name} {item.definition.tool} {' '.join(item.definition.operations)}".casefold()
                     for word in words
                 )
             ]
@@ -145,6 +156,9 @@ class ConnectorService:
             "name": connector.definition.name,
             "tool": connector.definition.tool,
             "instructions": connector.definition.instructions,
+            "definition": connector.definition.model_dump(
+                exclude={"schema_version", "kind", "canonical_id"}
+            ),
             "catalog": connector.source,
             "revision": connector.revision,
         }
@@ -165,23 +179,65 @@ class ConnectorService:
                 )
         return result
 
-    def read(self, args: ConnectorRead, *, expected_destination: Destination | None = None) -> dict:
+    def read(self, args: ConnectorRead, *, operation: str | None = None) -> dict:
         if not self.task:
             raise CredentialError("Connector calls require a task")
         connector = self.connector(args.connector)
         config = connector.definition
+        name = operation or config.tool
+        op = config.operations.get(name)
+        if operation and not op:
+            raise CredentialError("Choose an operation declared by this connector")
+        if op and op.method != "GET" and operation is None:
+            raise CredentialError("Use connector_invoke for a write operation")
         normal = Destination(endpoint=config.endpoint, secret_ref=config.secret_ref)
-        if expected_destination is not None and normal != expected_destination:
-            raise CredentialError("The catalog connector no longer matches the approved DNS plan")
-        secret = self.credentials.require(self.task, args.connector, normal)
+        credential_info = {}
+        dispatch = None
+        receipt = None
+        if op:
+            # A catalog change cannot redirect an already stored bearer token.
+            contract = [
+                connector.id,
+                config.endpoint,
+                config.secret_ref,
+                name,
+                op.model_dump(exclude={"tests", "description"}),
+            ]
+            digest = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
+            normal = Destination(endpoint=config.endpoint, secret_ref="op-" + digest[:44])
+            credential_info = {"operation": name, "scope": f"{op.scope} ({op.method} {op.path})"}
+            if op.method != "GET":
+                allow_write(self.state, self.task)
+                dispatch = Dispatch(self.state, self.task, ["http", digest, args.arguments])
+                saved = dispatch.saved()
+                if saved and "result" in saved:
+                    return {"tool": name, "result": saved["result"]}
+                receipt = saved["receipt"] if saved else None
+        secret = self.credentials.require(self.task, connector.id, normal, **credential_info)
         if not secret:
             raise CredentialRequired("Waiting for the owner to supply a credential")
         parameters = {"Authorization": f"Bearer {secret}"}
+
         try:
-            tools, payload = asyncio.run(self.call(config, parameters, args.arguments))
+            if op:
+                tools = config.tools()
+                with httpx.Client(
+                    base_url=config.endpoint,
+                    headers=parameters,
+                    timeout=config.timeout,
+                    trust_env=False,
+                    follow_redirects=False,
+                ) as http:
+                    payload = execute_http(
+                        http, op, args.arguments, dispatch=dispatch, receipt=receipt
+                    )
+            else:
+                tools, payload = asyncio.run(self.call(config, parameters, args.arguments))
         except TokenRejected:
-            self.credentials.require(self.task, args.connector, normal, replace=True)
-            raise CredentialRequired("Waiting for a replacement DigitalOcean token") from None
+            self.credentials.require(
+                self.task, connector.id, normal, replace=True, **credential_info
+            )
+            raise CredentialRequired("Waiting for a replacement credential") from None
         except TimeoutError:
             with self.state.transaction(write=True) as db:
                 self.state.append(
@@ -199,12 +255,16 @@ class ConnectorService:
             "action": "connector_configured",
             "connector": args.connector,
             "name": config.name,
+            "provider": "HTTP" if op else "MCP",
+            "scope": op.scope if op else "Read-only MCP",
             "tools": redact(tools, secret),
             "fingerprint": fingerprint(secret),
             "catalog": connector.source,
             "revision": connector.revision,
         }
         with self.state.transaction(write=True) as db:
+            if dispatch:
+                dispatch.finish(db, payload)
             self.state.append(
                 db, self.task, "evidence", f"Discovered tools for {config.name}.", fields
             )
@@ -212,15 +272,20 @@ class ConnectorService:
                 db,
                 self.task,
                 "evidence",
-                f"Read {config.name} using {config.tool}.",
+                f"Verified {config.name} using {name}."
+                if dispatch
+                else f"Read {config.name} using {name}.",
                 {
                     "action": "connector_used",
                     "connector": args.connector,
-                    "tool": config.tool,
+                    "tool": name,
+                    "revision": connector.revision,
+                    "verified_write": bool(dispatch),
+                    "arguments": redact(args.arguments, secret),
                     "result": payload,
                 },
             )
-        return {"tool": config.tool, "result": payload}
+        return {"tool": name, "result": payload}
 
     async def call(
         self,
@@ -229,18 +294,6 @@ class ConnectorService:
         arguments: dict[str, JsonValue],
     ) -> tuple[list[JsonValue], JsonValue]:
         async with asyncio.timeout(config.timeout):
-            if config.endpoint == DIGITALOCEAN_ORIGIN:
-                async with httpx.AsyncClient(
-                    headers=headers, trust_env=False, follow_redirects=False
-                ) as http:
-                    records = await list_dns_records(http, arguments)
-                return [
-                    {
-                        "name": config.tool,
-                        "description": "List all DNS records in one DigitalOcean zone.",
-                        "access": "read",
-                    }
-                ], records
             async with (
                 httpx.AsyncClient(headers=headers, trust_env=False, follow_redirects=False) as http,
                 streamable_http_client(

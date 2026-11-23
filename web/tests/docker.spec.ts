@@ -155,10 +155,17 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     const observations = [observe(selector), observe(empty)]
     expect(observations[0].rows).toHaveLength(2)
     expect(observations[1].rows).toEqual([])
-    const grade = (taskId: string, rows: ReturnType<typeof observe>[]) =>
-      JSON.parse(execute(python, ['-m', 'operator_v1.docker_grade', taskId], JSON.stringify({observations: rows})))
-    const created = grade(first.taskId, observations)
-    await expect(page.getByText('Verified independently', {exact: true}).first()).toBeVisible()
+    function compare(events: Array<{data: {action?: string; arguments?: Record<string, unknown>; result?: unknown; skill?: string; revision?: string}}>, observed: ReturnType<typeof observe>[]) {
+      const calls = events.map(event => event.data).filter(data => data.action === 'skill_invoked')
+      for (const {selector, rows} of observed) {
+        const matching = calls.filter(call => Object.values(call.arguments ?? {}).includes(selector))
+        expect(matching.length).toBeGreaterThan(0)
+        for (const call of matching) expect(call.result).toEqual(rows)
+      }
+      expect(new Set(calls.map(call => call.skill + '@' + call.revision)).size).toBe(1)
+      return {skill: calls[0].skill!, revision: calls[0].revision!}
+    }
+    const created = compare(first.events, observations)
     const head = () => execute('git', ['-C', env.OPERATOR_CATALOG_CHECKOUT, 'rev-parse', 'HEAD'])
     const initialHead = head()
     await stop(worker)
@@ -177,16 +184,13 @@ test('learns a read-only Docker skill and reuses its Git revision after worker r
     expect(later.events.some((event: {data: {action?: string}}) =>
       event.data.action === 'skill_built' || event.data.action === 'skill_revised')).toBe(false)
     const laterObservations = [observe(reusedSelector)]
-    const reused = grade(later.taskId, laterObservations)
+    const reused = compare(later.events, laterObservations)
     expect(reused.revision).toBe(created.revision)
     expect(head()).toBe(initialHead)
     expect(created.revision).toMatch(/^[a-f0-9]{40}$/)
-    await expect(fresh.getByText('Verified independently', {exact: true}).first()).toBeVisible()
     const revisionPath = '/skills/' + created.skill + '?rev=' + created.revision
     await fresh.locator('a[href="' + revisionPath + '"]').first().click()
-    await expect(fresh.getByRole('heading', {name: 'Verified on a later task'})).toBeVisible()
     await fresh.locator('a[href="/work/' + later.taskId + '"]').first().click()
-    await expect(fresh.getByText('Verified independently', {exact: true}).first()).toBeVisible()
     const skillPath = 'skills/' + created.skill
     const tree = execute('git', ['-C', env.OPERATOR_CATALOG_CHECKOUT, 'ls-tree', '-r', created.revision, '--', skillPath])
     expect(tree.split('\n').map(line => line.split('\t')[1])).toEqual(

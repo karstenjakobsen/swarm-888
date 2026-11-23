@@ -36,10 +36,6 @@ SKILL_SCHEMA = (
 )
 
 
-VERIFICATION_SCHEMA = """CREATE TABLE docker_grades(task TEXT PRIMARY KEY REFERENCES tasks(id),
-       skill TEXT NOT NULL, revision TEXT NOT NULL, selector TEXT NOT NULL,
-       FOREIGN KEY(skill, revision) REFERENCES skill_revisions(skill, revision))"""
-
 ACTIVATION_SCHEMA = (
     """CREATE TABLE skill_activations(id INTEGER PRIMARY KEY, skill TEXT NOT NULL,
        revision TEXT NOT NULL, task TEXT REFERENCES tasks(id), at TEXT NOT NULL, action TEXT NOT NULL,
@@ -73,7 +69,7 @@ CREDENTIAL_SCHEMA = """CREATE TABLE credential_requests(
     id TEXT PRIMARY KEY, task TEXT NOT NULL REFERENCES tasks(id), connector TEXT NOT NULL,
     endpoint TEXT NOT NULL, secret_ref TEXT NOT NULL, supplied INTEGER NOT NULL DEFAULT 0,
     resume_needed INTEGER NOT NULL DEFAULT 1,
-    UNIQUE(task,connector))"""
+    operation TEXT NOT NULL DEFAULT '', UNIQUE(task,connector,secret_ref))"""
 
 GOAL_SCHEMA = (
     "ALTER TABLE skill_revisions ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'",
@@ -123,13 +119,6 @@ CATALOG_MIGRATION_SCHEMA = (
        kind TEXT NOT NULL, legacy_id TEXT NOT NULL, canonical_id TEXT NOT NULL,
        PRIMARY KEY(kind,legacy_id))""",
 )
-DNS_SCHEMA = (
-    """CREATE TABLE dns_requests(
-       task TEXT PRIMARY KEY REFERENCES tasks(id), zone TEXT NOT NULL, connector TEXT,
-       phase TEXT NOT NULL CHECK(phase IN ('preparing','approval','approved')))""",
-    """CREATE TABLE connector_approvals(
-       connector TEXT PRIMARY KEY, endpoint TEXT NOT NULL, secret_ref TEXT NOT NULL)""",
-)
 
 
 class RequestConflict(ValueError):
@@ -143,7 +132,7 @@ class State:
         self.path = settings.directory / "operator.sqlite3"
         with self.transaction(write=True) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 16:
+            if version > 17:
                 raise ValueError(f"Unsupported state schema {version}")
             if version == 0:
                 for statement in SCHEMA:
@@ -155,8 +144,6 @@ class State:
             if version < 2:
                 for statement in SKILL_SCHEMA:
                     db.execute(statement)
-            if version < 3:
-                db.execute(VERIFICATION_SCHEMA)
             if version < 4:
                 for statement in ACTIVATION_SCHEMA:
                     db.execute(statement)
@@ -186,12 +173,22 @@ class State:
             if version < 14:
                 for statement in CATALOG_MIGRATION_SCHEMA:
                     db.execute(statement)
-            if version < 15:
-                for statement in DNS_SCHEMA:
-                    db.execute(statement)
             if version < 16:
                 self.migrate_model_runs(db)
-                db.execute("PRAGMA user_version=16")
+            if version < 17:
+                # Each operation may require a different credential, even in the same task.
+                if version >= 7:
+                    db.execute("ALTER TABLE credential_requests RENAME TO previous_credentials")
+                    db.execute(CREDENTIAL_SCHEMA)
+                    columns = "id,task,connector,endpoint,secret_ref,supplied,resume_needed"
+                    db.execute(
+                        f"INSERT INTO credential_requests({columns}) SELECT {columns} FROM previous_credentials"
+                    )
+                    db.execute("DROP TABLE previous_credentials")
+                db.execute("""CREATE TABLE IF NOT EXISTS connector_dispatches(
+                    task TEXT NOT NULL REFERENCES tasks(id), intent TEXT NOT NULL, result TEXT, receipt TEXT,
+                    PRIMARY KEY(task,intent))""")
+                db.execute("PRAGMA user_version=17")
 
     def migrate_model_runs(self, db: sqlite3.Connection) -> None:
         db.execute("""CREATE TABLE model_runs(task TEXT PRIMARY KEY REFERENCES tasks(id),
@@ -291,8 +288,6 @@ class State:
                 """SELECT id,checkpoint FROM tasks WHERE checkpoint!='completed'
                    AND NOT EXISTS(SELECT 1 FROM credential_requests AS c WHERE c.task=tasks.id
                                   AND NOT c.supplied)
-                   AND NOT EXISTS(SELECT 1 FROM dns_requests AS d WHERE d.task=tasks.id
-                                  AND d.phase='approval')
                    AND NOT EXISTS(SELECT 1 FROM model_runs r WHERE r.task=tasks.id AND r.phase='waiting')
                    AND (? OR NOT EXISTS(SELECT 1 FROM model_runs WHERE task=tasks.id))
                    AND (NOT ? OR EXISTS(SELECT 1 FROM operations WHERE task=tasks.id))
@@ -309,7 +304,10 @@ class State:
                 db.execute(
                     """UPDATE model_runs SET phase='reply',turn_id=NULL,instruction=?
                            WHERE task=?""",
-                    ("The requested credential was supplied. Continue the pending read.", task),
+                    (
+                        "The requested credential was supplied. Continue the pending operation.",
+                        task,
+                    ),
                 )
             db.execute(
                 "UPDATE credential_requests SET resume_needed=0 WHERE task=? AND supplied",
@@ -327,6 +325,9 @@ class State:
                 "SELECT phase,turn_id,instruction FROM model_runs WHERE task=?", (task,)
             ).fetchone()
             if run and run["phase"] != "reply":
+                if run["phase"] == "active" and self.planning_pending(db, task):
+                    # Planning has no tools. Restart it after sign-in or a process interruption.
+                    return "start", None, run["instruction"]
                 if run["phase"] != "waiting":
                     last = db.execute(
                         "SELECT kind,data FROM events WHERE task=? ORDER BY seq DESC LIMIT 1",
@@ -350,6 +351,49 @@ class State:
                 (task,),
             )
             return "start", None, run["instruction"] if run else None
+
+    @staticmethod
+    def planning_pending(db, task: str) -> bool:
+        row = db.execute(
+            """SELECT json_extract(data,'$.action') FROM events WHERE task=?
+            AND json_extract(data,'$.action') IN ('objective_planning','task_objectives')
+            ORDER BY seq DESC LIMIT 1""",
+            (task,),
+        ).fetchone()
+        return bool(row and row[0] == "objective_planning")
+
+    def continue_unverified(self, task: str, reason: str) -> None:
+        with self.transaction(write=True) as db:
+            if (
+                not db.execute(
+                    "SELECT 1 FROM tasks WHERE id=? AND checkpoint='running'", (task,)
+                ).fetchone()
+                or db.execute(
+                    "SELECT 1 FROM credential_requests WHERE task=? AND resume_needed", (task,)
+                ).fetchone()
+            ):
+                return
+            if self.continue_steers(db, task):
+                return
+            latest = db.execute(
+                """SELECT json_extract(data,'$.action') FROM events WHERE task=?
+                AND (kind='owner_message' OR json_extract(data,'$.action')='objective_retry')
+                ORDER BY seq DESC LIMIT 1""",
+                (task,),
+            ).fetchone()
+            if not latest or latest[0] != "objective_retry":
+                instruction = (
+                    reason
+                    + ". Continue this task using the catalog and recorded results. Reconcile any dispatched operation before retrying."
+                )
+                db.execute(
+                    "UPDATE model_runs SET phase='reply',turn_id=NULL,instruction=? WHERE task=?",
+                    (instruction, task),
+                )
+                self.append(db, task, "started", reason, {"action": "objective_retry"})
+            else:
+                db.execute("UPDATE model_runs SET phase='waiting' WHERE task=?", (task,))
+                self.append(db, task, "waiting", reason, {"action": "reply_required"})
 
     def wait_for_reply(self, task: str, question: str) -> None:
         with self.transaction(write=True) as db:
@@ -397,6 +441,19 @@ class State:
                 if last["kind"] == "failed":
                     return
                 data: dict[str, JsonValue] = {"modeled": True} if modeled else {}
+                proof = (
+                    db.execute(
+                        """SELECT data FROM events WHERE task=? AND json_extract(data,'$.action')='objectives_verified'
+                    AND json_extract(data,'$.owner_seq')=(SELECT MAX(seq) FROM events WHERE task=? AND kind='owner_message')
+                    ORDER BY seq DESC LIMIT 1""",
+                        (task, task),
+                    ).fetchone()
+                    if modeled
+                    else None
+                )
+                if proof:
+                    data["proof"] = json.loads(proof[0])["proof"]
+                    summary = "Verified the requested deliverables against the task evidence."
                 self.append(db, task, "answered", answer, data)
                 self.append(db, task, "completed", summary, data)
 

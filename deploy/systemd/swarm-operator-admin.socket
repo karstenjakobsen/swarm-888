@@ -1,0 +1,14 @@
+[Unit]
+Description=Delegated operator host administration
+PartOf=swarm-operator.target
+
+[Socket]
+ListenStream=/run/swarm-operator-admin.sock
+SocketUser=root
+SocketGroup=swarm-operator
+SocketMode=0660
+Accept=yes
+RemoveOnStop=yes
+
+[Install]
+WantedBy=swarm-operator.target

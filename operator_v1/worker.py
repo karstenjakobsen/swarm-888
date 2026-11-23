@@ -11,8 +11,6 @@ from typing import Any
 from pydantic import ValidationError
 
 from .config import Settings
-from .digitalocean import requested_zone
-from .dns_workflow import DnsWorkflow
 from .goals import StandingGoals
 from .memory_review import MemoryReview
 from .model import (
@@ -27,6 +25,7 @@ from .model import (
 from .operations import ConfiguredFixtureEngine, Operations
 from .simulated_model import SimulatedModel
 from .state import State
+from .task_objectives import missing_evidence, plan_task
 from .task_review import recover_reply
 from .typed_catalogs import TypedCatalogs
 from .worker_auth import WorkerAuth
@@ -37,7 +36,6 @@ class MessageWorker:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.state = State(settings)
-        self.dns = DnsWorkflow(self.state)
         self.memory_review = MemoryReview(self.state)
         self.next_memory_review = 0.0
         self.operations = Operations(self.state)
@@ -107,6 +105,7 @@ class MessageWorker:
                 except ModelError as error:
                     failure = error
             raise failure
+        await plan_task(self.state, task)
         async with codex_session(self.settings, task, self.state.profile()) as session:
             return await self.run_turn(session, task, instruction)
 
@@ -123,6 +122,9 @@ class MessageWorker:
                 reply = TaskReply.model_validate_json(raw)
             else:
                 reply = await recover_reply(self.state, task, turn_id, legacy=phase == "legacy")
+            if reply.status == "answered" and (missing := await missing_evidence(self.state, task)):
+                self.state.continue_unverified(task, missing)
+                return
         except ModelSignInRequired:
             self.auth.require_reconnect()
             with self.state.transaction(write=True) as db:
@@ -140,6 +142,13 @@ class MessageWorker:
                     )
             return
         except errors:
+            with self.state.transaction() as db:
+                planning = self.state.planning_pending(db, task)
+            if planning:
+                self.state.continue_unverified(
+                    task, "Could not establish the task’s requested deliverables."
+                )
+                return
             if phase == "start":
                 # The durable dispatch marker makes the next queue scan inspect evidence
                 # instead of sending the owner's original instruction a second time.
@@ -198,10 +207,6 @@ class MessageWorker:
             self.state.finish(
                 task, "I received your message.", "The worker acknowledged the owner’s message."
             )
-            return
-        if zone := requested_zone(self.state.text(task)):
-            await asyncio.to_thread(self.dns.run, task, zone)
-            self.next_memory_review = 0.0
             return
         if self.mode == "codex":
             await self.run_with_heartbeat(task, self.check_model_task(task))

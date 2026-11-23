@@ -138,9 +138,14 @@ class Skills:
         return self.state.settings.directory / "skill-dependencies.json"
 
     def dependencies(self) -> dict:
-        return {
+        commands = {
             name: [command.model_dump() for command in dependency.commands]
             for name, dependency in load_dependencies(self.dependency_policy).items()
+        }
+        return {
+            **commands,
+            "connector": 'run("connector", connector_id, operation, arguments_json)',
+            "host-admin": 'run("host-admin", delegated_operation, ...argv). Inspect host_operations.',
         }
 
     def scaffold(
@@ -312,6 +317,7 @@ class Skills:
                 input=json.dumps(
                     {
                         "action": action,
+                        "task": self.task,
                         "path": str(self.revision_path(skill, revision)),
                         "policy": str(self.dependency_policy),
                         "arguments": arguments,

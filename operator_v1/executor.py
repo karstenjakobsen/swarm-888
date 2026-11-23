@@ -99,7 +99,14 @@ def lua_result(value: Any, depth: int = 0) -> JsonValue:
 
 
 def execute(
-    program: ExecutableProgram, code: str, arguments: dict, *, policy, test=None
+    program: ExecutableProgram,
+    code: str,
+    arguments: dict,
+    *,
+    policy,
+    test=None,
+    task=None,
+    settings=None,
 ) -> JsonValue:
     if not Draft202012Validator(program.input_schema).is_valid(arguments):
         raise SkillError("Skill arguments do not match this revision's schema")
@@ -146,6 +153,30 @@ def execute(
             if name != expected.dependency or list(argv) != expected.argv:
                 raise SkillError("Command did not match the self-test")
             return expected.stdout
+        if name in ("connector", "host-admin"):
+            if not task or not settings:
+                raise SkillError("A delegated call requires an owner task")
+            from .admin import HostCall, invoke_host
+            from .connectors import ConnectorInvoke, ConnectorService
+            from .state import State
+
+            state = State(settings)
+            if state.stopped(task):
+                raise SkillError("The owner stopped this task")
+            if name == "host-admin" and argv:
+                return json.dumps(
+                    invoke_host(state, task, HostCall(operation=argv[0], argv=list(argv[1:])))
+                )
+            if name == "connector" and len(argv) == 3:
+                call = ConnectorInvoke(
+                    connector=argv[0], operation=argv[1], arguments=json.loads(argv[2])
+                )
+                return json.dumps(
+                    ConnectorService(None, state, task).read(call, operation=call.operation)[
+                        "result"
+                    ]
+                )
+            raise SkillError("Invalid delegated operation arguments")
         if name not in policy:
             raise SkillError(f"Runtime dependency {name} is not configured")
         return run_command(policy[name], list(argv))
@@ -202,8 +233,16 @@ def main() -> None:
                 }
             )
     elif isinstance(program, ExecutableProgram):
+        from .config import Settings
+
+        policy_path = Path(request["policy"])
         result = execute(
-            program, code, request["arguments"], policy=load_dependencies(Path(request["policy"]))
+            program,
+            code,
+            request["arguments"],
+            policy=load_dependencies(policy_path),
+            task=request.get("task"),
+            settings=Settings(policy_path.parent),
         )
     else:
         raise SkillError("File-mode skills run through an authorized standing goal")

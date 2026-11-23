@@ -1,0 +1,13 @@
+[Unit]
+Description=Run an owner-delegated host operation
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/opt/swarm-operator
+ExecStart=/opt/swarm-operator/.venv/bin/python -Es -m operator_v1.admin
+StandardInput=socket
+StandardOutput=socket
+UMask=0077
+NoNewPrivileges=yes
+RuntimeMaxSec=25

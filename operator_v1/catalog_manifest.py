@@ -23,6 +23,8 @@ from yaml.nodes import MappingNode
 from .catalog import Catalog, CatalogError, display_remote
 from .catalog_definitions import ConnectorDefinition, ProjectDefinition
 from .contracts import CatalogKind
+from .credentials import CredentialError
+from .http_operations import test_operation
 from .skill_program import ExecutableProgram, ExecutableTest, Revision, SkillId
 from .tool_types import ToolArguments
 
@@ -182,7 +184,13 @@ def read_manifest(read_file: Callable[[str], str], prefix: str) -> Manifest:
     except (yaml.YAMLError, UnicodeError, RecursionError):
         raise CatalogError(f"Invalid YAML manifest at {path}") from None
     try:
-        return MANIFEST.validate_python(data)
+        manifest = MANIFEST.validate_python(data)
+        if isinstance(manifest, ConnectorManifest):
+            for operation in manifest.operations.values():
+                test_operation(operation, manifest.endpoint)
+        return manifest
+    except CredentialError as error:
+        raise CatalogError(f"Connector fixtures failed at {path}: {error}") from None
     except ValidationError as error:
         fields = sorted(
             {

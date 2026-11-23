@@ -42,6 +42,9 @@ class CatalogBranch:
                 return item
         raise CatalogError(f"No {kind} with that canonical ID in the accepted catalog snapshot")
 
+    def item_revision(self, item: CatalogItem) -> str:
+        return self.catalog.git("log", "-1", "--format=%H", self.revision, "--", item.path).strip()
+
     def source(self, item: CatalogItem) -> dict[str, str]:
         config = self.catalog.config
         return {"repo": display_remote(config.remote), "branch": config.branch, "path": item.path}
@@ -161,6 +164,8 @@ class TypedCatalogs:
         fields: dict,
         *,
         files: dict[str, str] | None = None,
+        base_revision: str | None = None,
+        check_base: bool = False,
     ) -> tuple[CatalogBranch, CatalogItem, str]:
         binding = self.for_kind(kind)
         if binding is None:
@@ -178,6 +183,15 @@ class TypedCatalogs:
                 raise CatalogError("Use an existing canonical ID or a slug for a new item")
             canonical_id = item if current else assign_canonical_id(binding.publisher, kind, item)
             current = items.get(canonical_id)
+            if check_base and base_revision != head and (current or base_revision):
+                if (
+                    not current
+                    or base_revision
+                    != catalog.git("log", "-1", "--format=%H", head, "--", current.path).strip()
+                ):
+                    raise CatalogError(
+                        "The catalog changed. Read the current definition before revising it."
+                    )
             if current and current.manifest.kind != kind:
                 raise CatalogError("An existing catalog item has a different kind")
             relative = Path(current.path) if current else Path(item) / MANIFEST_FILE
@@ -360,8 +374,13 @@ class TypedCatalogs:
                     revision=snapshot.revision,
                     active_revision=active.get(item.manifest.canonical_id)
                     if isinstance(item.manifest, ExecutableSkillManifest)
+                    else binding.item_revision(item)
+                    if kind in ("connector", "project")
                     else None,
                     guide=item.guide,
+                    operations=item.manifest.tools()
+                    if isinstance(item.manifest, ConnectorManifest)
+                    else [],
                     instructions=item.manifest.instructions
                     if isinstance(item.manifest, ConnectorManifest)
                     else None,

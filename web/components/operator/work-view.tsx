@@ -4,7 +4,6 @@ import Link from 'next/link'
 import { useState } from 'react'
 import { BookOpen, Check, CircleSlash, FolderGit2, GraduationCap, PenLine, Plug } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { AccessError, approveDns } from '@/lib/operator/source'
 import { current, Rev, RowLink } from './inspect-parts'
 import { useOperator } from './store'
 import { AppHeader } from './app-header'
@@ -35,7 +34,7 @@ export function WorkView({ id }: { id: string }) {
           <p className="text-muted-foreground">Nothing with this id in the operator&apos;s history.</p>
         )}
       </main>
-      {task && !isTaskFinished(task) && task.waiting?.on !== 'credential' && task.waiting?.on !== 'sign-in' && !task.waiting?.approval ? (
+      {task && !isTaskFinished(task) && task.waiting?.on !== 'credential' && task.waiting?.on !== 'sign-in' ? (
         <Composer taskId={task.id} placeholder={task.waiting?.on === 'reply' ? 'Reply to the operator' : 'Steer this task'} />
       ) : (
         <Composer />
@@ -189,39 +188,6 @@ function Head({ kicker, title, outcome }: { kicker: string; title: string; outco
   )
 }
 
-function DnsApproval({ task, approval }: {
-  task: string
-  approval: NonNullable<NonNullable<Task['waiting']>['approval']>
-}) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-
-  async function approve() {
-    setBusy(true)
-    setError('')
-    try {
-      await approveDns(task)
-    } catch (cause) {
-      setError(cause instanceof AccessError ? cause.message : 'Could not approve the connector. Try again.')
-      setBusy(false)
-    }
-  }
-
-  return (
-    <section aria-label="DigitalOcean approval" className="flex flex-col items-start gap-3 rounded-2xl border border-attention/40 bg-attention/10 p-4">
-      <h2 className="font-medium">Approve DigitalOcean DNS access</h2>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt className="text-muted-foreground">Zone</dt><dd>{approval.zone}</dd>
-        <dt className="text-muted-foreground">Destination</dt><dd className="break-all font-mono text-xs">{approval.destination}</dd>
-        <dt className="text-muted-foreground">Token scope</dt><dd><code>{approval.scope}</code></dd>
-      </dl>
-      <p className="text-sm text-muted-foreground">The operator will ask for your DigitalOcean token if it needs one.</p>
-      <Button onClick={() => void approve()} disabled={busy}>{busy ? 'Approving…' : 'Approve read-only access'}</Button>
-      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-    </section>
-  )
-}
-
 function TaskDetail({ task, state }: { task: Task; state: Projection }) {
   const { send, mode } = useOperator()
   const [stopping, setStopping] = useState(false)
@@ -240,7 +206,6 @@ function TaskDetail({ task, state }: { task: Task; state: Projection }) {
         <Section title="Waiting for your reply"><p>{task.waiting.question}</p></Section>
       )}
 
-      {task.waiting?.approval && !isTaskFinished(task) && <DnsApproval task={task.id} approval={task.waiting.approval} />}
       {task.waiting?.on === 'credential' && cred && !cred.supplied && !isTaskFinished(task) ? (
         <div className="flex flex-col gap-3 rounded-2xl border border-attention/40 bg-attention/10 p-4">
           <p className="text-pretty text-sm leading-relaxed">

@@ -20,9 +20,6 @@ def test_operator_can_choose_to_save_or_skip_a_memory_from_verified_work(tmp_pat
     with state.transaction(write=True) as db:
         for i, task in enumerate(tasks, start=1):
             zone = f"{i}.example.com"
-            db.execute(
-                "INSERT INTO dns_requests VALUES (?, ?, 'test-dns', 'approved')", (task, zone)
-            )
             db.execute("UPDATE tasks SET checkpoint='completed' WHERE id=?", (task,))
             state.append(
                 db,
